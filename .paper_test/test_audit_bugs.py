@@ -46,6 +46,7 @@ import tempfile
 import threading
 import time
 from pathlib import Path
+from write_quality_fixture_lib import audit_fixture
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_bugs", str(WS / "paper_pipeline.py"))
@@ -110,6 +111,7 @@ def build_root(tmp: Path, judges=1, rewrites=1, revises=1):
     shutil.copytree(pristine, root / "runs" / a1 / "base")
     rec = ctx.register(a1, "a1", 1, f"runs/{a1}", source_id=nb.ORIGINAL_ID)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, "a1")
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, "a1")
     return ctx
@@ -122,6 +124,7 @@ def register_fresh(ctx, vid, text):
     write(out / "manuscript-p.md", text)
     rec = ctx.register(rid, kind, 1, f"runs/{rid}", source_id="a1", produces=vid)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, vid)
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, vid)
     return rec
@@ -182,6 +185,7 @@ def test_partial_copies_are_repaired():
     rev = nb.materialize_review(ctx, 1)
     write(ctx.sandbox_of(rev) / "guided_review" / "findings.json", "{}")
     rev["status"] = "done"
+    audit_fixture(nb, ctx, rev)
     rid = nb.rid_for_fresh(1, "a2")
     sb = ctx.runs_dir / rid
     # simulate "killed in the middle of the copy": only ONE file made it

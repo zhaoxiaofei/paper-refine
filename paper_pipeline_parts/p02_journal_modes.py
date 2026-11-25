@@ -1,29 +1,9 @@
 # -*- coding: utf-8 -*-
-# Part 02/25 of the pipeline -- executed by the
+# Part 02/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
 from __future__ import annotations
-
-
-_ranking = _load_pipeline_module("paper_pipeline_parts/ranking.py")
-A1_ID = _ranking.A1_ID
-BASIS_TIERS = _ranking.BASIS_TIERS
-VS_ORIGINAL_TOLERANCE = _ranking.VS_ORIGINAL_TOLERANCE
-TIEBREAK_SEVERITY_GROUPS = _ranking.TIEBREAK_SEVERITY_GROUPS
-SEVERITY_TIE_ORDER = _ranking.SEVERITY_TIE_ORDER
-TIEBREAK_SOURCES = _ranking.TIEBREAK_SOURCES
-DEFAULT_TIEBREAK_DEFECT_FLOOR = _ranking.DEFAULT_TIEBREAK_DEFECT_FLOOR
-tiebreak_cell_specs = _ranking.tiebreak_cell_specs
-tiebreak_cell_names = _ranking.tiebreak_cell_names
-tiebreak_group_severities = _ranking.tiebreak_group_severities
-_census_row = _ranking._census_row
-issue_matrix_and_cumulative = _ranking.issue_matrix_and_cumulative
-tiebreak_prefix_cells = _ranking.tiebreak_prefix_cells
-_issue_summary_from_census = _ranking._issue_summary_from_census
-champion_sort_key = _ranking.champion_sort_key
-derive_ranking = _ranking.derive_ranking
-lenient_word_limit = _load_pipeline_module(MANUSCRIPT_WORDS_FILE).lenient_cap
 
 # =====================================================================
 # JOURNAL REVISION MODES (options 1-4)
@@ -99,19 +79,16 @@ JOURNAL_MODES = {
     JOURNAL_MODE_MAJOR: {
         "option": 3,
         "label": "major revision: concern-scoped edits only at the same journal; "
-                 "response to reviewers required; no rewrites; human feedback only",
+                 "response to reviewers required; no rewrites",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
-        # CONCERN-SCOPED PROVENANCE. A major/minor revision may fix only what a
-        # HUMAN reviewer raised. The LLM review area is not staged and cannot be
-        # a concern source, so no `feedback/llm/` row can become a finding.
-        "streams": ("human",),
+        "streams": ("human", "llm"),
     },
     JOURNAL_MODE_MINOR: {
         "option": 4,
         "label": "minor revision: concern-scoped edits only at the same journal; "
-                 "response to reviewers required; no rewrites; human feedback only",
+                 "response to reviewers required; no rewrites",
         "feedback": True, "response": True, "rewrites": False, "scoped": True,
-        "streams": ("human",),
+        "streams": ("human", "llm"),
     },
     JOURNAL_MODE_LLM: {
         "option": 5,
@@ -147,17 +124,7 @@ JOURNAL_FEEDBACK_NAME_RE = re.compile(
 # it sits -- the same reason a "cover"-spelled letter is carved out below.
 ARTICLE_TYPE_MANUSCRIPT_NAME_RE = re.compile(
     r"^(?:letter[\s_-]+(?:to|for)[\s_-]+the[\s_-]+editor|editorial)"
-    # A version/state suffix marks the AUTHORS' manuscript, not the editors'
-    # letter: `v2`, `_2`, `_draft`, `_final`, `_revised`, `_accepted`,
-    # `_camera_ready`, and combinations (`_final_v2`). The extension-layer strip
-    # above removes a DOTTED `.final`; these underscore/space suffixes are name
-    # segments, not extensions -- `editorial_final.docx` is a manuscript, and
-    # reading it as the journal's feedback dropped it from the corpus (F99).
-    r"(?:[\s_.-]+(?:"
-    r"(?:v|rev|version|revision|draft)[\s_.-]*\d{1,3}"
-    r"|\d{1,3}"
-    r"|draft|final|revised|accepted|camera[\s_.-]?ready"
-    r"))*$", re.I)
+    r"(?:[\s_-]+(?:v|rev|version|revision|draft)?[\s_-]*\d{1,3})?$", re.I)
 
 
 def is_journal_feedback_name(name) -> bool:
@@ -179,11 +146,7 @@ def is_journal_feedback_name(name) -> bool:
         stem = _stripped
     if ARTICLE_TYPE_MANUSCRIPT_NAME_RE.match(stem):
         return False
-    # A scientific compound that merely ENDS in a role word (`feedback_loop`,
-    # `dose_response`) is a manuscript, not the editors' letter -- the same
-    # carve-out `authored_reply_name` already applies.
-    cleaned = SCIENCE_ROLE_COMPOUND_RE.sub(" ", base)
-    return bool(JOURNAL_FEEDBACK_NAME_RE.search(cleaned))
+    return bool(JOURNAL_FEEDBACK_NAME_RE.search(base))
 
 
 # A file the AUTHORS wrote ("response_to_reviewers.docx", "rebuttal.md",
@@ -412,7 +375,7 @@ def journal_feedback_files(ctx: Ctx) -> list:
     concerns sessions, which keeps each finding's provenance explicit.
     """
     streams = journal_feedback_streams(ctx)
-    if "human" not in streams:
+    if streams and "human" not in streams:
         # `llm` mode reads ONLY the LLM review: a human letter in the corpus is
         # not a concern source here (it stays evidence for the judges).
         return []
@@ -448,13 +411,6 @@ def journal_feedback_files(ctx: Ctx) -> list:
             continue
         rel = p.relative_to(ctx.pristine).as_posix()
         if is_original_submission_rel(rel):
-            continue
-        # The fallback may still read a legacy `raw_data/` name (the dedicated
-        # area is preferred), but an INERT disabled evidence area and an
-        # author's own README are never the journal's letter. (A full
-        # is_non_manuscript_rel() filter would also drop the documented
-        # raw_data fallback.)
-        if is_disabled_evidence_rel(rel) or is_non_submitted_readme_name(p.name):
             continue
         if evidence_area_of(rel) == LLM_FEEDBACK_DIR:
             # The LLM review is its own stream (`journal_llm_feedback_files`),
@@ -512,21 +468,7 @@ def review_feedback_files_in(dirp: Path, area_name: str) -> list:
     if not area.is_dir():
         return out
     for p in sorted(area.rglob("*")):
-        # lstat, not is_file(): `is_file()` follows a symlink, so a planted
-        # `decision_letter.txt -> <outside file>` was enumerated as feedback and
-        # its target's bytes were staged and read (F102). A FIFO/socket is not a
-        # feedback document either.
-        try:
-            st = p.lstat()
-        except OSError:
-            continue
-        if not stat.S_ISREG(st.st_mode) or is_bookkeeping_name(p.name):
-            continue
-        if area_name == LLM_FEEDBACK_DIR and is_non_submitted_readme_name(p.name):
-            # The LLM-feedback area is the review, but an author README (never
-            # submitted, rule 9) is explanatory material, not reviewer prose:
-            # ingesting it fed operator notes to the concern session as if a
-            # reviewer had written them (F119).
+        if not p.is_file() or is_bookkeeping_name(p.name):
             continue
         label = p.relative_to(Path(dirp)).as_posix()
         if area_name == HUMAN_FEEDBACK_DIR and is_original_submission_rel(label):
@@ -556,7 +498,7 @@ def journal_llm_feedback_files(ctx: Ctx) -> list:
     feedback.
     """
     streams = journal_feedback_streams(ctx)
-    if "llm" not in streams:
+    if streams and "llm" not in streams:
         return []
     if not ctx.pristine.is_dir():
         return []
@@ -572,11 +514,6 @@ def journal_previous_responses(ctx: Ctx) -> list:
     """
     if not ctx.pristine.is_dir():
         return []
-    streams = journal_feedback_streams(ctx)
-    if "human" not in streams:
-        # `llm` mode reads ONLY the LLM review: a previous reply that sits beside
-        # a human letter is not context for that mode either.
-        return []
     # `_COVER_WORD_RE` is the module's already-correct word matcher; a local
     # copy compiled with re.I made its camel-case lookarounds match ANY letter
     # pair, so `uncover_response.docx` was mistaken for a cover letter.
@@ -585,163 +522,14 @@ def journal_previous_responses(ctx: Ctx) -> list:
             and not _COVER_WORD_RE.search(p.name)]
 
 
-_RTF_DESTINATION_GROUPS = frozenset({
-    "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "header",
-    "footer", "footnote", "annotation", "field", "fldinst", "listtable",
-    "listoverridetable", "rsidtbl", "generator", "themedata", "colorschememapping",
-})
-
-
-def _rtf_plain_text(raw: str) -> str:
-    r"""Best-effort RTF -> text (the reviewer prose, not the control stream).
-
-    Accepted feedback formats included `.rtf`, but `feedback_text_of` returned
-    '' for it, so the concern ledger had no quoting text to verify against
-    (F106). This parser handles the constructs a word processor's "Save as
-    RTF" emits: groups/destinations, `\'hh` bytes, `\uN` escapes, paragraph
-    and tab controls, and the `\\`/`\{`/`\}` literals.
-    """
-    out, stack = [], []
-    skip = False
-    uc_skip = 1
-    i, n = 0, len(raw)
-    while i < n:
-        ch = raw[i]
-        if ch == "{":
-            stack.append(skip)
-            i += 1
-            continue
-        if ch == "}":
-            if stack:
-                skip = stack.pop()
-            i += 1
-            continue
-        if ch == "\\":
-            j = i + 1
-            if j < n and raw[j] in "\\{}":
-                if not skip:
-                    out.append(raw[j])
-                i = j + 1
-                continue
-            if j < n and raw[j] == "'":
-                if not skip and j + 2 < n:
-                    try:
-                        out.append(bytes([int(raw[j + 1:j + 3], 16)])
-                                   .decode("cp1252", "replace"))
-                    except ValueError:
-                        pass
-                i = j + 3
-                continue
-            k = j
-            while k < n and raw[k].isalpha():
-                k += 1
-            word = raw[j:k]
-            m = re.match(r"-?\d+", raw[k:])
-            num = m.group(0) if m else ""
-            if m:
-                k += len(num)
-            if k < n and raw[k] == " ":
-                k += 1
-            if word == "uc" and num:
-                try:
-                    uc_skip = max(0, int(num))
-                except ValueError:
-                    uc_skip = 1
-            elif word == "*" or word in _RTF_DESTINATION_GROUPS:
-                skip = True
-            elif word in ("par", "line", "sect", "page"):
-                if not skip:
-                    out.append("\n")
-            elif word == "tab":
-                if not skip:
-                    out.append("\t")
-            elif word == "u" and num:
-                if not skip:
-                    try:
-                        out.append(chr(int(num) % 65536))
-                    except ValueError:
-                        pass
-                i = k
-                for _ in range(uc_skip):
-                    if i < n and raw[i] not in "\\{}":
-                        i += 1
-                continue
-            i = k
-            continue
-        if ch in "\r\n":
-            i += 1
-            continue
-        if not skip:
-            out.append(ch)
-        i += 1
-    text = "".join(out).replace("\x00", "")
-    return re.sub(r"[ \t]{2,}", " ", text).strip()
-
-
-def _html_plain_text(raw: str) -> str:
-    """Visible text of an HTML feedback file (scripts/styles/head dropped)."""
-    from html.parser import HTMLParser
-
-    class _Collector(HTMLParser):
-        def __init__(self) -> None:
-            super().__init__(convert_charrefs=True)
-            self.parts, self.skip = [], 0
-
-        def handle_starttag(self, tag, attrs):
-            if tag in ("script", "style", "head"):
-                self.skip += 1
-            elif tag in ("p", "br", "div", "li", "tr", "h1", "h2", "h3",
-                         "h4", "h5", "h6", "blockquote"):
-                self.parts.append("\n")
-
-        def handle_endtag(self, tag):
-            if tag in ("script", "style", "head"):
-                self.skip = max(0, self.skip - 1)
-
-        def handle_data(self, data):
-            if not self.skip:
-                self.parts.append(data)
-
-    collector = _Collector()
-    collector.feed(raw)
-    collector.close()
-    text = "".join(collector.parts)
-    return "\n".join(line.strip() for line in text.splitlines() if line.strip()).strip()
-
-
-def _legacy_doc_text(path: Path) -> tuple:
-    """Legacy binary `.doc` -> text via LibreOffice, or a named gap."""
-    exe = shutil.which("soffice") or shutil.which("libreoffice")
-    if not exe:
-        return "", "legacy .doc needs LibreOffice to convert it; none is on PATH"
-    try:
-        with tempfile.TemporaryDirectory(prefix="paper-doc-text-") as td:
-            rc, _out, _err = run_bounded(
-                [exe, "--headless", "--convert-to", "txt:Text", "--outdir", td,
-                 str(path)], timeout=120)
-            cand = Path(td) / (path.stem + ".txt")
-            if rc == 0 and cand.is_file():
-                text = cand.read_text(encoding="utf-8", errors="replace")
-                if text.strip():
-                    return text, ""
-            return "", f"LibreOffice could not convert the legacy .doc (exit {rc})"
-    except Exception as e:                                           # noqa: BLE001
-        return "", f"LibreOffice conversion failed: {e}"
-
-
 def feedback_text_of(path: Path) -> tuple:
     """(text, note) for one feedback file -- the reviewable rendering."""
     ext = path.suffix.lower()
     if ext in (".txt", ".md", ".markdown", ".rst", ".tex", ".bib", ".csv", ".tsv"):
-        # The shared bounded reader, not `Path.read_text`: it enforces the
-        # agent-output byte budget, refuses a symlink/FIFO (lstat + O_NOFOLLOW
-        # + fstat) and applies BOM/UTF-16 detection. A raw read here bypassed
-        # all three and turned a Windows UTF-16 letter into NUL mojibake
-        # (F101/F102/F103).
-        text = read_text_bounded(path)
-        if text is None:
-            return "", "unreadable or over the text byte budget (or not a regular file)"
-        return text, ""
+        try:
+            return path.read_text(encoding="utf-8", errors="replace"), ""
+        except OSError as e:
+            return "", f"unreadable: {e}"
     if ext == ".docx":
         paras = _docx_paragraphs(path)
         if paras is None:
@@ -762,20 +550,6 @@ def feedback_text_of(path: Path) -> tuple:
             except Exception as e:                                   # noqa: BLE001
                 return "", f"pdftotext failed: {e}"
         return "", "pdf-unconvertible: pdftotext not available"
-    if ext == ".rtf":
-        raw = read_text_bounded(path)
-        if raw is None:
-            return "", "unreadable or over the text byte budget (or not a regular file)"
-        text = _rtf_plain_text(raw)
-        return (text, "") if text.strip() else ("", "the RTF carried no visible text")
-    if ext in (".html", ".htm"):
-        raw = read_text_bounded(path)
-        if raw is None:
-            return "", "unreadable or over the text byte budget (or not a regular file)"
-        text = _html_plain_text(raw)
-        return (text, "") if text.strip() else ("", "the HTML carried no visible text")
-    if ext == ".doc":
-        return _legacy_doc_text(path)
     return "", f"unparseable extension {ext!r} (the original is still copied for the session)"
 
 
@@ -797,18 +571,12 @@ def seed_concern_candidates(text: str) -> list:
     head_re = re.compile(
         r"^\s*(?:(?:reviewer|referee|editor|comments?|major|minor)\b|"
         r"point\b(?=\s*(?:\d|[:.]))|"
-        r"\d{1,3}\s*[.)](?=\s|$)|[-*•]\s+)", re.I)
+        r"\d+\s*[.)](?=\s|$)|[-*•]\s+)", re.I)
     for i, ln in enumerate(lines):
         if head_re.match(ln):
             starts.append(i)
     rows = []
     if starts:
-        # The editor's preamble before the FIRST reviewer/heading can carry the
-        # decision and concrete demands; it used to be dropped silently, while
-        # a heading-less letter kept the same text as paragraphs (F104).
-        preamble = " ".join(x.strip() for x in lines[:starts[0]] if x.strip())
-        if preamble:
-            rows.append({"heading": "preamble", "excerpt": preamble[:400]})
         bounds = starts + [len(lines)]
         for a, b in zip(bounds, bounds[1:]):
             block = " ".join(x.strip() for x in lines[a:b] if x.strip())
@@ -915,9 +683,7 @@ DEFAULT_PUBLISH_FLATTEN_ZOTERO = False
 # `a`/`w`/`i` are the short spellings used in the round plan.
 ONLY_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "revise",
                "integrate",
-               "judge", "feedback", "concerns", "concern_audit", "concern_repair",
-               "response_draft", "response", "response_audit", "response_repair",
-               "conform")
+               "judge", "feedback", "concerns", "response", "conform")
 # Short spellings for ONE stage each (`merge` is the integration step's name in
 # the round plan). `review` is NOT here: it names the review STEP and lives in
 # ONLY_STAGE_GROUPS below.
@@ -928,14 +694,9 @@ ONLY_ALIASES = {"w": "rewrite", "rewrites": "rewrite",
                 "merge": "integrate", "merges": "integrate",
                 "j": "judge", "judges": "judge",
                 "fb": "feedback", "feedbacks": "feedback",
-                "concern": "concerns", "concerns": "concerns",
-                "ca": "concern_audit", "concern-audit": "concern_audit",
-                "cr": "concern_repair", "concern-repair": "concern_repair",
-                "rd": "response_draft", "response-draft": "response_draft",
+                "concern": "concerns",
                 "resp": "response", "responses": "response",
-                "response-to-reviewers": "response",
-                "ra": "response_audit", "response-audit": "response_audit",
-                "rr": "response_repair", "response-repair": "response_repair"}
+                "response-to-reviewers": "response"}
 # `review` names the round's REVIEW STEP, which is BOTH discovery passes: the
 # guided (checklist) review and the cold-start (unanchored) review. Selecting it
 # selects both; selecting either stage name selects only that one.
@@ -1002,49 +763,6 @@ DEFAULT_STRICT_ARTIFACTS = True
 ARTIFACT_POLICY_FIX = "fix"
 ARTIFACT_POLICIES = ("on", ARTIFACT_POLICY_FIX, "off")
 DEFAULT_ARTIFACT_POLICY = "on"
-# `--tolerate-fail` is the benchmark/collection mode (`--no-tolerate-fail`
-# restores the default): a stage that exhausts its retry budget is recorded and
-# printed as TOLERATED_FAIL and the run's BEST FAILED TRIAL is used (the trial
-# with the most required output files, then the fewest FAIL messages), so the
-# pipeline continues with its most complete attempt instead of terminating. The
-# result stays PROVISIONAL and is never certified. It is OFF by default; the off
-# path is the historical strict behaviour (a failed stage leaves the round
-# incomplete and `run` exits 3).
-TOLERATED_FAIL_STATUS = "TOLERATED_FAIL"
-TOLERATE_FAIL_MODES = ("on", "off")
-DEFAULT_TOLERATE_FAIL = "off"
-_TOLERATE_FAIL_ACTIVE = False
-
-
-def set_tolerate_fail_active(flag: bool) -> None:
-    """Record the invocation's mode for output paths that have no `ctx`."""
-    global _TOLERATE_FAIL_ACTIVE
-    _TOLERATE_FAIL_ACTIVE = bool(flag)
-
-
-def tolerate_fail_of(ctx=None) -> bool:
-    """Is an exhausted stage tolerated (best failed trial used) instead of FAIL?
-
-    The per-invocation `run` override wins over the root's recorded policy,
-    exactly like the content-edit policy pairs; a root without the key reads the
-    strict default (`off`).  A root written by the older boolean feature carries
-    `almost_fail: on|off`; it is read as the same policy.  A caller without a
-    `ctx` (the sandbox self-check client, a report helper) reads the mode the
-    invocation activated.
-    """
-    override = getattr(ctx, "_tolerate_fail_override", None)
-    if override is not None:
-        return bool(override)
-    if ctx is None:
-        return bool(_TOLERATE_FAIL_ACTIVE)
-    cfg = getattr(ctx, "cfg", None) or {}
-    raw = str(cfg.get("tolerate_fail") or cfg.get("almost_fail") or "").strip().lower()
-    return raw == "on"
-
-
-def failure_status(ctx=None) -> str:
-    """The console status word for a failed attempt (`FAIL` / `TOLERATED_FAIL`)."""
-    return TOLERATED_FAIL_STATUS if tolerate_fail_of(ctx) else "FAIL"
 DEFAULT_RESIDUAL_GATE = True
 # How many identifier lookups one stage may spend. Each lookup is one or more
 # requests (a DOI asks Crossref, then DataCite, then the handle registry) with a
@@ -1243,16 +961,10 @@ TRACKING_AUX_NAME_RE = re.compile(
     r"\.(?:docx|tex|bib|pdf)$", re.IGNORECASE)
 # Trailing version token on a basename stem: the CURRENT content-hash token
 # ("-4f3a9c1"/"_4f3a9c1", 7 lowercase hex characters) or the LEGACY version
-# tokens ("-b", "_v2", "-v10") that older packages carry. The legacy
-# single-letter alternative is LOWERCASE only: the legacy increments were
-# "-a"/"-b"-style arm letters, while an uppercase trailing letter is an
-# IDENTITY label (`Appendix_A.docx`, `Figure_B.pdf`) and must not be renamed to
-# `Appendix_<token>.docx` nor stripped from the hashed bytes (F171). The
-# shipped `paper-revise/scripts/revision_token.py` narrows the same alternative
-# to `[a-z]`, and the two readers must agree on one package.
+# tokens ("-b", "_v2", "-v10", case-insensitive) that older packages carry.
 # A PLAIN trailing number ("-1", "-3") is NOT a version token: SI-Table-1.csv
 # and Figure-3.xlsx are distinct documents and must never be merged.
-DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][a-z])$")
+DOC_TOKEN_RE = re.compile(r"(?:[-_][0-9a-f]{7}|[-_][vV]\d+|[-_][A-Za-z])$")
 # Source/provenance suffixes that describe where a document came from, not a
 # different submission role. A content-token rename may legitimately change
 # these (`mainText-FrontiersTemplate-zotero-<old>` ->
@@ -1371,6 +1083,7 @@ JUDGE_TOKEN_PREFIX = "t"
 # Version ids. Fresh ids are local to one round; a pinned version carries its
 # round prefix so ids stay unique inside a field (e.g. "r1_a2").
 ORIGINAL_ID = "orig"
+A1_ID = "a1"
 
 # ---- THE ROUND'S CANDIDATE POOL (M rewrites, N revisions, then integration) --
 # Every round is planned with two per-round counts (both are command-line
@@ -1456,61 +1169,13 @@ def arm_of_vid(vid) -> str:
     return "integrate"
 
 
-# The hard upper bound on a round plan. The per-round lists are MATERIALIZED
-# to exactly `rounds` entries below, so `--rounds 100000000` used to allocate
-# proportional memory and die with a raw MemoryError traceback before setup had
-# validated anything (F242). No real plan approaches this bound; a larger value
-# is a usage error, not a resource decision.
-MAX_ROUNDS = 1000
-
-
-def _check_rounds_bound(rounds: int) -> int:
-    """Refuse a round count that would materialize an unbounded per-round plan."""
-    rounds = max(1, int(rounds))
-    if rounds > MAX_ROUNDS:
-        die(f"--rounds must be <= {MAX_ROUNDS} (got {rounds}): the per-round plan is "
-            f"materialized in full and a larger value is not a runnable schedule",
-            code=2)
-    return rounds
-
-
-def _split_round_list(text: str) -> list:
-    """Split a CLI/config round list, keeping underscores that belong to a number.
-
-    `_` between digits is the historical list separator (`1_2` -> 1, 2; F69), but
-    Python integer literals use `_` as a digit-group separator, and a documented
-    literal must stay ONE value (`1_000` is 1000, `0xFFFF_FFFF` is one mask;
-    F119). A base-prefixed token is always one literal; a decimal token keeps an
-    underscore only when it groups exactly three digits (the conventional
-    spelling). Any other underscore keeps the historical separator meaning.
-    """
-    out = []
-    for part in re.split(r"[,;\s]+", text.strip()):
-        if not part:
-            continue
-        if re.fullmatch(r"0[xXoObB][0-9A-Fa-f_]+", part):
-            out.append(part)
-            continue
-        pieces = part.split("_")
-        merged = [pieces[0]]
-        for nxt in pieces[1:]:
-            if len(nxt) == 3 and nxt.isdigit():
-                merged[-1] += "_" + nxt
-            else:
-                merged.append(nxt)
-        out.extend(merged)
-    return out
-
-
 def parse_round_counts(values, rounds: int, flag: str) -> list:
     """Normalize a per-round count list to exactly `rounds` entries.
 
     The CLI accepts either a single integer ("--rewrites 3") or a comma/space
     separated list of length n = --rounds ("--rewrites 2,1"). A list shorter
     than n is EXTENDED BY REPEATING ITS LAST ELEMENT; a longer one is truncated
-    to the first n entries (the extra entries would never be reached). An
-    underscore is part of the number when it groups three digits ("1_000");
-    otherwise it separates entries ("1_2"), the historical spelling.
+    to the first n entries (the extra entries would never be reached).
     """
     vals = []
     for v in (values if isinstance(values, (list, tuple)) else [values]):
@@ -1518,7 +1183,9 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
             continue
         # A command-line value arrives as ONE string ("3", "2,1", "2, 1"); a
         # config value may already be a list of ints. Both shapes are accepted.
-        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
+        # `_` is a separator too: `int("1_2")` is 12, so without this a list
+        # written as `1_2` silently became ONE round count of twelve.
+        parts = re.split(r"[,;_\s]+", str(v).strip()) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     counts = []
     for v in vals:
@@ -1531,7 +1198,7 @@ def parse_round_counts(values, rounds: int, flag: str) -> list:
         die(f"{flag} needs at least one integer", code=2)
     if any(c < 0 for c in counts):
         die(f"{flag} values must be >= 0, got {counts}", code=2)
-    rounds = _check_rounds_bound(rounds)
+    rounds = max(1, int(rounds))
     if len(counts) < rounds:
         counts = counts + [counts[-1]] * (rounds - len(counts))
     return counts[:rounds]
@@ -1578,13 +1245,9 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
 
     Same shape rules as parse_round_counts (one value or a comma-separated list;
     a shorter list is extended by repeating its last element, a longer one is
-    truncated), but each entry is an unsigned 32-bit mask written as a Python
-    integer literal: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
-    octal or binary. A base-prefixed literal may carry `_` digit groups
-    ("0xFFFF_FFFF"), and a decimal literal may use the conventional
-    three-digit grouping ("1_000"); a bare `_` between short decimal groups
-    keeps the historical list-separator spelling ("1_2" = masks 1 and 2).
-    The mask addresses the round's pool in canonical order
+    truncated), but each entry is an unsigned 32-bit mask written in any Python
+    integer literal form: decimal ("5"), hexadecimal ("0xFFFFFFFF", the default),
+    octal or binary. The mask addresses the round's pool in canonical order
     [a1, w1..wM, a2..a{1+N}]: bit (k-1) selects the integration arm i<k> of the
     k-th member (see INTEGRATOR_ALL).
     """
@@ -1594,7 +1257,7 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
             continue
         # A command-line value arrives as ONE string ("5", "0xFF,3"); a config
         # value may already be a list of ints. Both shapes are accepted.
-        parts = _split_round_list(str(v)) if isinstance(v, str) else [v]
+        parts = re.split(r"[,;\s]+", str(v).strip()) if isinstance(v, str) else [v]
         vals.extend(p for p in parts if str(p).strip() != "")
     masks = []
     for v in vals:
@@ -1609,7 +1272,7 @@ def parse_round_masks(values, rounds: int, flag: str) -> list:
         masks.append(mask)
     if not masks:
         die(f"{flag} needs at least one bitmask", code=2)
-    rounds = _check_rounds_bound(rounds)
+    rounds = max(1, int(rounds))
     if len(masks) < rounds:
         masks = masks + [masks[-1]] * (rounds - len(masks))
     return masks[:rounds]
@@ -1671,44 +1334,6 @@ def integrators_config_note(ctx) -> str:
                       lambda v: f"0x{int(v):X}")
 
 
-def _round_record(ctx, r: int) -> dict:
-    """The round record, or {} when the context has no round store.
-
-    An UNREADABLE record is a hard error: substituting {} would re-derive the
-    round's plan from the CURRENT pipeline_config.json, the exact
-    non-reproducibility the recorded plan exists to prevent.
-    """
-    if not callable(getattr(ctx, "round_get", None)):
-        # A hand-built synthetic context (unit tests, the report helpers) has no
-        # round store at all; that is "no recorded plan", not an unreadable one.
-        return {}
-    try:
-        rec = ctx.round_get(int(r)) or {}
-    except Exception as e:                                   # noqa: BLE001
-        die(f"the recorded plan for round {int(r)} could not be read "
-            f"({type(e).__name__}: {e}); refusing to re-derive the round's plan "
-            f"from the current pipeline_config.json")
-    return rec if isinstance(rec, dict) else {}
-
-
-def _recorded_round_plan(ctx, r: int) -> dict:
-    """The plan a round recorded, or {} when it recorded none.
-
-    An UNREADABLE record is a hard error: substituting {} would re-derive the
-    round's candidate set from the CURRENT config, the exact
-    non-reproducibility the recorded plan exists to prevent.
-    """
-    rec = _round_record(ctx, r)
-    plan = rec.get("plan")
-    if plan is None:
-        return {}
-    if not isinstance(plan, dict):
-        die(f"the recorded plan for round {int(r)} is not an object "
-            f"({type(plan).__name__}); refusing to re-derive it from the current "
-            f"pipeline_config.json")
-    return plan
-
-
 def round_counts(ctx, r: int) -> tuple:
     """(M, N) for round `r`: rewrites and reviewed-and-revised candidates.
 
@@ -1720,34 +1345,17 @@ def round_counts(ctx, r: int) -> tuple:
     longer matched the stored one and `decide` reported a bogus integrity
     problem about judge sheets that were perfectly fine.
     """
-    plan = _recorded_round_plan(ctx, r)
-    # Read each recorded key INDEPENDENTLY: a plan that recorded only one of
-    # the two counts must not discard the half it did record.
-    recorded_m = plan.get("rewrites") if is_int(plan.get("rewrites")) else None
-    recorded_n = plan.get("revises") if is_int(plan.get("revises")) else None
-    # A concern-scoped major/minor round runs NO rewrite arm. The guard must
-    # apply to the RECORDED pair too: the old early return handed a copied or
-    # hand-edited plan's rewrites=2 to round_run_plan, re-creating w1/w2 in a
-    # mode whose recorded plan must never carry them.
-    scoped_no_rewrite = journal_is_scoped(ctx) and not journal_rewrites_allowed(ctx)
-    if scoped_no_rewrite and recorded_m is not None:
-        recorded_m = 0
-    if recorded_m is not None and recorded_n is not None:
-        return max(0, int(recorded_m)), max(0, int(recorded_n))
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    if is_int(plan.get("rewrites")) and is_int(plan.get("revises")):
+        return max(0, int(plan["rewrites"])), max(0, int(plan["revises"]))
     rounds = config_rounds(ctx)
     idx = round_index(r, rounds)
-    m = (int(recorded_m) if recorded_m is not None else
-         int(counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]))
-    n = (int(recorded_n) if recorded_n is not None else
-         int(counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]))
-    if scoped_no_rewrite:
-        # major/minor are concern-scoped by definition: the round runs NO rewrite
-        # arm. The guarantee is enforced HERE, at the single place both the run
-        # plan and the decide re-derivation read M from, not only by setup's
-        # normalisation of the config: a hand-edited, restored or copied plan
-        # that records rewrites cannot stage (or re-derive) a full rewrite arm.
-        m = 0
-    return max(0, m), max(0, n)
+    m = counts_of(getattr(ctx, "cfg", None), "rewrites", rounds)[idx]
+    n = counts_of(getattr(ctx, "cfg", None), "revises", rounds)[idx]
+    return int(m), int(n)
 
 
 def champion_select_of(ctx=None) -> str:
@@ -1771,20 +1379,14 @@ def champion_select_of(ctx=None) -> str:
 
 
 def round_champion_select(ctx, r: int) -> str:
-    """The mode round `r` records (a decided round wins over the config).
-
-    A recorded value that is not a champion-selection mode is a hard error, not a
-    silent fall-back to the mutable config: the mode the round USED is part of
-    the round's plan (see `_recorded_round_plan`).
-    """
-    plan = _recorded_round_plan(ctx, r)
+    """The mode round `r` records (a decided round wins over the config)."""
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
     raw = str(plan.get("champion_select") or "").strip().lower()
-    if raw:
-        if raw in CHAMPION_SELECT_MODES:
-            return raw
-        die(f"the recorded plan for round {int(r)} records champion_select {raw!r}, "
-            f"which is not one of {'|'.join(CHAMPION_SELECT_MODES)}; refusing to "
-            f"re-derive the round's champion mode from the current pipeline_config.json")
+    if raw in CHAMPION_SELECT_MODES:
+        return raw
     return champion_select_of(ctx)
 
 
@@ -1840,13 +1442,12 @@ def judgeable_ids(ctx, r: int) -> list:
     the pinned run id, e.g. `r1_w2` -- in round 2 the base member IS that pin; the
     fresh `a1` copy of it is always content-identical and dropped by the field's
     deduplication), the round's pool (a1, w1.., a2..) and the integration arms the
-    round actually RAN -- its recorded `integrated` list when it has one, else
-    the `--integrators` mask's arms -- not just the pool, which is why
+    round's `--integrators` mask selected -- not just the pool, which is why
     `r2_judge_i1_j1` is a valid selector.
     """
     m, n = round_counts(ctx, r)
     return [ORIGINAL_ID] + round_pin_ids(ctx, r) + list(round_pool_ids(m, n)) \
-        + list(round_integrated_run_ids(ctx, r, m, n))
+        + [integrate_vid(k) for k in integrator_arms(m, n, round_integrators(ctx, r))]
 
 
 def round_pin_ids(ctx, r: int) -> list:
@@ -1869,11 +1470,16 @@ def judges_enabled_spec(ctx, r: int) -> str:
 
     A DECIDED round's recorded plan wins, exactly like round_judges(): `decide`
     must recompute the stored panel's expectation from the plan that produced it.
-    An unreadable round record is a hard error (see `_round_record`), never a
-    silent fall-back to every judge.
     """
-    plan = _recorded_round_plan(ctx, r)
-    rrec = _round_record(ctx, r)
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    rrec = {}
+    try:
+        rrec = ctx.round_get(int(r)) or {}
+    except Exception:                                        # noqa: BLE001
+        rrec = {}
     if plan.get("judges_enabled") is not None:
         spec = str(plan["judges_enabled"])
     elif rrec.get("judges_enabled") is not None:
@@ -2010,7 +1616,10 @@ def round_judges(ctx, r: int) -> int:
     so a later edit of the config can never turn a complete panel into a
     "stale --judges value" gap.
     """
-    plan = _recorded_round_plan(ctx, r)
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
     if is_int(plan.get("judges")):
         return max(0, int(plan["judges"]))
     rounds = config_rounds(ctx)
@@ -2027,7 +1636,10 @@ def round_integrators(ctx, r: int) -> int:
     mode keeps the configured mask (the promoted arm must be part of it; see
     `auto_champion_vid`).
     """
-    plan = _recorded_round_plan(ctx, r)
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
     if is_int(plan.get("integrators")):
         return max(0, int(plan["integrators"]))
     if champion_select_of(ctx) == "revise":
@@ -2043,18 +1655,14 @@ def round_review_scope(ctx, r: int) -> str:
     The recorded plan wins (a decided round must re-derive the same review
     contract); otherwise the per-round `review_scope` list from the config,
     extended by repeating its last element exactly like `--rewrites`/`--judges`.
-    An unreadable round record is a hard error (see `_round_record`), never a
-    silent fall-back to the config's scope.
     """
-    plan = _recorded_round_plan(ctx, r)
-    recorded_scope = str(plan.get("review_scope") or "").strip().lower()
-    if recorded_scope:
-        if recorded_scope in REVIEW_SCOPE_VALUES:
-            return recorded_scope
-        die(f"the recorded plan for round {int(r)} records review_scope "
-            f"{recorded_scope!r}, which is not one of {'|'.join(REVIEW_SCOPE_VALUES)}; "
-            f"refusing to re-derive the review contract from the current "
-            f"pipeline_config.json")
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
+    scope = str(plan.get("review_scope") or "").strip().lower()
+    if scope in REVIEW_SCOPE_VALUES:
+        return scope
     rounds = config_rounds(ctx)
     raw = (getattr(ctx, "cfg", None) or {}).get("review_scope")
     if raw is None:
@@ -2119,7 +1727,10 @@ def round_integrated_run_ids(ctx, r: int, m: int = None, n: int = None) -> list:
     empty list means the round runs no integration at all (mask 0, or every
     applicable bit clear).
     """
-    plan = _recorded_round_plan(ctx, r)
+    try:
+        plan = (ctx.round_get(int(r)) or {}).get("plan") or {}
+    except Exception:                                        # noqa: BLE001
+        plan = {}
     recorded = plan.get("integrated")
     if isinstance(recorded, (list, tuple)):
         # An EMPTY recorded list is meaningful: the round ran no integration at
@@ -2195,6 +1806,8 @@ JUDGE_CONTRACT_VERSION = 5
 # deliverable, and a prose defect whose meaning survives must not outrank (or be
 # outranked by) mechanical layout. Meaning-changing rows are refiled to
 # correctness by the class rule, so `consistency` here is the residual class.
+BASIS_TIERS = ("correctness", "preservation", "completeness", "consistency", "writing",
+               "formatting")
 BASIS_VALUES = BASIS_TIERS + ("none",)
 # FOUR severity rungs, weakest first, and EVERY tier carries all four: minor 1 /
 # major 2 / critical 3 / fatal 4. The rungs are a DISTANCE FROM CORRECT (a
@@ -2260,6 +1873,13 @@ DEFAULT_CAPTION_LIMIT = 0
 # reads `length_limits(venue_profile)` instead.
 
 
+def lenient_word_limit(base: int, factor: float) -> int:
+    """The largest integer word count within `base` words relaxed by `factor`."""
+    # floor(base*factor), tolerant of the float representation error that made
+    # "100 words +15%" 114.99999999999999 -> 114 instead of 115.
+    return math.floor(float(base) * float(factor) + 1e-9)
+
+
 def _builtin_default_venue_object() -> VenueProfile:
     """The module-level default profile, constructed without ever bricking the CLI.
 
@@ -2321,9 +1941,8 @@ def relaxation_note(profile=None) -> str:
         spec = limits[key]
         if spec.get("base") is None:
             continue
-        margin = _relaxation_pct_text(spec)
-        if margin:
-            parts.append(f"+{margin}% on the {label} (<= {spec['cap']} words)")
+        margin = int(round((float(spec["relaxation"]) - 1.0) * 100))
+        parts.append(f"+{margin}% on the {label} (<= {spec['cap']} words)")
     if not parts:
         return ("This venue profile sets no abstract/main-text cap: the counts are recorded "
                 "for the author to compare with the target journal's own guidelines")
@@ -2347,9 +1966,7 @@ def caption_limit_of(ctx) -> int:
     try:
         v = int(raw)
     except (TypeError, ValueError):
-        die(f"pipeline_config.json records caption_limit={raw!r} with "
-            f"caption_limit_source 'operator'; it is not an integer. Repair the "
-            f"config (an explicit 0 means no cap).", code=2)
+        return DEFAULT_CAPTION_LIMIT
     return max(0, v)
 
 
@@ -2378,37 +1995,6 @@ _CONTENT_EDIT_OFF = ("off", "disabled", "disable", "false", "no", "0", "forbidde
 _CONTENT_EDIT_ON = ("on", "true", "yes", "1", "enabled")
 
 PREFER_REWRITE_OVER_DELETION = "prefer_rewrite_over_deletion"
-SOFT_DELETIONS = "soft_deletions"
-
-
-def content_edit_flag(value, default: bool = True) -> bool:
-    """One content-edit switch from a run-record/config value.
-
-    A run record can carry the documented string spellings ('off', 'false');
-    `bool('false')` is True and silently widened a strict record, so every
-    reader of the same key must parse it the same way (F132).
-    """
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    truthy = text in _CONTENT_EDIT_ON
-    return truthy if truthy else text not in _CONTENT_EDIT_OFF
-
-
-def content_edit_prefer_flag(value, default: bool = False) -> bool:
-    """One `prefer_rewrite_over_deletion` value; only explicit ON is on."""
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value or "").strip().lower()
-    if not text:
-        return default
-    return text in _CONTENT_EDIT_ON
 
 
 def prefer_rewrite_over_deletion(ctx=None) -> bool:
@@ -2435,73 +2021,6 @@ def prefer_rewrite_over_deletion(ctx=None) -> bool:
     return bool(raw)
 
 
-def soft_deletions(ctx=None) -> bool:
-    """Is the removable-only deletion policy on for this invocation?
-
-    THE MIDDLE CONTENT-EDIT POLICY. Insertions and deletions stay enabled, so a
-    verbatim duplicate, a leaked prompt/instruction, an unresolved placeholder
-    or an internal artifact can still be removed; a unit that carries a claim,
-    value, definition, method step, limitation or citation may not be deleted --
-    it is corrected in place, or carried to the manual list.
-
-    Off by default: the historical permissive policy (both kinds allowed, any
-    unit) is unchanged, so a run that does not name this mode keeps its exact
-    behaviour. Precedence: the invocation override, then the root's
-    pipeline_config.json, then off. Recognise only the explicit ON spellings,
-    like prefer-rewrite.
-    """
-    override = (getattr(ctx, "_soft_deletions_override", None)
-                if ctx is not None else None)
-    if override is not None:
-        return bool(override)
-    cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
-    raw = cfg.get(SOFT_DELETIONS, False)
-    if isinstance(raw, str):
-        return raw.strip().lower() in _CONTENT_EDIT_ON
-    return bool(raw)
-
-
-def soft_deletions_allowed(ctx=None, rec=None) -> bool:
-    """Is the removable-only deletion policy on for a stage that started under `rec`?
-
-    Same binding rule as `content_edit_policy_allowed`: a stage record carrying
-    `content_edit_policy` was prompted under that policy, and a later
-    invocation must not judge it under a different one.
-    """
-    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict):
-        # `content_edit_policy_record` writes the soft key only when the stage
-        # was prompted with it ON (or when it differed from the live config at
-        # stage start). A dict WITHOUT the key therefore means the historical
-        # default OFF, which is what the prompt stated; falling back to today's
-        # config judged a resumed stage under a policy it never saw (F046).
-        if SOFT_DELETIONS in policy:
-            return content_edit_prefer_flag(policy[SOFT_DELETIONS])
-        return False
-    return soft_deletions(ctx)
-
-
-def deletion_scope(ctx=None, rec=None) -> str:
-    """`none` | `removable` | `all` -- what a delivered package may drop.
-
-    `none`      -- --disable-deletions: no content unit may disappear.
-    `removable` -- --enable-soft-deletions: only the documented removable
-                   units (a duplicate copy, a leaked prompt/instruction, a
-                   placeholder, a pointer the orchestrator itself removes) may
-                   go; a claim-bearing unit may not.
-    `all`       -- the default permissive policy: any unit may go.
-
-    `none` wins over `removable` (a strict root cannot be relaxed by adding the
-    middle flag), and `removable` wins over the default.
-    """
-    _ins, dele = content_edit_policy_allowed(ctx, rec)
-    if not dele:
-        return "none"
-    if soft_deletions_allowed(ctx, rec):
-        return "removable"
-    return "all"
-
-
 def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
     """Is `kind` ('insertions'|'deletions') allowed for this invocation?
 
@@ -2517,36 +2036,9 @@ def _content_edit_enabled(ctx, kind: str, default: bool = True) -> bool:
     if override is not None:
         return bool(override)
     cfg = (getattr(ctx, "cfg", None) or {}) if ctx is not None else {}
-
-    def _alias_allows(key: str, value) -> bool:
-        """One alias spelling -> the boolean permission it states."""
-        if isinstance(value, bool):
-            return value if not key.startswith("disable_") else not value
-        if isinstance(value, (int, float)):
-            truthy = bool(value)
-            return truthy if not key.startswith("disable_") else not truthy
-        text = str(value or "").strip().lower()
-        if not text:
-            raise ValueError("empty")
-        truthy = text in _CONTENT_EDIT_ON
-        allowed = truthy if truthy else text not in _CONTENT_EDIT_OFF
-        return (not allowed) if key.startswith("disable_") else allowed
-
-    # Every present alias must agree. The old first-present-key precedence let
-    # `deletions: true` silently override `disable_deletions: true` in the same
-    # config, ignoring the safety switch (F152).
-    present = [(key, cfg.get(key)) for key in CONTENT_EDIT_KEYS[kind] if key in cfg]
-    if len(present) > 1:
-        try:
-            verdicts = {_alias_allows(k, v) for k, v in present}
-        except ValueError:
-            verdicts = set()
-        if len(verdicts) > 1:
-            die(f"conflicting content-edit keys for {kind}: "
-                + ", ".join(f"{k}={v!r}" for k, v in present)
-                + f". They disagree; remove the contradictory key(s) before running.",
-                code=2)
-    for key, value in present:
+    for key in CONTENT_EDIT_KEYS[kind]:
+        if key not in cfg:
+            continue
         value = cfg.get(key)
         if isinstance(value, bool):
             truthy = value
@@ -2611,8 +2103,8 @@ def content_edit_policy_allowed(ctx=None, rec=None) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        return (content_edit_flag(policy.get("insertions", True)),
-                content_edit_flag(policy.get("deletions", True)))
+        return (bool(policy.get("insertions", True)),
+                bool(policy.get("deletions", True)))
     return insertions_enabled(ctx), deletions_enabled(ctx)
 
 
@@ -2624,40 +2116,30 @@ def prefer_rewrite_allowed(ctx=None, rec=None) -> bool:
     the context. This is the same binding rule as `content_edit_policy_allowed`.
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict):
-        if PREFER_REWRITE_OVER_DELETION in policy:
-            return content_edit_prefer_flag(policy[PREFER_REWRITE_OVER_DELETION])
-        # The record was written with prefer OFF (the record omits the key for
-        # that historical default). Falling back to a later invocation's ON
-        # config judged the stage under a policy its prompt never stated (F71).
-        return False
+    if isinstance(policy, dict) and PREFER_REWRITE_OVER_DELETION in policy:
+        return bool(policy[PREFER_REWRITE_OVER_DELETION])
     return prefer_rewrite_over_deletion(ctx)
 
 
-def content_edit_policy_record(ctx, ins, dele, prefer, soft=False) -> dict | None:
+def content_edit_policy_record(ctx, ins, dele, prefer) -> dict | None:
     """The run-record dict a stage needs, or None for the default.
 
     A stage is bound to the policy its PROMPT stated, which can differ from the
     current invocation's (a resumed package keeps the policy it was produced
-    under). The default (both kinds allowed, prefer off, any-unit deletions)
-    needs no record; every other combination records `insertions`/`deletions`
-    and the prefer / soft-deletion flag when it is on OR when it differs from
-    the current invocation (a stage prompted with a mode OFF must not be judged
-    under a later run's mode ON). A strict record without the modes keeps its
-    old shape when the current modes are off.
+    under). The default (both kinds allowed, prefer off) needs no record; every
+    other combination records `insertions`/`deletions` and the prefer flag when
+    it is on OR when it differs from the current invocation (a stage prompted
+    with the mode OFF must not be judged under a later run's mode ON). A strict
+    record without the mode keeps its old shape when the current mode is off.
     """
     current_prefer = prefer_rewrite_over_deletion(ctx)
-    current_soft = soft_deletions(ctx)
-    current = (insertions_enabled(ctx), deletions_enabled(ctx),
-               current_prefer, current_soft)
-    bound = (bool(ins), bool(dele), bool(prefer), bool(soft))
-    if bound == current and ins and dele and not prefer and not soft:
+    current = (insertions_enabled(ctx), deletions_enabled(ctx), current_prefer)
+    bound = (bool(ins), bool(dele), bool(prefer))
+    if bound == current and ins and dele and not prefer:
         return None
     record = {"insertions": bool(ins), "deletions": bool(dele)}
     if prefer or prefer != current_prefer:
         record[PREFER_REWRITE_OVER_DELETION] = bool(prefer)
-    if soft or soft != current_soft:
-        record[SOFT_DELETIONS] = bool(soft)
     return record
 
 
@@ -2665,8 +2147,7 @@ def content_edit_policy_note(ctx=None) -> str:
     """A short operator-facing description, or "" for the default policy."""
     ins, dele = insertions_enabled(ctx), deletions_enabled(ctx)
     prefer = prefer_rewrite_over_deletion(ctx)
-    soft = soft_deletions(ctx)
-    if ins and dele and not prefer and not soft:
+    if ins and dele and not prefer:
         return ""
     parts = []
     if not ins:
@@ -2675,8 +2156,6 @@ def content_edit_policy_note(ctx=None) -> str:
         parts.append("deletions OFF")
     if prefer:
         parts.append("prefer rewrite over deletion")
-    if soft and dele:
-        parts.append("soft deletions (removable units only)")
     return ", ".join(parts) + " (benchmark-only content-edit policy)"
 
 
@@ -2773,22 +2252,6 @@ def _article_phrase(profile: VenueProfile) -> str:
     return f"{_indefinite(label)} {art}"
 
 
-def _length_limit_gap_notes(profile: VenueProfile) -> str:
-    """The profile's recorded per-limit notes, joined (`""` when it records none).
-
-    A `note` records rules the source states that this pipeline does NOT model
-    (display-item caps, a reference cap). Every renderer that describes a limit
-    must name them, including the no-cap branch, where the numbers cannot carry
-    the rule at all (F94).
-    """
-    prof = _as_profile(profile)
-    try:
-        return " | ".join(n for n in (prof.length_limit_note("abstract"),
-                                      prof.length_limit_note("main_text")) if n)
-    except Exception:                                          # noqa: BLE001 -- never gate
-        return ""
-
-
 def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     """The M19 mandate's cap clause, from the venue profile's own numbers.
 
@@ -2798,17 +2261,9 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     """
     limits = _as_profile(profile).length_limits()
     abstract, main = limits["abstract"], limits["main text"]
-    # A per-limit `note` records rules this pipeline does NOT model. It is
-    # computed BEFORE the no-cap branch, because a profile with no numeric cap is
-    # exactly where the recorded gap must still reach M19 (F94).
-    gap_notes = _length_limit_gap_notes(profile)
     if abstract["cap"] is None and main["cap"] is None:
-        clause = ("this venue profile sets no abstract or main-text cap, so state the limit the "
-                  "target journal's own guidelines give and its source in the artifact")
-        if gap_notes:
-            clause += ("; the profile's own notes record rules this pipeline does NOT model "
-                       "(the absence of a cap is not the whole rule set): " + gap_notes)
-        return clause
+        return ("this venue profile sets no abstract or main-text cap, so state the limit the "
+                "target journal's own guidelines give and its source in the artifact")
     parts = []
     if abstract["cap"] is not None:
         parts.append(f"abstract <= {abstract['cap']} words")
@@ -2818,9 +2273,16 @@ def _caps_clause(profile: VenueProfile, *, article: bool = False) -> str:
     if article:
         clause += (f" for {_article_phrase(profile)}, "
                    f"{_main_text_counting_short(profile)}")
-    if gap_notes:
+    # A per-limit `note` records the rules the source states that this pipeline
+    # does NOT model (display-item caps, a reference cap). Silently dropping it
+    # let an operator pass M19 while violating an unmodelled journal rule, so
+    # the mandate names the recorded gap instead of pretending the number is the
+    # whole rule set (AGENTS.md rule 3).
+    gaps = [n for n in (_as_profile(profile).length_limit_note("abstract"),
+                        _as_profile(profile).length_limit_note("main_text")) if n]
+    if gaps:
         clause += ("; the profile's own notes record what the number does not capture "
-                   "(including rules this pipeline does NOT model): " + gap_notes)
+                   "(including rules this pipeline does NOT model): " + " | ".join(gaps))
     return clause
 
 
@@ -2851,31 +2313,12 @@ def _cover_preference_clause(profile: VenueProfile) -> str:
     return _cover_bound_text(cover.get("min"), cover.get("max"))
 
 
-def _cover_source_is_venue_guideline(profile: VenueProfile) -> bool:
-    """True when the cover-letter bound's recorded source is a venue guideline.
-
-    `length_rule_text` already distinguishes the master prompt's preference from
-    the venue profile's own recorded basis; every renderer of the cover-letter
-    rule must make the same distinction. Calling a venue guideline a 'user
-    preference' and denying ('the venue profile publishes no cover-letter limit')
-    a limit the profile itself records is the rule-3 defect this test prevents.
-    An absent source is not a venue guideline (the pipeline's own default
-    preference has an empty source at the boundary).
-    """
-    try:
-        lim = _as_profile(profile).length_limits().get("cover letter") or {}
-    except Exception:                                          # noqa: BLE001 -- never gate
-        return False
-    source = str(lim.get("source") or "").strip().lower()
-    return bool(source) and not source.startswith("master-prompt preference")
-
-
 def cover_letter_guidance(profile=None) -> dict:
     """The venue's RECORDED cover-letter guidance, in one shape every prompt reads.
 
     `preference` is the persuading-part range/one-sided bound ("" when the
-    profile states none), `total_max` the venue profile's recorded TOTAL-content
-    cap (None when unset), and `source` the profile's own quoted basis -- the guideline
+    profile states none), `total_max` the operator's total-content cap (None
+    when unset), and `source` the profile's own quoted basis -- the guideline
     text a cover letter falls back to when the venue ships no cover-letter
     template. Never invented: every field comes from the resolved profile.
     """
@@ -2897,7 +2340,7 @@ def cover_letter_guidance_clause(guide: dict) -> str:
         bits.append(f"the persuading part is {guide['preference']}")
     if guide.get("total_max") is not None:
         bits.append(f"its TOTAL content (salutation, body, disclosures and signature) "
-                    f"must stay within {guide['total_max']} words (the venue profile's recorded TOTAL-content cap)")
+                    f"must stay within {guide['total_max']} words (the operator's cap)")
     if guide.get("source"):
         bits.append(f"the recorded basis: {guide['source']}")
     return "; ".join(bits)
@@ -2911,12 +2354,6 @@ _NAMED_COUNTING_KINDS = (("abstract", "the abstract"), ("methods", "Methods"),
                          ("references", "references"),
                          ("figure-legends", "figure legends"),
                          ("table-captions", "table captions"))
-# Kinds that change the counted span only for a venue that EXCLUDES them (the
-# code-side counter honours `table-contents`). They are never named as INSIDE:
-# a profile that does not exclude them needs no sentence about them, and naming
-# them would bloat every prompt. Frontiers explicitly excludes them, and the
-# M19 renderer used to omit that exclusion from the stated span (F190).
-_OPTIONAL_COUNTING_KINDS = (("table-contents", "table contents"),)
 # Back-matter kinds are named separately: a venue whose ONLY exclusions are
 # these still leaves six sections out (the NBT Brief Communication), so the
 # renderer must not say "nothing EXCLUDED" for it.
@@ -2960,8 +2397,7 @@ def main_text_counting_text(profile=None) -> str:
     """
     prof = _as_profile(profile)
     excludes = set(prof.main_text_excludes())
-    left_out = [label for kind, label in
-                (_NAMED_COUNTING_KINDS + _OPTIONAL_COUNTING_KINDS) if kind in excludes]
+    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
     inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
     back_out = _back_matter_counting_text(excludes)
     if not inside:
@@ -2983,8 +2419,7 @@ def _main_text_counting_short(profile=None) -> str:
     """
     prof = _as_profile(profile)
     excludes = set(prof.main_text_excludes())
-    left_out = [label for kind, label in
-                (_NAMED_COUNTING_KINDS + _OPTIONAL_COUNTING_KINDS) if kind in excludes]
+    left_out = [label for kind, label in _NAMED_COUNTING_KINDS if kind in excludes]
     inside = [label for kind, label in _NAMED_COUNTING_KINDS if kind not in excludes]
     back_out = [label for kind, label in _BACK_MATTER_COUNTING_KINDS if kind in excludes]
     parts = []
@@ -2995,45 +2430,6 @@ def _main_text_counting_short(profile=None) -> str:
     if back_out:
         parts.append(f"with {_join_words(back_out)} outside")
     return ", and ".join(parts) if parts else "with nothing excluded"
-
-
-def _relaxation_pct_text(spec) -> str:
-    """The exact relaxation margin as a percentage string (no false rounding).
-
-    `int(round(...))` printed 11.5% as 12%, so `base 100 +12% = 111` was a
-    false identity: the cap is floor(base*relaxation) = 111, not 112 (F189).
-    """
-    try:
-        pct = (float(spec.get("relaxation")) - 1.0) * 100.0
-    except (TypeError, ValueError):
-        return ""
-    if abs(pct - round(pct)) < 1e-9:
-        return str(int(round(pct)))
-    return f"{pct:.4f}".rstrip("0").rstrip(".")
-
-
-def _relaxed_cap_identity(spec) -> str:
-    """`base N +P% = cap` only when that identity is EXACT; else an explicit floor.
-
-    The cap is floor(base*factor), so a non-integral percentage can never be
-    written as an exact `+P%` equation. Keep the historical wording for the
-    shipped integer-percent profiles and state the floor otherwise (F189).
-    """
-    base, cap = spec.get("base"), spec.get("cap")
-    if base is None or cap is None:
-        return ""
-    pct = _relaxation_pct_text(spec)
-    if not pct or pct == "0":
-        return ""
-    try:
-        factor = float(spec.get("relaxation"))
-        exact = float(base) * factor
-    except (TypeError, ValueError):
-        return ""
-    if abs(exact - round(exact)) < 1e-9 and int(round(exact)) == int(cap):
-        return f"base {base} +{pct}% = {cap}"
-    return (f"base {base} +{pct}% -> {cap} "
-            f"(the cap is floor({base} x {factor:g}) = {cap})")
 
 
 def length_rule_text(profile=None) -> str:
@@ -3049,27 +2445,25 @@ def length_rule_text(profile=None) -> str:
     counting_clause = main_text_counting_text(prof)
     counting_sentence = counting_clause[:1].upper() + counting_clause[1:]
     if abstract["cap"] is None and main["cap"] is None:
-        gap_notes = _length_limit_gap_notes(prof)
         limits_para = (
             f"      carries): this venue profile publishes no abstract or main-text number for\n"
             f"      {_article_phrase(prof)}, so there is no relaxed cap to apply here. The limits "
             f"that DO\n"
             f"      apply are the target journal's own: every stage COUNTS the abstract and "
             f"the main text, and each\n"
-            f"      artifact names the limit it applied and the source it came from ({source})."
-            + ((" The profile's own notes also record rules this pipeline does NOT model, so "
-                "the absence of a cap is not the whole rule set: " + gap_notes + ".")
-               if gap_notes else ""))
+            f"      artifact names the limit it applied and the source it came from ({source}).")
     else:
         cap_bits = []
         if abstract["cap"] is not None:
-            _identity = _relaxed_cap_identity(abstract)
+            margin = int(round((float(abstract["relaxation"]) - 1.0) * 100))
             cap_bits.append(f"the abstract <= {abstract['cap']} words"
-                            + (f" ({_identity})" if _identity else ""))
+                            + ("" if margin == 0 else
+                               f" (base {abstract.get('base')} +{margin}% = {abstract['cap']})"))
         if main["cap"] is not None:
-            _identity = _relaxed_cap_identity(main)
+            margin = int(round((float(main["relaxation"]) - 1.0) * 100))
             cap_bits.append(f"the main text <= {main['cap']} words"
-                            + (f" ({_identity})" if _identity else ""))
+                            + ("" if margin == 0 else
+                               f" (base {main.get('base')} +{margin}% = {main['cap']})"))
         limits_para = (
             f"      carries): the limits below DO apply in their RELAXED form. For "
             f"{_article_phrase(prof)} the allowed\n"
@@ -3098,26 +2492,14 @@ def length_rule_text(profile=None) -> str:
                     "The preference recorded by the venue profile is therefore applied as written: ")
     cover_total = limits['cover letter'].get('total_max')
     cover_total_clause = (
-        f"is a SEPARATE cap of {cover_total} words (the venue profile's recorded TOTAL-content cap): trim the "
+        f"is a SEPARATE cap of {cover_total} words (the operator's default): trim the "
         f"non-persuading\n      boilerplate first, never a claim about the work."
         if cover_total is not None else
         "is counted and recorded, but this profile configures no TOTAL-content cap, so "
         "no\n      total-word limit is applied to it.")
     if cover_clause:
-        # The heading and the "never a requirement" clause follow the SAME
-        # provenance test as the rest of the block: a bound recorded from a
-        # venue guideline may not be called a preference the venue does not
-        # state (F85). An absent source keeps the historical wording.
-        cover_from_venue = _cover_source_is_venue_guideline(prof)
-        cover_heading = ("THE COVER LETTER — THE VENUE PROFILE'S RECORDED LIMIT"
-                         if cover_from_venue else
-                         "A RECORDED PREFERENCE, NOT A COVER-LETTER WORD LIMIT")
-        cover_status = ("reported against that recorded basis, and it is never gated"
-                        if cover_from_venue else
-                        "never presented as a journal requirement, and it is never \"fixed\" "
-                        "by deleting content")
         cover_para = (
-            f"    * {cover_heading}. "
+            f"    * THE COVER LETTER — A RECORDED PREFERENCE, NOT A COVER-LETTER WORD LIMIT. "
             f"Provenance, stated honestly:\n"
             f"      {limits['cover letter'].get('source') or 'the venue profile states no official cover-letter limit.'}\n"
             f"      {cover_origin}the "
@@ -3130,7 +2512,9 @@ def length_rule_text(profile=None) -> str:
             f"be\n"
             f"      {cover_clause}. A persuading part outside that\n"
             f"      range is a MINOR formatting item (check id M19), reported and never gated; it "
-            f"is {cover_status}. Count it\n"
+            f"is never\n"
+            f"      presented as a journal requirement, and it is never \"fixed\" by deleting "
+            f"content. Count it\n"
             f"      with the pipeline's word rule. The letter's TOTAL content -- salutation, "
             f"body, disclosures\n"
             f"      and signature -- {cover_total_clause}")
@@ -3196,12 +2580,13 @@ def standing_exemptions_text(profile=None) -> str:
     cover_clause = _cover_preference_clause(prof)
     cover_total = prof.length_limits()["cover letter"].get("total_max")
     total_pref = (
-        f"must stay within {cover_total} words (the venue profile's recorded TOTAL-content cap)"
+        f"must stay within {cover_total} words (the operator's default cap; a profile may\n"
+        f"    override it)"
         if cover_total is not None else
         "is counted and recorded, but this profile configures no TOTAL-content cap, so no\n"
         "    total-word limit is applied")
     total_plain = (
-        f"must stay within {cover_total} words (the venue profile's recorded TOTAL-content cap)"
+        f"must stay within {cover_total} words (the operator's default cap)"
         if cover_total is not None else
         "is counted and recorded with no total-word cap (this profile configures none)")
     # AGENTS rule 3: the page budget is a VENUE rule, so it is asserted only when
@@ -3218,20 +2603,16 @@ def standing_exemptions_text(profile=None) -> str:
         "budget: file a page-budget finding only when the target journal's own guidelines "
         "state one, and cite the guideline")
     cover_bullet = (
-        (f"  * The venue profile's recorded COVER-LETTER limit (the persuading part must be "
-         f"{cover_clause})\n"
-         if _cover_source_is_venue_guideline(prof) else
-         f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n")
-        + f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
+        f"  * The master prompt's COVER-LETTER rule (the persuading part must be {cover_clause})\n"
+        f"    stays a flaggable formatting item: report it, never gate on it. The LETTER ITSELF\n"
         f"    {page_rule} AND\n"
         f"    its TOTAL content -- salutation, body, disclosures and signature -- {total_pref}.\n"
         f"    Trim the non-persuading boilerplate first, never a claim about\n"
         f"    the work, and the page count comes from a render, never from the cached document\n"
         f"    property."
         if cover_clause else
-        "  * This venue profile configures no COVER-LETTER persuading-part preference: the\n"
-        f"    letter's persuading length is recorded and reported, never gated and never cut. "
-        f"The LETTER itself {page_rule}, measured\n"
+        "  * This venue profile states no COVER-LETTER word rule: the letter's length is recorded\n"
+        f"    and reported, never gated and never cut. The LETTER itself {page_rule}, measured\n"
         f"    from a render, and its TOTAL content {total_plain}.")
     caption_source = (prof.captions.get("source")
                       or "this venue profile states no figure-legend length rule")
@@ -3341,24 +2722,13 @@ def caption_report_text(profile=None) -> str:
     if published:
         # A disabled cap on a PUBLISHING venue is not "the venue publishes no
         # limit": the venue's number is known and the operator switched the
-        # proxy off for this run. Say exactly that -- UNLESS the profile itself
-        # selected the schema's documented counts-only form (an explicit
-        # `default_cap: 0` beside the published number), which is the profile's
-        # choice, not an operator override.
-        if not captions.get("default_cap"):
-            origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
-                      f"words, and this profile records it as COUNTS ONLY (`default_cap: 0`): "
-                      f"the pipeline applies no proxy cap, so the author compares each "
-                      f"recorded legend with the venue's {published}-word limit")
-            disposition = (f"recorded — the venue's profile selects counts only; {prof.label} "
-                           f"publishes {published} words and the author compares it in Word")
-        else:
-            origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
-                      f"words, but the OPERATOR DISABLED the proxy cap for this run "
-                      f"(`--caption-limit 0`), so the pipeline applies no number; the author "
-                      f"compares each recorded legend with the venue's {published}-word limit")
-            disposition = (f"recorded — the operator disabled the cap this run; {prof.label} "
-                           f"publishes {published} words and the author compares it in Word")
+        # proxy off for this run. Say exactly that.
+        origin = (f"{source}. {prof.label} publishes a figure-legend limit of {published} "
+                  f"words, but the OPERATOR DISABLED the proxy cap for this run "
+                  f"(`--caption-limit 0`), so the pipeline applies no number; the author "
+                  f"compares each recorded legend with the venue's {published}-word limit")
+        disposition = (f"recorded — the operator disabled the cap this run; {prof.label} "
+                       f"publishes {published} words and the author compares it in Word")
     else:
         origin = (f"{source}, and no proxy cap is\n"
                   f"    configured (`--caption-limit 0`)")
@@ -3494,48 +2864,27 @@ def m19_blocks(profile=None) -> dict:
     cover_clause = _cover_preference_clause(prof)
     has_caps = not caps.startswith("this venue profile sets no")
     counting_clause = main_text_counting_text(prof)
-    length_gap_notes = _length_limit_gap_notes(prof)
     cover_total = prof.length_limits()["cover letter"].get("total_max")
     cover_total_note = (
         f"the cover letter's TOTAL content must stay within {cover_total} words (every line "
         f"counts: salutation, body, disclosures and signature)"
         if cover_total is not None else
         "this venue profile sets no cover-letter total-word cap")
-    cover_source_venue = _cover_source_is_venue_guideline(prof)
-    cover_note = cover_total_note
-    if cover_clause:
-        cover_note += (f", and its persuading part is the venue profile's recorded "
-                       f"limit ({cover_clause})"
-                       if cover_source_venue else
-                       f", and its persuading part is the USER PREFERENCE {cover_clause}")
-    cover_tail = (f"this is the venue profile's own recorded cover-letter limit, not "
-                  f"the operator's preference, and an over-limit persuading part is "
-                  f"reported as a MINOR formatting item (check id M19), never a gate"
-                  if cover_source_venue else
-                  f"this is the user's preference, not {_indefinite(prof.short)} requirement, "
+    cover_note = (cover_total_note
+                  + (f", and its persuading part is the USER PREFERENCE {cover_clause}"
+                     if cover_clause else ""))
+    cover_tail = (f"this is the user's preference, not {_indefinite(prof.short)} requirement, "
                   f"and the venue "
-                  f"profile publishes no cover-letter limit")
+                  f"profile publishes no cover-letter limit"
+                  if cover_clause else "no cover-letter preference is configured")
     if cover_total is not None:
-        cover_tail += (f"; the {cover_total}-word TOTAL cap is the venue profile's "
-                      f"recorded budget")
+        cover_tail += f"; the {cover_total}-word TOTAL cap is the operator's budget"
     cover_row = (
-        (f"only when the persuading part falls outside the venue profile's recorded "
-         f"limit ({cover_clause}) -- report it against that recorded basis, never as a "
-         f"pipeline-invented requirement, and never a reason to delete content."
-         if cover_source_venue else
-         f"only when the persuading part falls outside the user preference "
-         f"({cover_clause}) -- never as a journal requirement, and never a reason to "
-         f"delete content.")
+        f"only when the persuading part falls outside the user preference "
+        f"({cover_clause}) -- never as a journal requirement, and never a reason to delete content."
         if cover_clause else
         "only when a cover-letter preference is configured -- never as a journal requirement, "
         "and never a reason to delete content.")
-    cover_judge_provenance = (
-        "the cover-letter limit is the one the venue profile records: an over-limit "
-        "persuading part is at most a +/-1 formatting-tier difference, reported against "
-        "that recorded basis and never a gate."
-        if cover_source_venue else
-        "the cover-letter preference is user-set: it is at most a +/-1 formatting-tier "
-        "difference, never a journal requirement.")
     # The cover-letter TOTAL cap is a profile value like every other M19
     # number: a profile that configures none must not be told to hit "the
     # configured cap" (or the default venue's 650) in a mandate.
@@ -3554,41 +2903,18 @@ def m19_blocks(profile=None) -> dict:
                            "and never cut it for length.")
         rewrite_cover = ("the cover letter has no configured TOTAL-content cap: count it and never "
                          "cut it for length")
-    # The persuading-part rule is separate from the TOTAL cap: say nothing about
-    # "the configured preference" when the profile configures none (an explicit
-    # null pair means none), and name a recorded venue limit as the venue's own.
+    # The persuading-part preference is separate from the TOTAL cap: say
+    # nothing about "the configured preference" when the profile configures
+    # none (an explicit null pair means none).
     pref_clause = (
-        (f" -- and when the persuading part is outside the venue profile's recorded "
-         f"limit ({cover_clause}), bring it into the range by removing redundancy only "
-         f"(never content); {cover_tail}"
-         if cover_source_venue else
-         f" -- and when the persuading part is outside the user's {cover_clause} "
-         f"preference, bring it into the range by removing redundancy only (never "
-         f"content); {cover_tail}")
+        f" -- and when the persuading part is outside the user's {cover_clause} preference, bring "
+        f"it into the range by removing redundancy only (never content); {cover_tail}"
         if cover_clause else "")
     # The venue's OWN number is the base one; the pipeline's relaxation is a
     # margin, not a second cap. A section between the two used to be reported
     # clean everywhere, which is how an abstract of 164 words passed a 150-word
     # venue: the band clause makes it a row every stage must dispose.
-    limits = prof.length_limits()
-    band_bits = []
-    for _key, _label in (("abstract", "abstract"), ("main text", "main text")):
-        _spec = limits[_key]
-        _base, _cap = _spec.get("base"), _spec.get("cap")
-        if _base is None or _cap is None or int(_cap) <= int(_base):
-            continue
-        _identity = _relaxed_cap_identity(_spec)
-        if _identity:
-            band_bits.append(f"{_label} {_identity} words")
     band_clause = ""
-    if band_bits:
-        band_clause = (
-            "THE BAND IS REPORTED, NOT ENFORCED: a section above the venue's own base but "
-            "within this pipeline's relaxed cap (" + "; ".join(band_bits) + ") must be "
-            "RECORDED as its own M19 row naming the venue's base, the margin and the relaxed "
-            "cap -- the row says the section is within the relaxed cap, not that the venue's "
-            "base was met. It is within the limit applied here, so it is never a finding, "
-            "never compressed and never scored.")
     review = f"""3b. The PIPELINE-MANDATED length sweep M19 (see the length rule in the standing
    exemptions): enumerate the ABSTRACT and the MAIN TEXT of every submission document that carries
    one -- and the PERSUADING PART of the cover letter -- into guided_review/artifacts/M19_length.md, one
@@ -3631,34 +2957,30 @@ If the base is ALREADY over a cap, surface it in rewritten/REWRITE_REPORT.md
 under "PROBLEMS SURFACED" -- the revision and integration stages own the compression, and this
 stage must not change content to achieve it. {band_clause}"""
     else:
-        gap_sentence = (
-            " The profile's own notes record rules this pipeline does NOT model (the absence of "
-            "a cap is not the whole rule set): " + length_gap_notes
-            + "; count and report those rules too."
-            if length_gap_notes else "")
         revise = f"""Abstract/main-text length (check id M19; see the length rule): this venue profile sets no
      abstract or main-text cap, so do NOT compress, reword or cut a section for length: count the
      abstract and the main text, name the limit the target journal's own guidelines give (and its
      source) in CHANGELOG.md, and change that text only for the non-length findings you were
      handed. Count with the pipeline's definition (maximal runs of NON-SPACE characters; a newline
      is a space), and hand any length question you cannot answer from the guidelines to
-     revised/MANUAL_STEPS.md instead of guessing. Cover letter: {cover_note}.{gap_sentence}"""
-        integrate = f"""Abstract/main-text length (check id M19) is a REPORTED difference class, not a compression one:
+     revised/MANUAL_STEPS.md instead of guessing. Cover letter: {cover_note}."""
+        integrate = """Abstract/main-text length (check id M19) is a REPORTED difference class, not a compression one:
 this venue profile sets no cap, so enumerate and diff the counts, never port or cut text because
-one version is shorter or longer, and never let a word count decide a comparison.{gap_sentence}"""
-        rewrite = f"""Abstract/main-text length (check id M19) is REPORTED here, not fixed: this venue profile sets
+one version is shorter or longer, and never let a word count decide a comparison."""
+        rewrite = """Abstract/main-text length (check id M19) is REPORTED here, not fixed: this venue profile sets
 no cap, so count the abstract and the main text and surface the counts (with the limit the target
 journal's guidelines state, and its source) in rewritten/REWRITE_REPORT.md under "PROBLEMS
-SURFACED". Never change content to reach a word count.{gap_sentence}"""
+SURFACED". Never change content to reach a word count."""
     judge = f"""PLUS the pipeline-mandated length sweep M19 (count the abstract and the main
    text -- and the cover letter's persuading part -- with the pipeline's word definition and record the rows in
    judge_review/artifacts/M19_length.md; {caps_article}; {cover_note}). Length is FORMATTING-tier evidence: a version within the cap may be
    preferred to one that is over it by at most +/-1, two versions that are both over (or both
    within) are indistinguishable and score 0, and a length row is a formatting-tier MINOR row
    whose +/-1 can never outweigh a difference in a higher tier.
-   An over-cap section never makes a version ineligible, and {cover_judge_provenance}
-   A cover letter whose TOTAL content is over its cap is a formatting-tier item too: report it,
-   never gate on it, and never let it outweigh a higher tier. {band_clause}"""
+   An over-cap section never makes a version ineligible, and the cover-letter preference is
+   user-set: it is at most a +/-1 formatting-tier difference, never a journal requirement. A cover
+   letter whose TOTAL content is over its cap is a formatting-tier item too: report it, never gate
+   on it, and never let it outweigh a higher tier. {band_clause}"""
     return {"review": review, "revise": revise, "integrate": integrate, "rewrite": rewrite,
             "judge": judge}
 
@@ -3944,14 +3266,9 @@ def display_kind_rule_text(prof, kind: str, block: dict) -> str:
             "live in the legends area at the end, so no caption is required next to the image; "
             "the collect/keep-labels rule still applies (every legend carries its label).")
     else:
-        # No `caption` value (and `any`) means the venue pins NO caption rule:
-        # the code-side scan emits no caption row then. The old wording still
-        # claimed "no caption at all is FMT-TB1", inventing a requirement the
-        # profile never declared (F178).
         lines.append(
-            f"  * THE CAPTION: this venue profile states no {kind} caption-side rule and no "
-            f"{kind} caption requirement; a {kind} that carries no caption at all is not "
-            f"{r1} on that ground.")
+            f"  * THE CAPTION: the venue does not pin the caption's side; a {kind} that carries "
+            f"no caption at all is still {r1}.")
     specials = block.get("special") or []
     if specials:
         lines.append(
@@ -4213,19 +3530,6 @@ HIERARCHY_RECONCILE_INTEGRATE = """SOURCE-HIERARCHY (check id M30): an M30 findi
    under code/ with its rerun note, raw_data/ is never edited, and the DIFF_LEDGER row names
    which side was authoritative and why."""
 
-HIERARCHY_RECONCILE_REVISION_AUDIT = """SOURCE-HIERARCHY (check id M30): the authority order a WRONG-VALUE row is decided by is
-   @@SOURCE_HIERARCHY@@. Code outranks raw data; raw data is a READ-ONLY source and outranks every
-   editable surface (figures, tables, main text, supplementary text). A revision that changed a
-   written value so that it now disagrees with a shipped producer is a row against the revision,
-   never against the producer. The audit plans and reports: it edits neither the code, the data
-   nor the manuscript."""
-
-HIERARCHY_RECONCILE_REVISION_REPAIR = """SOURCE-HIERARCHY (check id M30): re-validate the row's claim against the standing order
-   @@SOURCE_HIERARCHY@@. Code outranks raw data; raw data is READ-ONLY and outranks every editable
-   surface. A row whose proposed `correct` value would move the written surface AWAY from its
-   producer is `rejected` with the contradicting evidence, not applied. Never edit raw_data/ or
-   code/ here."""
-
 
 def apply_hierarchy_reconcile(text: str, where: str) -> str:
     """Substitute the M30 block for the stage that owns it."""
@@ -4233,9 +3537,7 @@ def apply_hierarchy_reconcile(text: str, where: str) -> str:
              "audit": HIERARCHY_RECONCILE_AUDIT,
              "revise": HIERARCHY_RECONCILE_REVISE,
              "rewrite": HIERARCHY_RECONCILE_REWRITE,
-             "integrate": HIERARCHY_RECONCILE_INTEGRATE,
-             "revision_audit": HIERARCHY_RECONCILE_REVISION_AUDIT,
-             "revision_repair": HIERARCHY_RECONCILE_REVISION_REPAIR}.get(where, "")
+             "integrate": HIERARCHY_RECONCILE_INTEGRATE}.get(where, "")
     # The block spells the hierarchy itself: the guided-review/audit/rewrite builders
     # fill @@SOURCE_HIERARCHY@@ only inside the attached master prose, so a
     # token left here would reach the session unresolved.
@@ -4623,13 +3925,6 @@ AUTHOR_TO_COMPLETE_README_HEADER = (
 AUTHOR_TO_COMPLETE_MANAGED_BEGIN = (
     "<!-- pipeline-managed: author-to-complete rows; regenerated on publication -->")
 AUTHOR_TO_COMPLETE_MANAGED_END = "<!-- end pipeline-managed author-to-complete rows -->"
-# When the author's own classified table is the one inventory, the publisher
-# appends its rows to that table (one-table rule) instead of writing the managed
-# block. This hidden comment then records exactly which T-ids it generated, so
-# the NEXT publish can drop a row whose item has since been resolved instead of
-# mistaking it for author text and keeping it forever.
-AUTHOR_TO_COMPLETE_GENERATED_RE = re.compile(
-    r"<!--\s*pipeline-generated-row-ids:\s*([^>]*)-->\s*")
 
 
 def _atc_mode(value=None) -> str:
@@ -4645,9 +3940,7 @@ def _atc_mode(value=None) -> str:
     """
     if isinstance(value, bool):
         return "document" if value else "off"
-    if value is None:
-        return DEFAULT_AUTHOR_TO_COMPLETE
-    s = str(value).strip().lower()
+    s = str(value or "").strip().lower()
     if not s:
         return DEFAULT_AUTHOR_TO_COMPLETE
     if s in AUTHOR_TO_COMPLETE_MODES:
@@ -4665,58 +3958,29 @@ def handoff_target(mode=None) -> str:
 
 _HANDOFF_MARKER_RE = re.compile(
     r"\[\s*AUTHOR\s+TO\s+COMPLETE\s*:?\s*(.*?)\s*\]", re.I | re.S)
-# A line that MENTIONS the token describes the convention; it is not an author
-# action. The marker is a mention when it is quoted, introduced by a
-# determiner/name for the token ("the [AUTHOR TO COMPLETE: ...]"), or followed
-# by a copula ("... ] is forbidden"). F191's rule sentences were turned into
-# mangled checklist rows by the old keyword-only guard.
-_HANDOFF_MENTION_BEFORE_RE = re.compile(
-    r"(?:\b(?:the|a|an|this|that|these|those|each|every|any|no|word|phrase|"
-    r"string|label|token|marker|literal|placeholder)\s+|"
-    r"['\"\u2018\u2019\u201c\u201d`])\s*$", re.I)
-_HANDOFF_MENTION_AFTER_RE = re.compile(
-    r"\s*['\"\u2018\u2019\u201c\u201d`]?\s*"
-    r"(?:is|are|was|were|means|marks|denotes|indicates|refers|stands)\b", re.I)
 
 
 def _handoff_items_from_manual_steps(text: str) -> list:
     """The author-action lines a MANUAL_STEPS.md carries in marker form.
 
-    Parsed over the WHOLE text: a marker payload may continue on the next line,
-    and two markers on one line are two items (F080). For a single marker the
-    surrounding sentence is kept (the marker is replaced by its payload), which
-    is the documented MOVE-not-invent behaviour.
+    The readme mode's prompt tells a stage to write the hand-off README
+    directly. This extractor is the mechanical fallback for a stage that left
+    the same item in its MANUAL_STEPS.md with the literal marker: the item is
+    MOVED (marker removed, surrounding sentence kept), never invented, so a
+    missing README cannot silently drop the author's work item.
     """
     out, seen = [], set()
-    whole = str(text or "")
-    for m in _HANDOFF_MARKER_RE.finditer(whole):
-        line_start = whole.rfind("\n", 0, m.start()) + 1
-        line_end = whole.find("\n", m.end())
-        line_end = len(whole) if line_end < 0 else line_end
-        block = whole[line_start:line_end]
-        if block.strip().startswith("|"):
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if not line or not _HANDOFF_MARKER_RE.search(line):
             continue
-        before = whole[line_start:m.start()]
-        before = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", before)
-        if re.search(r"\b(?:token|marker|literal|forbidden)\b", before, re.I):
+        # A classified TODO row is already an inventory row, not a marker-form
+        # bullet to be moved into the README as prose. Moving it would turn
+        # `| T-001 | ... |` into a bullet and lose its columns.
+        if line.startswith("|") or line.count("|") >= 2:
             continue
-        if _HANDOFF_MENTION_BEFORE_RE.search(before[-40:]) \
-                or _HANDOFF_MENTION_AFTER_RE.match(whole[m.end():line_end]):
-            continue
-        payload = re.sub(r"\s+", " ", m.group(1) or "").strip(" .;:")
-        if not payload:
-            continue
-        markers_here = len(_HANDOFF_MARKER_RE.findall(block))
-        if markers_here > 1:
-            cleaned = payload
-        else:
-            without = _HANDOFF_MARKER_RE.sub("", block)
-            if payload.lower() in without.lower():
-                cleaned = without
-            else:
-                cleaned = block[:m.start() - line_start] + payload \
-                    + block[m.end() - line_start:]
-        cleaned = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", cleaned)
+        line = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", line)
+        cleaned = _HANDOFF_MARKER_RE.sub(lambda m: m.group(1).strip(), line)
         cleaned = re.sub(r"\s+", " ", cleaned).strip(" .;:")
         if not cleaned:
             continue
@@ -4819,14 +4083,8 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
                 f"{AUTHOR_TO_COMPLETE_README} could not be read (it is a symlink/non-regular "
                 f"file, unreadable, or over the byte budget); the hand-off item cannot be "
                 f"merged into it")
-    existing_rows, row_problems = manual_todo_rows_from_text(existing)
-    if row_problems and warns is not None:
-        # The parser computed the exact problem and the caller discarded it, so
-        # a malformed existing row silently vanished from the merge (F185).
-        warns.extend(f"{AUTHOR_TO_COMPLETE_README}: existing hand-off row not usable: {p}"
-                     for p in row_problems)
-    known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)
-                      ).strip(" .;:").lower()
+    existing_rows, _row_problems = manual_todo_rows_from_text(existing)
+    known = {re.sub(r"\s+", " ", re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", ln)).strip().lower()
              for ln in existing.splitlines()
              if re.match(r"^\s*(?:[-*+]|\d+[.)])\s+", ln)}
     # A classified TABLE row is the author-facing form of the same item: the
@@ -4836,22 +4094,14 @@ def ensure_handoff_readme(ctx: Ctx, pkg_dir: Path, warns: list = None,
         desc = re.sub(r"\s+", " ", str(row.get("description") or "")).strip().lower()
         if desc:
             known.add(desc)
-    # A refused row still NAMES an author item: seed `known` from every
-    # classified-table description (the parser accepted or refused), or the
-    # same item is appended as a fresh T-id beside its own malformed row.
-    for desc in _manual_todo_all_descriptions(existing):
-        known.add(desc)
     new = [it for it in items if it.lower() not in known]
     if not new:
         return {}
     # The fallback must produce the SAME classified inventory the readme rule
     # requires, not a prose bullet: one four-column row per item, in the ONE
     # table, with a T-id that does not collide with the rows already there
-    # (F20). The id space is SHARED with MANUAL_STEPS.md (the gate reads both
-    # files as ONE inventory), so `text` -- the source of these items -- counts
-    # toward the collision check as well.
-    used = [int(m.group(1)) for m in
-            re.finditer(r"\bT-(\d+)\b", "\n".join(t for t in (existing, text) if t))]
+    # (F20).
+    used = [int(m.group(1)) for m in re.finditer(r"\bT-(\d+)\b", existing)]
     next_n = max(used, default=0) + 1
     classified = []
     for offset, it in enumerate(new):
@@ -4899,15 +4149,6 @@ MANUAL_ACTIONS = (
     "MANUALLY DO/DO_NOT correct without any LLMs-recommended corrections",
 )
 MANUAL_TODO_FILES = ("MANUAL_STEPS.md", AUTHOR_TO_COMPLETE_README)
-# Ledger statuses that record an edit ALREADY APPLIED to the package: the author
-# must confirm or reject it (author action 1), never be told no recommendation
-# exists. `manual-required`/`unresolved` keep the "recommendation provided" or
-# "no recommendation" action.
-MANUAL_TODO_APPLIED_STATUSES = ("fixed", "fixed-with-caveat", "placeholder-inserted")
-# The documented id spelling (`T-001`, `T-002`, ...): the prefix, at least three
-# digits, no redundant leading zero (T-0001 would sit in the same numeric slot
-# as T-001 in the one id space) and never T-000.
-MANUAL_TODO_ID_RE = re.compile(r"^T-(?:0(?!00)\d{2}|[1-9]\d{2,})$")
 
 
 def _manual_md_cells(line: str) -> list:
@@ -4919,13 +4160,6 @@ def _manual_md_cells(line: str) -> list:
         text = text[:-1]
     cells, cur, i = [], [], 0
     while i < len(text):
-        if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "\\":
-            # `md_table_cell` escapes a literal backslash as `\\`; decode it in
-            # the SAME pass as `\|` or a Windows path/LaTeX token doubles on
-            # every write/read round trip (F133).
-            cur.append("\\")
-            i += 2
-            continue
         if text[i] == "\\" and i + 1 < len(text) and text[i + 1] == "|":
             cur.append("|")
             i += 2
@@ -5026,9 +4260,6 @@ def manual_todo_rows_from_text(text: str) -> tuple:
             bad = []
             if not ident:
                 bad.append("empty TODO item ID")
-            elif not MANUAL_TODO_ID_RE.match(ident):
-                bad.append("TODO item ID must be the documented T-### form (e.g. T-001), "
-                           f"got {ident!r}")
             if not importance:
                 bad.append("importance must be one of " + ", ".join(MANUAL_IMPORTANCES))
             if not action:
@@ -5046,35 +4277,6 @@ def manual_todo_rows_from_text(text: str) -> tuple:
             j += 1
         i = max(j, i + 1)
     return rows, problems
-
-
-def _manual_todo_all_descriptions(text: str) -> list:
-    """Descriptions of ALL classified-table rows, including rows the parser refused.
-
-    `manual_todo_rows_from_text` drops a row whose id/importance/action is
-    malformed, but its DESCRIPTION still names the same author item. The
-    hand-off merge reads this list so it cannot append that item again under a
-    new T-id (F185/F193).
-    """
-    lines = str(text or "").splitlines()
-    out, i = [], 0
-    while i + 1 < len(lines):
-        header = _manual_md_cells(lines[i]) if "|" in lines[i] else []
-        idx = _manual_header_columns(header) if header else {}
-        if not idx or not _manual_md_separator(lines[i + 1]):
-            i += 1
-            continue
-        j = i + 2
-        while j < len(lines) and "|" in lines[j]:
-            if not _manual_md_separator(lines[j]):
-                cells = _manual_md_cells(lines[j])
-                if len(cells) == max(idx.values()) + 1:
-                    desc = re.sub(r"\s+", " ", cells[idx["description"]]).strip().lower()
-                    if desc and desc not in out:
-                        out.append(desc)
-            j += 1
-        i = max(j, i + 1)
-    return out
 
 
 def _manual_has_table(text: str) -> bool:
@@ -5132,8 +4334,6 @@ def _manual_csv_matches(path: Path, rows: list) -> bool:
     expected = [list(MANUAL_TODO_COLUMNS)] + [
         [r[c] for c in MANUAL_TODO_COLUMNS] for r in _manual_todo_csv_rows(rows)]
     try:
-        if path.is_symlink():
-            return False
         if path.stat().st_size > MANUAL_TODO_MAX_BYTES:
             return False
         with open(path, "r", encoding="utf-8-sig", newline="") as f:
@@ -5190,14 +4390,8 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True, mode: str = None) -> tup
             return [], [f"{pkg.name}: {note}"]
         return [], []
     rows, problems, sources = manual_todo_rows(pkg)
-    counts = sum(int(n) for n in (count_manual_steps(p) for p in files)
-                 if n is not None and n >= 0)
+    counts = sum(int(count_manual_steps(p) or 0) for p in files)
     errs, warns = [], []
-    for _p in files:
-        if count_manual_steps(_p) == MANUAL_STEPS_UNREADABLE:
-            errs.append(f"{pkg.name}: {_p.name} exists but could not be read; its "
-                        f"manual-item count is UNKNOWN (not 0). Make the file readable "
-                        f"and re-run")
     if problems:
         return problems, warns
     if not sources:
@@ -5245,10 +4439,7 @@ def manual_todo_gate(pkg_dir: Path, write: bool = True, mode: str = None) -> tup
                 f"cannot be replaced by a MANUAL_STEPS.md table")
     rows_by_source = Counter(r.get("source") for r in rows)
     for path in files:
-        _count = count_manual_steps(path)
-        if _count is None or _count < 0:
-            continue          # absent, or already reported as unreadable above
-        n = int(_count)
+        n = int(count_manual_steps(path) or 0)
         table_n = rows_by_source.get(path.name, 0)
         if n > table_n:
             warns.append(
@@ -5310,83 +4501,11 @@ def _clean_handoff_row(value) -> str:
     return re.sub(r"\s+", " ", row).strip(" .;:")
 
 
-_HANDOFF_LOC_PAYLOAD_RE = re.compile(r"^(?P<loc>[^:|]{1,200}?):\s*(?P<payload>.+)$")
-
-
-def _handoff_action_rank(action) -> int:
-    """Stronger author action = smaller rank (applied > recommended > none)."""
-    return {MANUAL_ACTIONS[0]: 0, MANUAL_ACTIONS[1]: 1}.get(str(action or ""), 2)
-
-
-def _handoff_item_key(location, payload) -> tuple:
-    """The identity of ONE hand-off item: (location, payload), normalized.
-
-    `()` when the source names no payload: an item with no payload cannot be
-    matched to another spelling of the same item without risking two DIFFERENT
-    items collapsing into one (which would lose author work). A `missing `
-    prefix and a location repeated at the head of the payload are removed, so a
-    ledger row (`a.txt: software version`), a marker row
-    (`a.txt: missing software version`) and a stage description
-    (`software version`) for the same item share one key (F86).
-    """
-    loc = re.sub(r"\s+", " ", str(location or "")).strip().strip(" .;:").lower()
-    pay = re.sub(r"\s+", " ", str(payload or "")).strip().strip(" .;:").lower()
-    pay = re.sub(r"^missing\s+", "", pay)
-    if loc and pay.startswith(loc + ": "):
-        pay = pay[len(loc) + 2:].strip()
-    return (loc, pay) if pay else ()
-
-
-def _handoff_description_key(description, payload_index: dict) -> tuple:
-    """The item identity a checklist row DESCRIPTION names, or () when ambiguous.
-
-    A description that names its location (`a.txt: software version`) is
-    self-identifying. A bare payload (`software version`) is used only when
-    exactly ONE known item carries it: two items in different files that happen
-    to name the same payload must stay two rows, never collapse into one.
-    """
-    text = re.sub(r"\s+", " ", str(description or "")).strip().strip(" .;:").lower()
-    if not text:
-        return ()
-    # A publisher-generated row is "F-001 [manual-required; major] loc: payload".
-    # The leading id/status prefix is not part of the item identity; leaving it
-    # in made the key miss on every re-publication and append a duplicate row
-    # with a fresh T-id (F090).
-    text = re.sub(r"^[a-z]-\d+\s*\[[^\]]*\]\s*", "", text)
-    text = re.sub(r"^missing\s+", "", text)
-    known_keys = {k for pkeys in payload_index.values() for k in pkeys}
-    match = _HANDOFF_LOC_PAYLOAD_RE.match(text)
-    if match:
-        key = _handoff_item_key(match.group("loc"), match.group("payload"))
-        if key in known_keys:
-            return key
-    keys = payload_index.get(text) or ()
-    if len(keys) == 1:
-        return next(iter(keys))
-    # A hand-edited / older row can carry a non-canonical prefix the bracket
-    # strip above does not recognise (e.g. "F-001 manual-required M31: loc:
-    # payload"), so the location/payload match above produces an identity no
-    # known item carries. Fall back to the item's own PAYLOAD when exactly one
-    # known item carries it, so the malformed row still matches the ledger item
-    # and the same author work is not appended a second time (F193).
-    hits = set()
-    for payload, pkeys in payload_index.items():
-        if payload and len(payload) >= 12 and payload in text:
-            hits.update(pkeys)
-    return next(iter(hits)) if len(hits) == 1 else ()
-
-
 def _readme_action_rows(text: str) -> list:
     """Bullet/numbered and Markdown-table data rows from one checklist."""
     rows, seen = [], set()
     separator = re.compile(r"^\s*\|?[\s:\-|]*\-[\s:\-|]*\|?\s*$")
     table_lines = []
-    # A valid two-column GFM table may be written without outer pipes, so its
-    # header and data rows carry ONE pipe each. The old `count("|") >= 2` test
-    # dropped every such row, and the caller then re-appended existing author
-    # work under fresh T-ids (F003). Track the table's separator instead: the
-    # one-pipe row ABOVE it is the header, the one-pipe rows below are data.
-    two_col_table = False
 
     def add(value) -> None:
         row = _clean_handoff_row(value)
@@ -5395,7 +4514,7 @@ def _readme_action_rows(text: str) -> list:
             rows.append(row)
 
     def flush_table() -> None:
-        nonlocal table_lines, two_col_table
+        nonlocal table_lines
         if not table_lines:
             return
         # A normal table has a header followed by its separator. A one-line
@@ -5407,37 +4526,19 @@ def _readme_action_rows(text: str) -> list:
                     if len(table_lines) > 1 and separator.match(table_lines[1])
                     else table_lines)
         for line in data:
-            # `_manual_md_cells` honours the `\|` escape that the classified
-            # table emits; splitting on every pipe produced a different row
-            # string from the gate's parser (F196).
-            add(" | ".join(cell.strip() for cell in _manual_md_cells(line)))
+            add(" | ".join(cell.strip()
+                           for cell in line.strip().strip("|").split("|")))
         table_lines = []
-        two_col_table = False
 
-    lines = str(text or "").splitlines()
-    for idx, raw in enumerate(lines):
+    for raw in str(text or "").splitlines():
         bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", raw)
         if bullet:
             flush_table()
             add(bullet.group(1))
             continue
-        pipes = raw.count("|")
-        if pipes >= 2:
+        if raw.count("|") >= 2:
             table_lines.append(raw)
             continue
-        if pipes == 1:
-            # The separator OPENS a no-outer-pipe table; the one-pipe line above
-            # it is its header (dropped by flush_table), the rows below are data.
-            if separator.match(raw):
-                table_lines.append(raw)
-                two_col_table = True
-                continue
-            nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
-            # Only a PIPE-bearing delimiter opens a table; a bare `---`
-            # horizontal rule must not turn the preceding prose into a header.
-            if two_col_table or ("|" in nxt and separator.match(nxt)):
-                table_lines.append(raw)
-                continue
         flush_table()
     flush_table()
     return rows
@@ -5554,7 +4655,7 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     author text and bullets outside that block are preserved.
     """
     root = Path(root)
-    items, problems = [], []
+    rows, problems = [], []
     oi = open_items or {}
     # "discarded" rows are findings the auditor refused, not work the author
     # owes. Re-emitting one as a checklist item would make it impossible for
@@ -5574,57 +4675,18 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
                 f"{'; ' + tag if tag else ''}] "
                 f"{loc + ': ' if loc else ''}{ev}").strip()
         if text:
-            # The published row must carry the author action the manual-TODO
-            # rule assigns: an already-applied correction is CONFIRM/REJECT
-            # (action 1), never the "no LLMs-recommended corrections" action.
-            items.append({
-                "row": _clean_handoff_row(text),
-                "action": (MANUAL_ACTIONS[0]
-                           if status.lower() in MANUAL_TODO_APPLIED_STATUSES
-                           else MANUAL_ACTIONS[2]),
-                "key": _handoff_item_key(loc, ev),
-            })
+            rows.append(_clean_handoff_row(text))
     markers = _handoff_marker_occurrences(root, problems=problems)
     for occ in markers:
         payload = _clean_handoff_row(occ["marker"])
-        items.append({
-            "row": f"{occ['file']}: missing {payload or 'the marked item'}",
-            "action": MANUAL_ACTIONS[2],
-            "key": _handoff_item_key(occ["file"], payload),
-        })
+        rows.append(f"{occ['file']}: missing {payload or 'the marked item'}")
     # A summary residual can say "N hand-off markers" while the marker text
     # sits in a format this package cannot parse (for example an image-only
     # PDF). It is additive: another parsed row must not hide the unparsed one.
     for it in (residuals or {}).get("items") or []:
         if "hand-off marker" in str(it):
-            items.append({"row": _clean_handoff_row(it),
-                          "action": MANUAL_ACTIONS[2], "key": ()})
-    # Deduplicate by the ITEM's own identity, not by the formatted row string:
-    # a ledger row, a marker row and a stage table description for the same
-    # missing item never render identically, so whole-string comparison wrote
-    # all three rows with contradictory author actions (F86). When two sources
-    # describe one item, the stronger action wins (applied > recommended >
-    # none) and the first (most informative) row text is kept.
-    rows, action_of, payload_index, by_key = [], {}, {}, {}
-    for it in items:
-        if not it["row"]:
-            continue
-        key = it["key"]
-        if key:
-            prev = by_key.get(key)
-            if prev is not None:
-                if _handoff_action_rank(it["action"]) < _handoff_action_rank(prev["action"]):
-                    prev["action"] = it["action"]
-                    # Read back by the LOWER-CASED row key; storing the mixed-case
-                    # key here silently kept the weaker action (F124).
-                    action_of[prev["row"].lower()] = prev["action"]
-                continue
-            by_key[key] = it
-            payload_index.setdefault(key[1], set()).add(key)
-        if it["row"].lower() in action_of and not key:
-            continue
-        rows.append(it["row"])
-        action_of[it["row"].lower()] = it["action"]
+            rows.append(_clean_handoff_row(it))
+    rows = [_clean_handoff_row(r) for r in rows if str(r).strip()]
     rows = list(dict.fromkeys(r for r in rows if r))
     target = Path(target_path) if target_path is not None \
         else root / AUTHOR_TO_COMPLETE_README
@@ -5652,22 +4714,8 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
         # disagree about what the author owes (F68).
         existing = read_text_bounded(Path(existing_from)) or ""
     external, _managed_rows, had_block = _split_managed_handoff_readme(existing)
-    _prev_generated = AUTHOR_TO_COMPLETE_GENERATED_RE.search(external)
-    if _prev_generated:
-        # Rebuild the author's table from AUTHOR rows + the CURRENT ledger rows:
-        # rows this publisher generated last time are removed first, so a
-        # resolved item actually disappears.
-        _prev_ids = {x.strip() for x in _prev_generated.group(1).split(",") if x.strip()}
-        external = AUTHOR_TO_COMPLETE_GENERATED_RE.sub("", external, count=1)
-        if _prev_ids:
-            external = _drop_manual_todo_rows(external, _prev_ids)
     if stage_text:
-        stage_rows, stage_problems = manual_todo_rows_from_text(stage_text)
-        if stage_problems:
-            # A stage table row the parser refused (a malformed T-id, a bad
-            # importance) must be REPORTED: silently dropping it from the merge
-            # would lose the author's work item.
-            problems.extend(p for p in stage_problems if p not in problems)
+        stage_rows, _stage_problems = manual_todo_rows_from_text(stage_text)
         if stage_rows:
             stage_ids = {str(r.get("id") or "").strip() for r in stage_rows}
             if external.strip():
@@ -5683,61 +4731,17 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     # block below, so this cannot duplicate an active row.
     external_rows = _readme_action_rows(external)
     known = {row.lower() for row in external_rows}
-    # A stage checklist already carrying a row for the item must keep it: the
-    # publisher adds only the items the checklist does NOT cover. The row is
-    # matched by ITEM identity (its description), never by the whole formatted
-    # line, which cannot equal a ledger or marker row (F86).
-    ext_struct, ext_problems = manual_todo_rows_from_text(external)
-    if ext_problems:
-        # The stage branch above REPORTS a refused table row; the external
-        # branch silently dropped it, so the same author item was appended
-        # under a new T-id beside its own malformed row (F193).
-        problems.extend(p for p in ext_problems if p not in problems)
-    ext_descriptions = [str(er.get("description") or "") for er in ext_struct]
-    ext_descriptions += _manual_todo_all_descriptions(external)
-    ext_descriptions += [
-        m.group(1) for m in (re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", ln)
-                             for ln in str(external or "").splitlines()) if m
-    ]
-    matched_keys = set()
-    for description in ext_descriptions:
-        key = _handoff_description_key(description, payload_index)
-        if key and key in by_key:
-            matched_keys.add(key)
     managed_now = []
     seen = set()
     for row in rows:
-        key = next((k for k, item in by_key.items() if item["row"] == row), ())
-        if key and key in matched_keys:
-            continue
         if row.lower() in known or row.lower() in seen:
             continue
         seen.add(row.lower())
         managed_now.append(row)
-    # An external row that already carries the item keeps its own T-id, but its
-    # author action is UPGRADED when another source records a stronger one: an
-    # applied ledger correction must reach the author as CONFIRM/REJECT, not as
-    # the stage row's "no LLM corrections" action (F86).
-    upgrade_rows, upgrade_ids = [], set()
-    for er in ext_struct:
-        key = _handoff_description_key(er.get("description"), payload_index)
-        src = by_key.get(key) if key else None
-        if src is None or key not in matched_keys:
-            continue
-        if _handoff_action_rank(src["action"]) < _handoff_action_rank(er.get("action")):
-            upgrade_ids.add(str(er.get("id") or ""))
-            upgrade_rows.append({
-                MANUAL_TODO_COLUMNS[0]: str(er.get("id") or ""),
-                MANUAL_TODO_COLUMNS[1]: str(er.get("importance") or "major"),
-                MANUAL_TODO_COLUMNS[2]: src["action"],
-                MANUAL_TODO_COLUMNS[3]: src["row"],
-            })
     base = external.strip()
     if not base:
         base = AUTHOR_TO_COMPLETE_README_HEADER.strip()
     base = re.sub(r"\n{3,}", "\n\n", base)
-    if upgrade_ids:
-        base = _drop_manual_todo_rows(base, upgrade_ids).rstrip("\n")
     # The publisher's managed block must carry the SAME classified inventory
     # the readme rule promises the author: one four-column row per item (with a
     # T-id that does not collide with the author's own rows), not a bullet list
@@ -5746,21 +4750,21 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
     used = [int(m.group(1)) for m in re.finditer(
         r"\bT-(\d+)\b", existing + ("\n" + stage_text if stage_text else ""))]
     next_n = max(used, default=0) + 1
-    managed_rows = list(upgrade_rows) + [{
+    managed_rows = [{
         MANUAL_TODO_COLUMNS[0]: f"T-{next_n + i:03d}",
         MANUAL_TODO_COLUMNS[1]: "major",
-        MANUAL_TODO_COLUMNS[2]: action_of.get(row.lower(), MANUAL_ACTIONS[2]),
+        MANUAL_TODO_COLUMNS[2]: MANUAL_ACTIONS[2],
         MANUAL_TODO_COLUMNS[3]: row,
     } for i, row in enumerate(managed_now)]
     result = {"path": (target.name if target.parent == root else str(target)),
-              "items": len(managed_now) + len(upgrade_rows),
-              "external_items": max(0, len(external_rows) - len(upgrade_rows)),
+              "items": len(managed_now),
+              "external_items": len(external_rows),
               "generated_from": ("revision ledger" if oi.get("items") or oi.get("discarded")
                                  else "package hand-off markers")}
     author_text = external.strip()
     if author_text == header:
         author_text = ""
-    if not managed_rows and not external_rows and not author_text:
+    if not managed_now and not external_rows and not author_text:
         if target.is_file():
             target.unlink()
         if problems:
@@ -5768,21 +4772,10 @@ def write_published_handoff_readme(root: Path, open_items: dict = None,
             return result
         return {}
     pieces = [base]
-    if managed_rows:
+    if managed_now:
         table = manual_todo_markdown_table(managed_rows).rstrip("\n")
-        if _manual_has_table(base):
-            # The preserved author text already carries THE classified table:
-            # append the generated rows to it instead of writing a SECOND
-            # inventory in the managed block (the manual rule requires one).
-            base = _merge_manual_todo_rows(base, managed_rows).rstrip("\n")
-            _ids = ", ".join(str(r.get(MANUAL_TODO_COLUMNS[0]) or "")
-                             for r in managed_rows if r.get(MANUAL_TODO_COLUMNS[0]))
-            base = (base + "\n\n<!-- pipeline-generated-row-ids: "
-                    + _ids + " -->")
-            pieces = [base]
-        else:
-            pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
-                          + AUTHOR_TO_COMPLETE_MANAGED_END)
+        pieces.append(AUTHOR_TO_COMPLETE_MANAGED_BEGIN + "\n" + table + "\n"
+                      + AUTHOR_TO_COMPLETE_MANAGED_END)
     text = "\n\n".join(pieces).rstrip() + "\n"
     action = "unchanged" if existing == text else ("updated" if existing else "created")
     if action != "unchanged":
@@ -6217,7 +5210,7 @@ D10. AN OPAQUE IDENTIFIER OR EXTERNALLY-ASSIGNED FACT IS NOT AN EDITABLE SURFACE
 
 ADOPTED_SWEEPS_BLOCK = """
 
-=== THE ADOPTED CHECKS (the judge panel's frozen M1-M24/J1-J4 map; see the scope note below) ===
+=== THE ADOPTED CHECKS (the same checklist every session evaluates against) ===
   M1-M17  mechanical sweeps: acronyms, citations, display items, numbers/metrics, mandatory
           items, hygiene, cross-references, terminology, file hygiene, reference format, SI
           formatting, authors, reporting summary, cross-document metadata, numeric totals,
@@ -6251,12 +5244,6 @@ ADOPTED_SWEEPS_BLOCK = """
   J1-J4   scope fit and significance; scientific/statistical rigor; writing quality and claim
           calibration -- overclaiming AND underclaiming (the Q1-Q12 rubric); plagiarism,
           AI-content and policy compliance.
-  The JUDGE PANEL's frozen map is exactly this M1-M24/J1-J4 set: identical
-  scrutiny across versions is what keeps the panel calibrated, so it is never
-  extended. The GUIDED REVIEW, its audit and the path that applies its findings
-  additionally run M25-M36 and J5 in their own phase blocks (each with its own
-  artifact and coverage row); this shared block does not replace them, and a
-  session that carries those phase blocks must run them too.
   EVERY two-sided check runs in BOTH directions, and a check reported from one side only has not
   been run: claim strength (overclaim / underclaim), content (lost / invented), items (missing /
   unneeded), pointers (claim without its evidence / printed or promised content the text never
@@ -6409,9 +5396,7 @@ defect the same way; only the deliverable differs):
     break-only paragraph that pushes a page break is artifact damage, graded by the extent of
     what it displaces. A length/caption row (`M18`/`M19`) is always a @@T_FORMATTING@@ MINOR row:
     the venue's relaxed length margins mean slight over-length is intended, so length may move a
-    comparison by at most one point and is NEVER a scoring tier of its own. The cover letter's
-    TOTAL content (salutation, body, disclosures and signature) is @@COVER_LETTER_TOTAL_CLAUSE@@:
-    an over-cap TOTAL is the same formatting-tier M19 row, reported and never a gate.
+    comparison by at most one point and is NEVER a scoring tier of its own.
   * @@PAGE_BUDGET_RULE@@
   * An improvement claim must name the class it improves and the concrete item behind it, with a
     location: "this edit is better" without one is not an improvement claim. A difference that
@@ -6669,13 +5654,13 @@ RAW_DATA_READONLY_RULE = """
         real concern with the same standing (the concern ledger and the response letter answer
         it too, and its provenance is kept in the ledger's `author`/`source` columns);
       - `human_review_feedback/original_submission/` (when present) may be read ONLY to resolve
-        what a raised concern refers to and to decide whether the package under view already
-        answers a concern the reviewers raised against the earlier version. Never edit it, never
-        copy its text into a candidate package, never sweep, count or quote it as the authors'
-        current prose, and never treat it as a competing version: a concern that no longer exists
-        in the package under view is `already-addressed` (quoting the location that answers it)
-        or `not-applicable` (with the reason) -- never a `to-fix` row whose only location is
-        `original_submission/`;
+        what a raised concern refers to and to decide whether the CURRENT manuscript (`base/`)
+        already answers a concern the reviewers raised against the earlier version. Never edit
+        it, never copy its text into a candidate package (all edits are made in `base/`), never
+        sweep, count or quote it as the authors' current prose, and never treat it as a
+        competing version: a concern that no longer exists in `base/` is `already-addressed`
+        (quoting the `base/` location that answers it) or `not-applicable` (with the reason) --
+        never a `to-fix` row whose only location is `original_submission/`;
       - a JUDGE sees every area in its anonymized view under the labeled `evidence/` directory
         (see the judge prompt): `raw_data/` may be used to check correctness/completeness, and
         the two feedback areas may be used to check whether a version ADDRESSES the raised
@@ -6785,9 +5770,8 @@ author a discovery hunt and do not propose new sweeps."""
     return f"""
 === THE ROUND'S DISCOVERY FINDINGS (`X-*`) — FROZEN, INTEGRATE THE FIXES ===
 
-The round's discovery source -- the guided review's D0-D5 discovery round, or the cold-start
-review when `--no-guided-review` is on -- ran against this round's BASE corpus and its findings are
-the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
+The round's review ran the $paper-review skill's discovery round (D0-D5) against this round's BASE
+corpus and its findings are the X-* list in `frozen_discovery/findings_extra.json` (readable copy:
 `frozen_discovery/findings_extra.md`): READ-ONLY, the SAME list the round's revision arms
 resolved. This is the ONE piece of the frozen review this sandbox consumes -- there is still no
 `guided_review/` directory, no F-* finding list and no A1 ledger here.
@@ -6915,15 +5899,14 @@ VISUAL_INSPECTION_RULE = """VISUAL INSPECTION — RENDER FIRST, THEN LOOK (a DOC
     the converter below, falling back to the next one only if a call fails), RENDER every page to
     an image, and LOOK at those images with your image-viewing capability.
   * Converters available on this machine right now: @@VISUAL_TOOLS@@.
-  * ALWAYS TRY THE `docx2pdf.sh` CLI FIRST, BEFORE ANY OTHER CONVERTER: run
-    `docx2pdf.sh FILE` (Word COM via PowerShell; it writes the PDF next to FILE). It renders
-    through Microsoft Word, i.e. the highest-fidelity renderer available. Only if the script is
-    not available on PATH, or the call reports a failure, fall back -- in this order, layout
+  * ALWAYS TRY THE `docx-converter` MCP TOOL FIRST, BEFORE ANY OTHER CONVERTER: if your session
+    has MCP tools, call `convert_docx_to_pdf` with the ABSOLUTE WSL path of the .docx (for example
+    `convert_docx_to_pdf(docxPath="/path/to/package/manuscript-c.docx")`). It renders through
+    Microsoft Word via WSL/PowerShell interop, i.e. the highest-fidelity renderer available, and it
+    writes `<name>.pdf` NEXT TO the .docx you pass it. Only if that tool is not available in your
+    session (no MCP support), or the call reports a failure, fall back -- in this order, layout
     fidelity first -- to:
-      1. the `docx-converter` MCP tool (`convert_docx_to_pdf`), when your session has MCP tools:
-         call it with the ABSOLUTE WSL path of the .docx (for example
-         `convert_docx_to_pdf(docxPath="/path/to/package/manuscript-c.docx")`); it wraps
-         `docx2pdf.sh` and writes `<name>.pdf` NEXT TO the .docx you pass it, then
+      1. `docx2pdf.sh FILE` (Word COM via PowerShell; writes the PDF next to FILE), then
       2. `docx render FILE --out pages/` (page-001.png, ... -- a render, not a PDF), then
       3. LibreOffice `soffice --headless --convert-to pdf --outdir DIR FILE`, then
       4. Word via Windows PowerShell COM directly when running under WSL, then
@@ -6990,8 +5973,8 @@ DOCX_CLI_RULE = """OPTIONAL TOOLING — the `docx` CLI (you MAY use it, you are 
     text-level view (it cannot see figures, layout or rendered pages), so where your stage says
     "read the packages IN FULL" or "do not rely on a text diff to find differences", that
     instruction still governs; `docx render` plus your own eyes remains the only visual pass.
-  * For a .docx -> .pdf conversion, `docx2pdf.sh` comes FIRST (see the visual inspection rule in
-    this prompt): run it before the `docx-converter` MCP tool (`convert_docx_to_pdf`), before
+  * For a .docx -> .pdf conversion, the `docx-converter` MCP tool comes FIRST (see the visual
+    inspection rule in this prompt): call `convert_docx_to_pdf` before `docx2pdf.sh`, before
     `docx render` and before any other converter.
   * Never point it at a path outside your sandbox, and never let it write into a READ-ONLY input
     directory (its editing subcommands write to the file you name)."""
@@ -7001,10 +5984,10 @@ DOCX_CLI_AVAILABLE = ("available -- the `docx` command is on PATH (bun-docx: `do
 DOCX_CLI_MISSING = ("NOT available -- the `docx` command is not on PATH on this machine; use the "
                     "other tools your stage names")
 
-# Zotero reference work is layered, terminal tool first: an agent session uses
-# the `zot` CLI (pyzotero-cli) when it is on PATH, then the Zotero MCP service
-# when its harness exposes it, and only when both are unavailable the installed
-# Zotero skill. The CLI is also the ONLY route that may perform the
+# Zotero reference work is layered: an agent session uses the Zotero MCP
+# service when its harness exposes it, then an installed Zotero skill, and only
+# when both are unavailable the `zot` CLI (pyzotero-cli; the terminal route of
+# the $zotero-use skill). The CLI is also the ONLY route that may perform the
 # `setup --zotero apply` guarded library write. Within that policy a session may
 # change a citation or, under `apply`, ONE field of ONE existing library item.
 # Reads are ordinary reference lookups; the library is a remote service owned by
@@ -7025,42 +6008,41 @@ ZOT_REMOTE_HINT_UNKNOWN = ("no remote credential was detected by the orchestrato
                            "running Zotero with its\n"
                            "    local API enabled")
 
-ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — `zot` CLI first, then the Zotero MCP service, then the Zotero skill:
+ZOTERO_CLI_RULE = """ZOTERO REFERENCE TOOLING — MCP service first, then the Zotero skill, then the `zot` CLI fallback:
   * ROUTE ORDER — use the first route your session has, and fall back to the next only when that
     route is absent or fails. The order is mandatory; it is not a menu:
-      1. THE `zot` CLI FROM PYZOTERO-CLI. The read commands below are its command surface. Use
-         them while the CLI works; if the `zot` command is not on PATH, or a call fails, do NOT
-         retry in a loop and do not ask the user to repair it: fall back to route 2.
-      2. THE ZOTERO MCP SERVICE. If your session exposes MCP tools, look for the `zotero` server's
+      1. THE ZOTERO MCP SERVICE. If your session exposes MCP tools, look for the `zotero` server's
          tools (`zotero_status`, `zotero_search_items`, `zotero_list_items`, `zotero_get_item`,
          `zotero_list_libraries`, `zotero_list_collections`; in a DSH session they appear as
          `mcp__zotero__<tool>`). Call `zotero_status` first. Use the MCP reads while they work. If
          the tools are absent, or `zotero_status` reports the bridge or Zotero offline, Zotero not
          running, the extension not enabled, or the session not paired, or a tool call fails, do
-         NOT retry in a loop and do not ask the user to repair it: fall back to route 3.
-      3. THE ZOTERO SKILL — THE FALLBACK when the `zot` CLI (route 1) and the MCP service
-         (route 2) are both unavailable. The Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use`
-         skill, or another installed Zotero skill, when your session has it. Use its
-         read/search/export route.
+         NOT retry in a loop and do not ask the user to repair it: fall back to route 2.
+      2. THE ZOTERO SKILL. The Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill, or
+         another installed Zotero skill, when your session has it. Use its read/search/export
+         route.
+      3. THE `zot` CLI FROM PYZOTERO-CLI — THE FALLBACK when the MCP service (route 1) and the
+         Zotero skill (route 2) are both unavailable. The read commands below are its command
+         surface.
       4. MANUAL VERIFICATION when none of the three routes works: record the citation or live
          field for the author; never guess and never invent metadata.
-    Library WRITES never use routes 2-3 in any mode: they follow the policy below, and only
+    Library WRITES never use routes 1-2 in any mode: they follow the policy below, and only
     `--zotero apply` reaches the one `zot` guarded update.
-  * Availability of the `zot` CLI (route 1) on this machine right now:
+  * Availability of the `zot` CLI (route 3) on this machine right now:
     @@ZOT_CLI@@.
-    Remote-library access (route 1): @@ZOT_REMOTE@@.
-    A missing `zot` CLI does not by itself make a reference unresolvable: routes 2-3 may still
-    be available in your session. When neither route 2 nor route 3 is available either, do not
+    Remote-library access (route 3): @@ZOT_REMOTE@@.
+    A missing `zot` CLI does not by itself make a reference unresolvable: routes 1-2 may still
+    be available in your session. When neither route 1 nor route 2 is available either, do not
     invent keys or metadata and route every Zotero item to manual verification.
   * If a route fails because the session itself has no network/loopback access (a ConnectError or
     permission error, as opposed to "no such item"), do not retry in a loop: record the limitation,
     say which items could not be verified, and continue with the next route or the corpus +
     manual-verification route.
   * WHAT IT IS FOR: resolving every reference the manuscript cites, by the first route that works.
-    On route 1, the read commands are always allowed: `zot --local --library-id 0 --library-type
+    On route 3, the read commands are always allowed: `zot --local --library-id 0 --library-type
     user items list|get|children`, `zot items list -q WORD` / `--filter-item-type journalArticle`,
     `zot items get KEY`, `zot items citation|bib KEY`, `zot fulltext get ATTACHMENT_KEY`,
-    `zot collections list|items`, `zot tags list`, `zot search`, `zot util`. On routes 2-3 use the
+    `zot collections list|items`, `zot tags list`, `zot search`, `zot util`. On routes 1-2 use the
     equivalent reads. Cite PARENT bibliographic item keys, never attachment keys, and confirm from
     the parent's own metadata (title, creators, year, DOI) that it is the work the sentence needs.
   * NEVER INVENT: no key, DOI, author, year, title or quotation that no library item or full text
@@ -7232,7 +6214,7 @@ ZOTERO_LIBRARY_APPLY = """updates are ENABLED for this run under a two-pass prot
     enabled. This is the pipeline's explicit override of the skill's read-only-Zotero default, and
     it covers exactly the single guarded update described here. The MCP service and the Zotero
     skill remain READ-ONLY for the library in every mode: the one write goes through the `zot` CLI
-    only. If that CLI is unavailable, do NOT attempt the write through routes 2-3: downgrade it to
+    only. If that CLI is unavailable, do NOT attempt the write through routes 1-2: downgrade it to
     a proposal row plus a manual step.
       P1 PROPOSE: before any write, put the proposal row in the ledger: item key, the version you
          read, the field, the current value, the proposed value, the evidence, and the manuscript
@@ -7274,11 +6256,10 @@ ZOTERO_LEDGER_RULE_JUDGE = """name the item keys you checked, and what you concl
     sheet's evidence; do not create a separate Zotero ledger."""
 
 ZOTERO_CLI_RULE_OFF = """ZOTERO TOOLING — SWITCHED OFF for this run:
-  * The pipeline was configured with `--zotero off`. Do NOT run the `zot` CLI.
-    Do NOT use the Zotero MCP service (do not call any `zotero_*` or `mcp__zotero__*` tool),
-    and do not use the Zotero skill. Do not attempt a library read or write. The pipeline does
-    not uninstall the harness's MCP registration or skill; they remain present but are
-    OUT OF POLICY for this run.
+  * The pipeline was configured with `--zotero off`. Do NOT use the Zotero MCP service (do not
+    call any `zotero_*` or `mcp__zotero__*` tool), do not use the Zotero skill, do not run the
+    `zot` CLI, and do not attempt a library read or write. The pipeline does not uninstall the
+    harness's MCP registration or skill; they remain present but are OUT OF POLICY for this run.
     Follow the skills' manual route for
     every live field or citation you cannot verify from the corpus itself: an unreadable or
     unverifiable field goes to the manual-verification list / MANUAL_STEPS.md, never into a guess
@@ -7390,6 +6371,7 @@ MANUAL_STEPS_RELS = ("revised/MANUAL_STEPS.md", "rewritten/MANUAL_STEPS.md",
 # (requires a demonstrable improvement, not merely non-regression) and a looser
 # >= -0.5 (tolerates a panel that is slightly net-negative because one judge saw
 # a real trade-off). Either can be switched in by editing this constant.
+VS_ORIGINAL_TOLERANCE = 0.0
 # C21a/C23: the gate's DECISION RULE is explicit and switchable. `median` is the
 # pre-registered default (a candidate whose vs_original median is negative is
 # ineligible). `sign` fails only when the exact one-sided sign test over the

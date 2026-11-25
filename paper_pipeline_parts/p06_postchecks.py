@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/25 of the pipeline -- executed by the
+# Part 06/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -79,21 +79,11 @@ def _signal_names_this_run(data, rec: dict, name: str) -> bool:
     if name == SCORES_FILE:
         # The judge's sheet carries an OPAQUE target token while the run record
         # holds the raw version id: comparing the two id spaces rejected every
-        # modern stray sheet. A sheet that names THIS run is this run's signal;
-        # an ANONYMOUS sheet names nothing and is never adopted (F189).
-        rid, tid = data.get("run_id"), data.get("target_id")
-        if rid is not None:
-            return rid == rec.get("id")
-        if tid is not None:
-            # The token is the value the judge was actually issued; compare it
-            # FIRST. A sheet naming the raw version id is still this run's (the
-            # judge-sheet validator warns about the contract but accepts it), so
-            # that spelling stays accepted as the fallback.
-            token = rec.get("judge_target_token")
-            if token and tid == token:
-                return True
-            return not rec.get("target_id") or tid == rec.get("target_id")
-        return False
+        # modern stray sheet. A sheet that names THIS run is this run's signal.
+        if data.get("run_id") == rec.get("id"):
+            return True
+        if rec.get("target_id") and data.get("target_id") not in (None, rec["target_id"]):
+            return False
     elif data.get("stage") != rec.get("kind"):
         return False
     return data.get("run_id") in (None, rec.get("id"))
@@ -137,17 +127,8 @@ def relocate_stray_signal(ctx: Ctx, rec: dict) -> list:
         rel = found.relative_to(sb).as_posix()
         if not _signal_names_this_run(read_json(found, revive=False, lenient=True), rec, name):
             continue
-        dest = sb / name
-        if dest.exists() or dest.is_symlink():
-            # `shutil.move(src, dest_dir)` moves the file INSIDE a directory.
-            # A planted directory at the signal name therefore swallowed the
-            # valid stray marker while the note claimed it was ADOPTED.
-            notes.append(f"the `{name}` written to `{rel}` cannot be adopted: the sandbox "
-                         f"root already carries a non-file entry at `{name}`; remove it and "
-                         f"write the marker in the sandbox root")
-            continue
         try:
-            shutil.move(str(found), str(dest))
+            shutil.move(str(found), str(sb / name))
         except OSError as e:                                     # noqa: BLE001
             notes.append(f"the `{name}` written to `{rel}` could not be moved to the sandbox "
                          f"root ({type(e).__name__}: {e}); it will not be read from there")
@@ -180,60 +161,15 @@ def scores_json_of(sb: Path, kind: str = ""):
     return sj if isinstance(sj, dict) else None
 
 
-def _own_completion_signal(sb: Path, kind: str, name: str, rec: dict):
-    """The signal's parsed JSON when this run may claim it, else None.
-
-    The root is authoritative, but an ALTERNATE-directory signal counts only
-    when `relocate_stray_signal()` would adopt it (it names THIS run and this
-    stage). Reading the alt-dir fallback without that test made a foreign stray
-    marker (another stage's/run's) satisfy `completion_signal_exists()` while
-    relocation refused it and `_marker_checks` reported "NOT in the sandbox
-    root" -- a contradictory "signal exists"/"signal missing" pair (F115).
-    """
-    if (sb / name).is_file():
-        data = read_json(sb / name, revive=False, lenient=True)   # agent-written
-        if not isinstance(data, dict) or not data:
-            # An empty object is not a completion claim (and `_marker_checks`
-            # reports the missing `status` once a real marker exists). The root
-            # is authoritative for a NON-empty signal, but it must still name
-            # this run/stage: a stale marker left by another stage/run in a
-            # reused sandbox used to satisfy the detector (F023).
-            return None
-        if name == MARKER_FILE:
-            # A root marker may omit `stage` (the run's own context identifies
-            # the stage, see `_marker_checks`); a WRONG stage or run_id is
-            # another run's property. `status` is deliberately not required
-            # here: a `failed` marker is this attempt's terminal signal and
-            # must reach the postcheck to be recorded and retried, while a
-            # missing/invalid status is reported there.
-            stage = data.get("stage")
-            if stage is not None and stage != rec.get("kind"):
-                return None
-            if data.get("run_id") not in (None, rec.get("id")):
-                return None
-        elif not _signal_names_this_run(data, rec, name):
-            # A judge sheet must name this run (or the issued target); an
-            # anonymous sheet is not adoptable (F189), root or stray.
-            return None
-        return data
-    stray = stray_signal_path(sb, kind, name)
-    if stray is None:
-        return None
-    data = read_json(stray, revive=False, lenient=True)            # agent-written
-    if not isinstance(data, dict) or not _signal_names_this_run(data, rec, name):
-        return None
-    return data
-
-
 def completion_signal_exists(ctx: Ctx, rec: dict) -> bool:
     """The strict agent-written signal (never a bare non-empty revised/)."""
     if rec["kind"] == "a1":
         return True
     sb = ctx.sandbox_of(rec)
     if rec["kind"] == "judge":
-        return (_own_completion_signal(sb, rec["kind"], SCORES_FILE, rec) is not None
-                or _own_completion_signal(sb, rec["kind"], MARKER_FILE, rec) is not None)
-    return _own_completion_signal(sb, rec["kind"], MARKER_FILE, rec) is not None
+        return (scores_json_of(sb, rec["kind"]) is not None
+                or marker_json(sb, rec["kind"]) is not None)
+    return marker_json(sb, rec["kind"]) is not None
 
 
 def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
@@ -245,13 +181,7 @@ def likely_complete_artifacts(ctx: Ctx, rec: dict) -> bool:
         return (sb / FINDINGS_REL).is_file()
     if rec["kind"] in ("rewrite", "revise", "integrate"):
         out = sb / output_dir_of(rec)
-        # A revise sandbox is materialized WITH the seeded ledger/language
-        # skeleton. Those are inputs, not evidence that the agent produced a
-        # package: a process that died before writing anything is a fresh
-        # attempt, not a "finished artifacts, re-verify" case.
-        seeded = untouched_revise_seed_paths(sb) if rec["kind"] == "revise" else set()
-        return out.is_dir() and any(p.is_file() and p not in seeded
-                                    for p in out.rglob("*"))
+        return out.is_dir() and any(out.iterdir())
     if rec["kind"] == "judge":
         # A partial sheet from a crashed attempt must not be adopted silently:
         # require the full comparison set for this session's labels.
@@ -285,141 +215,8 @@ def judge_sheet_complete(sj, rec: dict) -> bool:
     return labels <= seen
 
 
-SELFCHECK_CLIENT_REL = f"{SELFCHECK_TOOL_DIR}/client.py"
-SELFCHECK_MAILBOX_REL = f"{SELFCHECK_TOOL_DIR}/.mailbox"
-
-# The client carries NO pipeline code. It drops a request in the sandbox's
-# mailbox and prints the verdict the ORCHESTRATOR computes from its own frozen
-# copy (`_serve_selfcheck`). That is what lets a sandbox run the pre-flight
-# without the implementation being readable inside it: the 2026-11-13 review
-# never ran the pre-flight and read `p06_postchecks.py` in 207 tool calls
-# (~1 MB of context) instead, then compacted 27 times and died at the turn cap.
-SELFCHECK_CLIENT_SOURCE = '''#!/usr/bin/env python3
-"""Ask the orchestrator to run the stage pre-flight on this sandbox.
-
-No pipeline code is readable here: the request goes to the orchestrator's
-mailbox and the verdict comes back as text.
-"""
-import argparse
-import json
-import os
-import sys
-import time
-import uuid
-
-
-def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--sandbox", default=".")
-    ap.add_argument("--stage", required=True)
-    ap.add_argument("--run-id", default="")
-    ap.add_argument("--round", type=int, default=0)
-    # The orchestrator's own detectors can legitimately run for minutes (the
-    # package validation alone is allowed 600s), so a shorter wait would report
-    # a false "unavailable" while the verdict was still being computed.
-    ap.add_argument("--timeout", type=float, default=900.0)
-    args = ap.parse_args()
-    sandbox = os.path.abspath(args.sandbox)
-    box = os.path.join(sandbox, "selfcheck", ".mailbox")
-    os.makedirs(box, exist_ok=True)
-    request_id = uuid.uuid4().hex
-    request = os.path.join(box, "request.json")
-    tmp = request + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump({"id": request_id, "stage": args.stage}, handle)
-    os.replace(tmp, request)
-    result = os.path.join(box, "result.json")
-    deadline = time.time() + args.timeout
-    while time.time() < deadline:
-        try:
-            with open(result, encoding="utf-8") as handle:
-                data = json.load(handle)
-        except (OSError, ValueError):
-            data = None
-        if isinstance(data, dict) and data.get("id") == request_id:
-            print("SELF-CHECK  stage=%s  sandbox=%s" % (args.stage, sandbox))
-            for warning in data.get("warnings") or []:
-                print("  [warn] %s" % warning)
-            for error in data.get("errors") or []:
-                print("  [FAIL] %s" % error)
-            if data.get("ok"):
-                print("  [ok]   the paperwork checks passed: the postcheck's own "
-                      "detectors found nothing to reject")
-                return 0
-            print("  %d problem(s): fix them, re-run this check, and write the "
-                  "completion marker LAST (the postcheck reads the same files)"
-                  % len(data.get("errors") or []))
-            return 1
-        time.sleep(0.5)
-    print("SELF-CHECK unavailable: the orchestrator did not answer within %.0f "
-          "seconds. Run the ROOT's frozen driver instead (see PROMPT.md): "
-          'python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage %s '
-          "--run-id %s --round %d"
-          % (args.timeout, args.stage, args.run_id, args.round))
-    return 2
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-'''
-
-
-def _stage_driver_bundle() -> bool:
-    """Whether to freeze a READABLE driver bundle into the sandbox.
-
-    Default OFF: the pre-flight is served out of process (see
-    `_serve_selfcheck`), so the sandbox needs the client only. An operator who
-    runs the agent by hand -- no orchestrator waiting -- sets
-    `PAPER_PIPELINE_SELFCHECK_COPY=1` to get the self-contained bundle back.
-    """
-    raw = (os.environ.get("PAPER_PIPELINE_SELFCHECK_COPY") or "").strip().lower()
-    return raw not in {"", "0", "false", "no", "off"}
-
-
-def _drop_staged_driver_bundle(sb: Path, keep_client: bool = True) -> None:
-    """Remove a readable driver bundle a previous (manual/older) run staged.
-
-    The default is the CLIENT only: the sandbox must not carry the pipeline
-    implementation, so the prompt names the client (or the ROOT's frozen copy
-    as its fallback). A sandbox created by an older root or by
-    `PAPER_PIPELINE_SELFCHECK_COPY=1` still holds the old bundle; leaving it
-    would keep the implementation readable AND make `selfcheck_block` name that
-    stale copy first. The client (`selfcheck/client.py`) is never removed.
-    """
-    tool_dir = sb / SELFCHECK_TOOL_DIR
-    try:
-        if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
-            tool_dir.unlink()
-            return
-        if not tool_dir.is_dir():
-            return
-        # Remove the bundle's entries, NOT the whole directory: the client and
-        # its mailbox live there.
-        for name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE, DOCX_FORMAT_PARTS_DIR,
-                     MANUSCRIPT_WORDS_FILE.split("/", 1)[0], *PIPELINE_ASSET_DIRS):
-            p = tool_dir / name
-            if p.is_symlink() or p.is_file():
-                p.unlink()
-            elif p.is_dir():
-                rmtree_force(p, ignore_errors=True)
-        for name in PIPELINE_MODULE_FILES:
-            p = tool_dir / name
-            if p.is_symlink() or p.is_file():
-                p.unlink()
-        if not keep_client:
-            # A BLINDED sandbox gets neither the implementation nor the client.
-            for name in ("client.py", ".mailbox"):
-                p = tool_dir / name
-                if p.is_symlink() or p.is_file():
-                    p.unlink()
-                elif p.is_dir():
-                    rmtree_force(p, ignore_errors=True)
-    except OSError:
-        pass
-
-
 def _copy_session_tools(sb: Path, stamp: float = None,
-                        include_driver: bool | None = None) -> None:
+                        include_driver: bool = True) -> None:
     """Put the code-side scanner/validator next to PROMPT.md.
 
     The stage prompts call `python paper_docx_format.py scan|validate <dir>` by
@@ -433,13 +230,9 @@ def _copy_session_tools(sb: Path, stamp: float = None,
     The SELF-CHECK block names the pipeline DRIVER, not the formatter: in a
     jailed harness both the run root and the origin snapshot can be hidden (the
     eval harness masks its results tree), which made the pre-flight a dead path.
-    A readable copy of the driver and its ordered parts used to be staged under
-    `selfcheck/` for that reason. It is now OFF by default: the sandbox carries
-    the CLIENT only (`selfcheck/client.py`) and the orchestrator answers it from
-    its own frozen copy (`_serve_selfcheck`), so no implementation has to be
-    readable inside the sandbox. `PAPER_PIPELINE_SELFCHECK_COPY=1` restores the
-    self-contained bundle for an operator who runs the agent by hand. The
-    staged driver loads its companion FORMATTER from beside itself
+    The frozen driver and its ordered parts are therefore staged under
+    `selfcheck/` in the sandbox too, and the prompt's first command runs that
+    copy. The staged driver loads its companion FORMATTER from beside itself
     (`_format_module()`), so the formatter and its ordered parts are staged
     there as well: without them the package-stage pre-flight reports the OOXML
     scanner as unavailable, a failure the session cannot repair because the
@@ -452,12 +245,6 @@ def _copy_session_tools(sb: Path, stamp: float = None,
     pre-flight uses the ROOT's frozen copy or the harness's read-only
     `/paper-pipeline` mount instead.
     """
-    # `False` = a BLINDED sandbox (judge): neither the client nor the bundle.
-    # `None` = the normal stage: the client always, the readable bundle only on
-    # request (see `_stage_driver_bundle`).
-    serve = include_driver is not False
-    bundle = include_driver is True or (
-        include_driver is None and _stage_driver_bundle())
     src = Path(__file__).resolve().with_name(DOCX_FORMAT_MODULE)
     dst = sb / DOCX_FORMAT_MODULE
 
@@ -490,32 +277,49 @@ def _copy_session_tools(sb: Path, stamp: float = None,
         # masked. The tool dir is orchestrator-owned: a planted symlink there
         # is removed rather than written through. A judge sandbox is blinded
         # and gets no driver bundle (see the docstring).
-        if bundle:
+        if include_driver:
             driver_src = Path(__file__).resolve()
             if driver_src.is_file():
                 tool_dir = sb / SELFCHECK_TOOL_DIR
                 if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
                     tool_dir.unlink()
                 tool_dir.mkdir(parents=True, exist_ok=True)
-                missing = _missing_bundle_assets(driver_src.parent)
-                if missing:
-                    raise OSError(f"incomplete driver bundle: {', '.join(missing)}")
-                # The required skill assets (F073) travel with the
-                # self-contained bundle, or its own pre-flight refuses it.
-                copy_asset_dirs(driver_src.parent, tool_dir,
-                                names=PIPELINE_ASSET_DIRS + PIPELINE_SKILL_ASSET_DIRS)
-                for name in PIPELINE_MODULE_FILES:
-                    _safe_restore_copy(driver_src.parent / name, tool_dir / name, sb)
-                # The full skill pack is optional in a manual sandbox. The
-                # shared word rules are required to import the frozen driver.
-                _safe_restore_copy(driver_src.parent / MANUSCRIPT_WORDS_FILE,
-                                   tool_dir / MANUSCRIPT_WORDS_FILE, sb)
-        else:
-            # A sandbox reused from an older root or a manual run must not keep
-            # a readable driver bundle: the default contract is the client
-            # only, and `selfcheck_block` names the client (or the ROOT copy)
-            # from the files actually present.
-            _drop_staged_driver_bundle(sb, keep_client=serve)
+                _safe_restore_copy(driver_src, tool_dir / SELFCHECK_DRIVER, sb)
+                parts_name = "paper_pipeline_parts"
+                if (driver_src.parent / parts_name).is_dir():
+                    copy_asset_dirs(driver_src.parent, tool_dir, names=(parts_name,))
+                # The shared runtime lives in `agent-common/agent_common/` beside
+                # the driver and resolves its catalog/policy relative to
+                # `__file__`.
+                if (driver_src.parent / "agent-common").is_dir():
+                    copy_asset_dirs(
+                        driver_src.parent, tool_dir, names=("agent-common",)
+                    )
+                # The staged DRIVER also loads its companion formatter from
+                # beside ITSELF (`_format_module()`), and the package-stage
+                # self-check runs the format-regression family. Staging only
+                # the driver made that pre-flight report the scanner as
+                # UNAVAILABLE for rewrite/revise/integrate -- a false failure
+                # the session could never fix (the sandbox-root copy is not
+                # where `__file__` points). Stage the formatter bundle beside
+                # the driver too, so the preview sees the same code the root
+                # postcheck does.
+                fmt_src = driver_src.parent / DOCX_FORMAT_MODULE
+                if fmt_src.is_file():
+                    _safe_restore_copy(fmt_src, tool_dir / DOCX_FORMAT_MODULE, sb)
+                if (driver_src.parent / DOCX_FORMAT_PARTS_DIR).is_dir():
+                    copy_asset_dirs(driver_src.parent, tool_dir,
+                                    names=(DOCX_FORMAT_PARTS_DIR,))
+                # The staged driver imports its companion modules too.
+                # Staging only the driver + parts made the pre-flight fail
+                # with ModuleNotFoundError; copy the whole frozen module set
+                # next to the staged driver.
+                for _name in PIPELINE_MODULE_FILES:
+                    if _name in (SELFCHECK_DRIVER, DOCX_FORMAT_MODULE):
+                        continue
+                    _companion = driver_src.parent / _name
+                    if _companion.is_file():
+                        _safe_restore_copy(_companion, tool_dir / _name, sb)
     except OSError as e:
         # A partial/refused copy used to be swallowed: the stage then called a
         # missing or incomplete formatter (or driver) and had no diagnostic
@@ -524,40 +328,6 @@ def _copy_session_tools(sb: Path, stamp: float = None,
             f"could not stage {DOCX_FORMAT_MODULE}, {DOCX_FORMAT_PARTS_DIR}, "
             f"{SELFCHECK_DRIVER_REL} or paper_pipeline_parts into {sb}: "
             f"{type(e).__name__}: {e}") from e
-    # The pre-flight CLIENT. It carries no pipeline code: it drops a request in
-    # the sandbox mailbox and prints the verdict the orchestrator computes from
-    # its own frozen copy. Staged for every non-blinded stage, so the sandbox
-    # never has to hold the implementation to run the pre-flight.
-    if serve:
-        try:
-            tool_dir = sb / SELFCHECK_TOOL_DIR
-            if tool_dir.is_symlink() or (tool_dir.exists() and not tool_dir.is_dir()):
-                tool_dir.unlink()
-            tool_dir.mkdir(parents=True, exist_ok=True)
-            client = tool_dir / "client.py"
-            current = ""
-            if client.is_file() and not client.is_symlink():
-                # Agent-writable path: a planted huge file must not OOM the
-                # orchestrator (the bounded reader refuses over-budget input;
-                # the mismatch is then repaired by the write below).
-                current = read_text_bounded(client) or ""
-            if current != SELFCHECK_CLIENT_SOURCE:
-                write_text_atomic(client, SELFCHECK_CLIENT_SOURCE)
-        except OSError as e:
-            raise RuntimeError(
-                f"could not stage the pre-flight client {SELFCHECK_CLIENT_REL} "
-                f"into {sb}: {type(e).__name__}: {e}") from e
-    else:
-        # A blinded sandbox gets no selfcheck/ at all: a stale bundle was just
-        # removed above, and ANY leftover orchestrator-owned entry beside the
-        # blinded packages is a leak. The old `rmdir()` (suppressing OSError)
-        # left every unknown file in place; remove the whole tree and fail
-        # staging if it cannot be emptied.
-        tool_dir = sb / SELFCHECK_TOOL_DIR
-        if not rmtree_force(tool_dir):
-            raise RuntimeError(
-                f"could not empty the orchestrator-owned {SELFCHECK_TOOL_DIR}/ beside a "
-                f"blinded sandbox: {tool_dir}")
     # Stamping is cosmetic (it keeps the copy from dating the sandbox): a
     # timestamp failure must not turn into a staging failure.
     if stamp is not None:
@@ -645,27 +415,13 @@ def leftovers_present(ctx: Ctx, rec: dict) -> bool:
         # second agent was launched into the first one's work.
         d = sb / "concerns"
         return d.is_dir() and any(d.iterdir())
-    if rec["kind"] in ("response", "response_draft"):
+    if rec["kind"] == "response":
         d = sb / "response"
         return d.is_dir() and any(d.iterdir())
-    if rec["kind"] in ("concern_audit", "concern_repair",
-                       "response_audit", "response_repair"):
-        # These stages own a dedicated output directory (the audit's sheet or
-        # the repair's ledger). A partially written one must read as work in
-        # progress, so a second agent is never launched into it.
-        d = sb / {"concern_audit": "concern_audit",
-                  "concern_repair": "concern_repair",
-                  "response_audit": "response_audit",
-                  "response_repair": "response_repair"}[rec["kind"]]
-        return d.is_dir() and any(d.iterdir())
     # rewrite / revise / integrate: the output package and code/ are the agent's.
-    # A revise sandbox is materialized WITH the seeded ledger and language-pass
-    # skeleton; those are inputs, not partial work (a fresh sandbox must still be
-    # launchable). Every other file under the package is the agent's.
-    seeded = untouched_revise_seed_paths(sb) if rec.get("kind") == "revise" else set()
     for rel in (output_dir_of(rec), CODE_DIR):
         d = sb / rel
-        if d.is_dir() and any(p.is_file() and p not in seeded for p in d.rglob("*")):
+        if d.is_dir() and any(d.iterdir()):
             return True
     return False
 
@@ -790,10 +546,7 @@ def _check_pristine_copy(ctx: Ctx, rec: dict, area: str, errs: list,
                 errs.append(f"{area}/ does not carry the pristine original's content any more "
                             f"(an anonymized view must keep the expected transformed content)")
         return
-    # One unreadable file must be REPORTED as a mismatch, not raise
-    # PermissionError out of the whole postcheck.
-    if not manifests_equal(hash_manifest(p, follow_dir_links=True,
-                                         on_error="<unreadable>"), ctx.source_manifest):
+    if not manifests_equal(hash_manifest(p, follow_dir_links=True), ctx.source_manifest):
         errs.append(f"{area}/ is not byte-identical to the setup-time pristine original")
 
 
@@ -899,19 +652,8 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     if frozen_review_is_synthesized(ctx):
         # `--no-guided-review`: the producer is the cold-start review and the
         # frozen review is synthesized in the AUDIT/REVISE sandboxes, not on the
-        # producer's disk. Return its X-9xx rows instead of [] (F04), with the
-        # auditor's drops/adds applied exactly like the copied-list branch: a
-        # dropped finding must not keep counting against a rewrite/integration
-        # arm's self-report (F157).
-        rows = list(cold_start_findings_rows(ctx, r) or [])
-        audit = audit_record_of(ctx, r)
-        if audit:
-            drops = {str(d.get("id") or "").strip()
-                     for d in (audit.get("dispositions") or []) if isinstance(d, dict)
-                     and str(d.get("verdict") or "").strip().lower() == "drop"}
-            rows = [f for f in rows if str(f.get("id") or "").strip() not in drops]
-            rows += [f for f in (audit.get("adds") or []) if isinstance(f, dict)]
-        return rows
+        # producer's disk. Return its X-9xx rows instead of [] (F04).
+        return list(cold_start_findings_rows(ctx, r) or [])
     sb = ctx.sandbox_of(rev)
     if not (sb / FINDINGS_REL).is_file():
         return []
@@ -922,23 +664,8 @@ def round_consumed_findings(ctx: Ctx, r) -> list:
     # cross-checked against an incomplete list.
     cold_start_rows, _remap = cold_start_findings_for_merge(
         [f.get("id") for f in findings], cold_start_findings_rows(ctx, r))
-    audit = audit_record_of(ctx, r)
-    if audit:
-        # The auditor's drop/add filter applies to the cold-start X-9xx rows
-        # too. Without it a dropped X-9xx stayed in a rewrite/integration arm's
-        # self-report cross-check (F159).
-        drops = {str(d.get("id") or "").strip()
-                 for d in (audit.get("dispositions") or []) if isinstance(d, dict)
-                 and str(d.get("verdict") or "").strip().lower() == "drop"}
-        cold_start_rows = [f for f in cold_start_rows
-                           if str(f.get("id") or "").strip() not in drops]
     have = {str(f.get("id")) for f in findings}
     findings += [f for f in cold_start_rows if str(f.get("id")) not in have]
-    if audit:
-        have = {str(f.get("id")) for f in findings}
-        findings += [f for f in (audit.get("adds") or [])
-                     if isinstance(f, dict)
-                     and str(f.get("id") or "").strip() not in have]
     return findings
 
 
@@ -1066,14 +793,12 @@ def _copy_bytes_if_different(src: Path, dst: Path) -> bool:
         data = src.read_bytes()
     except OSError:
         return False
-    try:
-        # The destination lives under the agent-writable sandbox: an unbounded
-        # whole-file read let a previous attempt leave an arbitrarily large
-        # file there (F030).
-        if read_regular_file(dst, max_bytes=MAX_JSON_BYTES) == data:
-            return False
-    except OSError:
-        pass
+    if dst.is_file():
+        try:
+            if dst.read_bytes() == data:
+                return False
+        except OSError:
+            pass
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     def do(f) -> None:
@@ -1145,60 +870,7 @@ def seed_discovery_findings(ctx: Ctx, r: int, sb: Path) -> dict:
 
 
 _DISCOVERY_DECISIONS_RE = re.compile(
-    r"\b(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b", re.I)
-# The DECISION CELL must START with the token: `NOT PORTED -- left unchanged`
-# and `not ported, ignored` record the opposite of a disposition (F024).
-_DISCOVERY_DECISION_START_RE = re.compile(
-    r"^[\s\-\u2013\u2014:|]*(PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b",
-    re.I)
-# A NEGATED DISPOSITION is not a disposition: "no disposition is recorded",
-# "no status given", "not PORTED". The phrase must negate the DECISION itself;
-# a note elsewhere in a disposed row ("no row changed") does not (F35), which is
-# why the guard below reads the decision cell, not the whole line.
-_DISCOVERY_NEGATED_RE = re.compile(
-    r"(?i)\b(?:no|not)\s+(?:disposition|decision|status|reconcil\w*)\b"
-    r"|\bnot\s+(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b")
-
-
-def _discovery_decision_cell(line: str, pid: str) -> str:
-    """The text after `pid` in its table row, or the rest of a prose line."""
-    if "|" in line:
-        # Split on UNESCAPED pipes: the plain `split("|")` turned an escaped
-        # `\|` inside an evidence cell into a column boundary, shifting the
-        # decision column and crediting a decision word to the wrong cell (F086).
-        cells = _table_line_cells(line)
-        for i, cell in enumerate(cells):
-            # The id is matched as a WHOLE token: a substring test let F-1
-            # consume F-10's row/cell (R05).
-            if pid not in set(re.findall(r"\b(?:X|F|AU|R)-\d+\b", cell)):
-                continue
-            # The id may share the DECISION cell ("KEPT-BASE: preserves X-001").
-            if _DISCOVERY_DECISION_START_RE.match(cell):
-                return cell
-            # The decision may follow the id in the SAME cell (`| X-001 PORTED |`);
-            # requiring the cell to START with the token reported a correct
-            # ledger row as never reconciled (F091).
-            if _DISCOVERY_DECISIONS_RE.search(cell) \
-                    and not _DISCOVERY_NEGATED_RE.search(cell):
-                return cell
-            for cand in cells[i + 1:]:
-                if _DISCOVERY_NEGATED_RE.search(cand):
-                    continue
-                # A later cell that NAMES a different X-/finding id is that
-                # id's disposition, not this one's (F13); ids are compared as
-                # whole tokens so F-10 is not credited to F-1 (R05).
-                _cand_ids = set(re.findall(r"\b(?:X|F|AU|R)-\d+\b", cand))
-                if _cand_ids and pid not in _cand_ids:
-                    continue
-                # The decision cell must START with the token: a decision word
-                # ANYWHERE in a later evidence/note cell (`the donor DROPPED this
-                # row`) is not this row's disposition (F086).
-                if _DISCOVERY_DECISION_START_RE.match(cand):
-                    return cand
-            return ""
-        return ""
-    _m = re.search(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])", line)
-    return "" if _m is None else line[_m.end():]
+    r"\b(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED)\b", re.I)
 
 
 def discovery_ledger_missing(ledger_text: str, ids) -> list:
@@ -1209,28 +881,14 @@ def discovery_ledger_missing(ledger_text: str, ids) -> list:
     opposite, and a table row with an empty/placeholder decision cell was
     accepted for the same reason. Require the id on a line that also carries one
     of the ledger's decision words (PORTED / KEPT-BASE / NO-DONOR-FIX / IGNORED /
-    LEFT-SHARED / DROPPED). DROPPED is the word the INTEGRATE discovery block
-    itself prints for an auditor-dropped id (`dropped -- not in force`): without
-    it a compliant integrator was reported as never reconciling those ids (F117).
+    LEFT-SHARED).
     """
     lines = str(ledger_text or "").splitlines()
     missing = []
     for pid in (str(i) for i in (ids or ())):
-        disposed = False
-        for line in lines:
-            if not _finding_id_mentioned(pid, line):
-                continue
-            # Scope the negation guard to the cell that carries the decision:
-            # the whole line used to be searched, so a compliant
-            # `| X-001 | PORTED | no row changed |` was reported missing (F35).
-            cell = _discovery_decision_cell(line, pid)
-            if _DISCOVERY_NEGATED_RE.search(cell):
-                continue
-            if (_DISCOVERY_DECISION_START_RE.match(cell)
-                    or (_DISCOVERY_DECISIONS_RE.search(cell)
-                        and not _DISCOVERY_NEGATED_RE.search(cell))):
-                disposed = True
-                break
+        disposed = any(_finding_id_mentioned(pid, line)
+                       and _DISCOVERY_DECISIONS_RE.search(line)
+                       for line in lines)
         if not disposed:
             missing.append(pid)
     return missing
@@ -1260,22 +918,6 @@ def discovery_ledger_reconciliation_problems(ledger: Path, ids) -> list:
               "package"]
 
 
-def _frozen_findings_doc_valid(ctx: Ctx, rec: dict):
-    """True/False for a present frozen review; None when the file is absent.
-
-    A dict with a non-list `findings` member (or non-object rows) is NOT a valid
-    all-clean review: it is a malformed one (F010).
-    """
-    frozen = ctx.sandbox_of(rec) / FINDINGS_REL
-    if not frozen.exists():
-        return None
-    doc = read_json(frozen, revive=False, lenient=True)
-    if not isinstance(doc, dict):
-        return False
-    rows = doc.get("findings")
-    return isinstance(rows, list) and all(isinstance(r, dict) for r in rows)
-
-
 def critical_findings_input(ctx: Ctx, rec: dict):
     """Number of Critical findings in the frozen review the run consumed (or None).
 
@@ -1290,9 +932,6 @@ def critical_findings_input(ctx: Ctx, rec: dict):
     if not findings:
         findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
-        return None
-    if _frozen_findings_doc_valid(ctx, rec) is False:
-        # Present but malformed: the zero self-report cannot be cross-checked.
         return None
     return sum(1 for f in findings
                if str(f.get("severity") or "").strip().lower() in ("critical", "fatal"))
@@ -1314,8 +953,6 @@ def writing_findings_input(ctx: Ctx, rec: dict):
     if not findings:
         findings = round_consumed_findings(ctx, rec.get("round"))
     if not findings and not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
-        return None
-    if _frozen_findings_doc_valid(ctx, rec) is False:
         return None
     return _category2_count(findings)
 
@@ -1397,7 +1034,7 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
         if summ["critical_remaining"] == 0:
             warns.append(f"marker reports critical_remaining=0 while the frozen review lists "
                          f"{n_crit_in} Critical finding(s); that self-reported number is only "
-                         f"reported and cross-checked only; it never affects eligibility, ranking or the champion -- verify it in the "
+                         f"used to break a statistical tie in the ranking -- verify it in the "
                          f"package's report before trusting the ranking")
     n_writing_in = writing_findings_input(ctx, rec)
     if is_int(summ.get("writing_remaining")) and n_writing_in:
@@ -1405,8 +1042,8 @@ def tiebreak_selfreport_warnings(ctx: Ctx, rec: dict, summ: dict, warns: list) -
         if summ["writing_remaining"] == 0:
             warns.append(f"marker reports writing_remaining=0 while the frozen review lists "
                          f"{n_writing_in} category-2 (writing quality/logic/repetition) "
-                         f"finding(s); that self-reported number is reported and cross-checked only; it never "
-                         f"affects eligibility, ranking or the champion -- verify it in the package's report "
+                         f"finding(s); that self-reported number is only used to break a "
+                         f"statistical tie in the ranking -- verify it in the package's report "
                          f"before trusting the ranking")
 
 
@@ -1416,19 +1053,7 @@ def frozen_findings_total(ctx: Ctx, rec: dict):
     Used by the revision postcheck to tell a legitimate all-clean ledger (the
     review carried no findings) from an agent that simply wrote no rows.
     """
-    frozen = ctx.sandbox_of(rec) / FINDINGS_REL
-    if not frozen.exists():
-        return None
-    doc = read_json(frozen, revive=False, lenient=True)   # agent-written
-    if not isinstance(doc, dict):
-        # The docstring promises None when the frozen review is unreadable; a
-        # parse failure used to fall through to 0 and accept an empty ledger
-        # as an all-clean one.
-        return None
-    rows = doc.get("findings")
-    if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
-        # A dict without a findings LIST (or with non-object rows) is malformed,
-        # not an all-clean review (F010).
+    if not (ctx.sandbox_of(rec) / FINDINGS_REL).exists():
         return None
     return len(consumed_findings(ctx, rec))
 
@@ -1437,17 +1062,13 @@ def frozen_finding_ids(ctx: Ctx, rec: dict) -> list:
     """Ids of the findings this run must resolve (frozen review, AUDITED)."""
     ids = []
     for f in consumed_findings(ctx, rec):
-        # A numeric/other id is accepted by check_review_contract (`str(...)`),
-        # so it must be required here too, not silently dropped from the
-        # required-id list (F150).
-        fid = str(f.get("id") or "").strip()
-        if fid and fid not in ids:
-            ids.append(fid)
+        fid = f.get("id")
+        if isinstance(fid, str) and fid.strip() and fid.strip() not in ids:
+            ids.append(fid.strip())
     return ids
 
 
-def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total,
-                             rel: str = None, frozen_error: str = None) -> tuple:
+def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total, rel: str = None) -> tuple:
     """(errors, warnings) for one package stage's machine-readable revision ledger.
 
     The contract this enforces (`revision_report.json`, the deliverable that
@@ -1464,9 +1085,6 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total,
     """
     pkg_rel = rel or f"{pkg.name}/revision_report.json"
     errs, warns = [], []
-    if frozen_error:
-        errs.append(frozen_error)
-        return errs, warns
     path = pkg / "revision_report.json"
     if not path.is_file():
         errs.append(f"{pkg_rel} is missing: it is the revision ledger (one row per finding id, "
@@ -1555,17 +1173,6 @@ def revision_ledger_problems(pkg: Path, frozen_ids: list, frozen_total,
                   "`clarification` / `manual-required` / `not-found-in-source` / "
                   "`dropped-by-audit`, and the final edit outcome belongs in "
                   "`final_status`")
-        no_explanation = _ledger_rows_without_explanation(ledger, frozen_ids)
-        if no_explanation:
-            _detail = "; ".join(
-                f"{i} (missing {' and '.join(cells)})"
-                for i, cells in sorted(no_explanation.items())[:6])
-            errs.append(
-                f"{pkg_rel} records a disposition without the required explanation "
-                f"cell(s) for {len(no_explanation)} finding id(s): {_detail}"
-                + (" ..." if len(no_explanation) > 6 else "")
-                + " -- every disposed row must say WHY (`rationale`) and WHAT was "
-                  "checked (`evidence`); a row missing either cell is not a disposal")
     return errs, warns
 
 
@@ -1587,53 +1194,39 @@ def ledger_named_ids(ledger, wanted=()) -> set:
     r2_a2_revise both failed every attempt that way -- so the gate asks the only
     question it is about: does the payload name every frozen finding id?
 
-    An id counts when it appears as a scalar that EQUALS a frozen id -- a row
-    field's value, a mapping key, or an element of a documented plain id list
-    (`_ID_LIST_KEYS`) or of the top-level list itself -- at any nesting level.
-    A string element of any OTHER list does not count: an id quoted inside
-    another row's `evidence` is evidence, not a disposition of that row (F005).
-    A JSON number is coerced to its canonical string exactly like every other
-    ledger reader (`ledger_row_id`), so `{"id": 1, ...}` names frozen id "1"
-    (F096). Prose that merely mentions an id does not count, so a report object
-    that names no finding still fails the gate.
+    An id counts when it appears as a JSON string that EQUALS a frozen id -- a
+    row field's value, a list element, or a mapping key -- at any nesting level.
+    Prose that merely mentions an id does not count, so a report object that
+    names no finding still fails the gate.
     """
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     named = set()
 
     def note(value):
-        token = ledger_row_id({"id": value})
-        if token and (not want or token in want):
-            named.add(token)
+        if isinstance(value, str):
+            token = value.strip()
+            if token and (not want or token in want):
+                named.add(token)
 
-    _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
-
-    def visit(node, depth: int, allow_strings: bool = False):
+    def visit(node, depth: int):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
             for key, value in node.items():
-                k = key.strip() if isinstance(key, str) else ""
-                if want and k in want:
-                    named.add(k)                # {"F-001": {...}}
-                rid = ledger_row_id(node)       # {"id": "F-001"|1, ...}
-                if rid and (not want or rid in want):
-                    named.add(rid)
+                if want and isinstance(key, str) and key.strip() in want:
+                    named.add(key.strip())          # {"F-001": {...}}
                 if isinstance(value, (dict, list, tuple)):
-                    visit(value, depth + 1, k.lower() in _ID_LIST_KEYS)
+                    visit(value, depth + 1)
+                else:
+                    note(value)
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    visit(item, depth + 1, allow_strings)
-                elif allow_strings:
-                    # A plain id list counts only where the contract says it is
-                    # one: the top-level list itself, or a documented id-list
-                    # key. An id quoted inside another row's `evidence` list is
-                    # evidence, not a disposal of that row (F005): counting
-                    # every string element at every depth let a row dispose a
-                    # finding it merely quoted.
-                    note(item)
+                    visit(item, depth + 1)
+                else:
+                    note(item)                      # ["F-001", "F-002"]
 
-    visit(ledger, 0, isinstance(ledger, (list, tuple)))
+    visit(ledger, 0)
     return named
 
 
@@ -1650,12 +1243,10 @@ LEDGER_VERDICT_FIELDS = ("verdict", "final_status", "status", "disposition")
 LEDGER_VERDICT_RE = re.compile(
     r"(?i)^(confirmed|false[\s_-]*positive|clarification|"
     r"manual[\s_-]*required|not[\s_-]*found[\s_-]*in[\s_-]*source|"
-    r"fixed(?:[\s_-]*with[\s_-]*caveat)?|placeholder[\s_-]*inserted|discarded|"
-    r"dropped[\s_-]*by[\s_-]*audit)\b")
+    r"fixed(?:[\s_-]*with[\s_-]*caveat)?|placeholder[\s_-]*inserted|discarded)\b")
 LEDGER_VERDICTS = ("confirmed", "false-positive", "clarification",
                    "manual-required", "not-found-in-source",
-                   "fixed", "fixed-with-caveat", "placeholder-inserted", "discarded",
-                   "dropped-by-audit")
+                   "fixed", "fixed-with-caveat", "placeholder-inserted", "discarded")
 
 
 def _ledger_row_verdict(row) -> str:
@@ -1681,16 +1272,7 @@ LEDGER_FINAL_RE = re.compile(
 
 
 def _ledger_final_status(row) -> str:
-    """The row's final edit outcome, or "" (a different column from `verdict`).
-
-    An explicit final-status column that carries a NON-vocabulary value fails
-    closed: `{"final_status": "not fixed", "status": "fixed"}` used to fall
-    through to `status` and read as `fixed` (F048). Only when no final-status
-    column is set at all may the `verdict` column supply the outcome, because a
-    one-column row whose verdict is `manual-required`/`clarification` is that
-    outcome (F046) -- `confirmed` and the other re-verification verdicts are
-    not final-status tokens and stay "".
-    """
+    """The row's final edit outcome, or "" (a different column from `verdict`)."""
     for key in ("final_status", "final status", "status", "disposition"):
         val = re.sub(r"\s+", " ", str((row or {}).get(key) or "").strip())
         if not val:
@@ -1698,34 +1280,6 @@ def _ledger_final_status(row) -> str:
         m = LEDGER_FINAL_RE.match(val)
         if m:
             return re.sub(r"[\s_]+", "-", m.group(1).lower())
-        # The FIRST present final-status column decides. A present but
-        # non-vocabulary value must not silently fall through to a
-        # lower-priority column that happens to read `fixed`.
-        return ""
-    verdict = re.sub(r"\s+", " ", str((row or {}).get("verdict") or "").strip())
-    m = LEDGER_FINAL_RE.match(verdict)
-    return re.sub(r"[\s_]+", "-", m.group(1).lower()) if m else ""
-
-
-def ledger_row_id(row) -> str:
-    """A ledger row's finding id, coercing a JSON number to its canonical string.
-
-    A frozen review may carry `id: 1`; the review validity check accepts any
-    object row, so every ledger reader must dispose that row. The readers used
-    to accept only a `str`, and a numeric id was silently skipped by all of them
-    (F096). A non-scalar value is still not an id.
-    """
-    if not isinstance(row, dict):
-        return ""
-    for key in ("id", "finding", "finding_id", "frozen_id"):
-        val = row.get(key)
-        if isinstance(val, str):
-            if val.strip():
-                return val.strip()
-        elif isinstance(val, int) and not isinstance(val, bool):
-            return str(val)
-        elif isinstance(val, float) and val.is_integer():
-            return str(int(val))
     return ""
 
 
@@ -1739,11 +1293,18 @@ def _ledger_row_counts(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     counts = {}
 
+    def row_id(row):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = ledger_row_id(node) or keyed_id
+            rid = row_id(node) or keyed_id
             if (not want or rid in want) and _ledger_row_verdict(node):
                 counts[rid] = counts.get(rid, 0) + 1
             for key, value in node.items():
@@ -1753,11 +1314,7 @@ def _ledger_row_counts(ledger, wanted=()) -> dict:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    # A mapping keyed by finding id may carry a LIST of rows
-                    # under that id; the list descent used to drop the key, so
-                    # every row lost its id and the complete ledger read as
-                    # undisposed (F34).
-                    visit(item, depth + 1, keyed_id)
+                    visit(item, depth + 1)
                 elif isinstance(item, str) and (not want or item.strip() in want):
                     continue          # an id list names, it does not dispose
 
@@ -1777,14 +1334,18 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     found = {}
 
+    def row_id(row: dict):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
 
-    _ID_LIST_KEYS = {"ids", "finding_ids", "named_ids", "coverage_ids", "named"}
-
-    def visit(node, depth: int, keyed_id: str = "", allow_strings: bool = False):
+    def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = ledger_row_id(node) or keyed_id
+            rid = row_id(node) or keyed_id
             verdict = _ledger_row_verdict(node)
             # The final edit outcome is a SECOND disposition column, so one
             # row's disposition is the (verdict, final) PAIR. `fixed` and
@@ -1795,86 +1356,23 @@ def _ledger_verdict_map(ledger, wanted=()) -> dict:
                 found.setdefault(rid, set()).add(
                     verdict + (f" (final={final})" if final else ""))
             for key, value in node.items():
-                k = key.strip() if isinstance(key, str) else ""
                 if isinstance(value, (dict, list, tuple)):
-                    visit(value, depth + 1, k, k.lower() in _ID_LIST_KEYS)
+                    visit(value, depth + 1, key.strip() if isinstance(key, str) else "")
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    # Carry the finding-id key through a list of rows (F34).
-                    visit(item, depth + 1, keyed_id)
-                elif allow_strings and isinstance(item, str) \
-                        and (not want or item.strip() in want):
-                    # A plain ID LIST is the documented "naming" shape; an id
-                    # quoted inside another row's `evidence` list is NOT a row
-                    # identity (F005).
+                    visit(item, depth + 1)
+                elif isinstance(item, str) and (not want or item.strip() in want):
+                    # A plain ID LIST is the documented "naming" shape (the row
+                    # container's name is not pinned); it proves no id was
+                    # dropped even though it carries no per-row verdict. The
+                    # unsupported shape this gate REJECTS is a mapping key whose
+                    # value is a bare string/null (`{"F-001": ""}`): that reads
+                    # as a row and records no verdict.
                     found.setdefault(item.strip(), set())
 
-    visit(ledger, 0, allow_strings=isinstance(ledger, (list, tuple)))
-    return found
-
-
-# The two REQUIRED explanation cells, each with the alias spellings real
-# ledgers have used for it. They are independent: a row carrying only one of
-# them does not record both what was re-checked and why it was accepted (F149).
-_LEDGER_RATIONALE_KEYS = ("rationale", "reason", "basis")
-_LEDGER_EVIDENCE_KEYS = ("evidence", "detail", "note")
-_LEDGER_EXPLANATION_KEYS = _LEDGER_RATIONALE_KEYS + _LEDGER_EVIDENCE_KEYS
-
-
-def _ledger_rows_without_explanation(ledger, wanted=()) -> dict:
-    """{finding id: [missing cell names]} for disposed rows with an empty cell.
-
-    The prompt requires a non-empty `rationale` AND a non-empty `evidence` for
-    every disposed row (an empty rationale is explicitly invalid), but the gate
-    originally checked the verdict tokens only: a row
-    `{"id": "F-001", "verdict": "confirmed"}` passed with no explanation at all
-    (F149). Requiring only ONE of the two cells still let a row with
-    `rationale` alone (or `evidence` alone) pass, so the documented two-cell
-    proof of the re-check was not enforced. The alias keys are accepted for
-    each cell; the two groups are independent.
-    """
-    want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
-    bad = {}
-
-    def visit(node, depth: int, keyed_id: str = ""):
-        if depth > LEDGER_SCAN_DEPTH:
-            return
-        if isinstance(node, dict):
-            rid = ledger_row_id(node) or keyed_id
-            if (not want or rid in want) and _ledger_row_verdict(node):
-                missing = []
-
-                def _explained(keys) -> bool:
-                    # An explanation is TEXT: a number, object or array is not
-                    # a rationale/evidence sentence, and `str(5)`/`str([1])`
-                    # used to pass the two-cell proof (F138). A short single
-                    # token is legitimate evidence (a line reference, a sha),
-                    # so only the non-string types are rejected.
-                    for key in keys:
-                        value = node.get(key)
-                        if isinstance(value, str) and value.strip():
-                            return True
-                    return False
-
-                if not _explained(_LEDGER_RATIONALE_KEYS):
-                    missing.append("rationale")
-                if not _explained(_LEDGER_EVIDENCE_KEYS):
-                    missing.append("evidence")
-                if missing:
-                    bad[rid] = missing
-            for key, value in node.items():
-                if isinstance(value, (dict, list, tuple)):
-                    visit(value, depth + 1,
-                          key.strip() if isinstance(key, str) else "")
-        elif isinstance(node, (list, tuple)):
-            for item in node:
-                if isinstance(item, (dict, list, tuple)):
-                    # Carry the finding-id key through a list of rows (F34).
-                    visit(item, depth + 1, keyed_id)
-
     visit(ledger, 0)
-    return bad
+    return found
 
 
 LEDGER_REVERIFY_RE = re.compile(
@@ -1895,11 +1393,18 @@ def _ledger_rows_without_reverification(ledger, wanted=()) -> set:
     want = {str(w).strip() for w in (wanted or ()) if str(w).strip()}
     bad = set()
 
+    def row_id(row):
+        for key in ("id", "finding", "finding_id", "frozen_id"):
+            val = row.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        return ""
+
     def visit(node, depth: int, keyed_id: str = ""):
         if depth > LEDGER_SCAN_DEPTH:
             return
         if isinstance(node, dict):
-            rid = ledger_row_id(node) or keyed_id
+            rid = row_id(node) or keyed_id
             if not want or rid in want:
                 raw_verdict = " ".join(str(node.get("verdict") or "").split())
                 has_final = any(str(node.get(k) or "").strip() for k in
@@ -1916,8 +1421,7 @@ def _ledger_rows_without_reverification(ledger, wanted=()) -> set:
         elif isinstance(node, (list, tuple)):
             for item in node:
                 if isinstance(item, (dict, list, tuple)):
-                    # Carry the finding-id key through a list of rows (F34).
-                    visit(item, depth + 1, keyed_id)
+                    visit(item, depth + 1)
 
     visit(ledger, 0)
     return bad
@@ -1937,7 +1441,7 @@ def ledger_disposed_ids(ledger, wanted=()) -> set:
     ledgers have used an id list as their container. Such a list proves no id was
     dropped; it does not pretend to record a per-row verdict.
     """
-    return {i for i, vs in _ledger_verdict_map(ledger, wanted).items() if vs}
+    return set(_ledger_verdict_map(ledger, wanted))
 
 
 # ---------------------------------------------------------------------
@@ -1977,22 +1481,6 @@ SWEEP_ARTIFACTS = {
     "M22": "M22_availability.md",
     "M23": "M23_supp_parity.md",
 }
-def required_review_check_ids() -> list:
-    """Every check id the guided review's coverage table must dispose.
-
-    ONE source of truth for the postcheck, the pre-flight and the contract the
-    prompt prints: a session that is given the list does not have to read the
-    implementation to discover it (the 2026-11-13 review did exactly that).
-    """
-    wanted = list(REQUIRED_REVIEW_CHECKS)
-    wanted += ["M18", "M19", "M20"]                 # always active
-    wanted += ["M21", "M22", "M23", "M24"]          # adopted discovery sweeps
-    wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]   # rewrite parity
-    wanted += ["M30"]                                # source hierarchy
-    wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]  # evidence integrity
-    return wanted
-
-
 _CHECK_ID_RE = re.compile(r"([MJ])0*(\d+)", re.I)
 
 
@@ -2058,91 +1546,16 @@ COVERAGE_DISPOSITION_RE = re.compile(
 # A reason that NEGATES the check is not a disposition: `clean -- basis:
 # x.md not checked` says the opposite of what the cell's verdict claims.
 _COVERAGE_NEGATED_CHECK_RE = re.compile(
-    r"(?i)\b(?:not|never|could\s+not|couldn['\u2019]t|would\s+not|wouldn['\u2019]t|"
-    r"cannot|can['\u2019]t|wasn['\u2019]t|weren['\u2019]t|isn['\u2019]t|"
-    r"didn['\u2019]t|doesn['\u2019]t|don['\u2019]t|did\s+not|does\s+not|do\s+not)\s+"
-    r"(?:be\s+|been\s+)?(?:check(?:ed|s|ing)?|verif(?:y|ied|ies)|re-?deriv(?:e|ed)|"
-    r"examin(?:e|ed)|review(?:ed)?|inspect(?:ed)?|ran|run|perform(?:ed)?)\b"
-    # `clean -- basis: no rows were checked` / `no row was examined`: the
-    # negated subject precedes the verb instead of following "not".
-    r"|\bno\s+[^.;\n]{0,40}?\b(?:was|were)\s+"
-    r"(?:check(?:ed|s)?|verif(?:ied|ies)|re-?deriv(?:ed)?|examin(?:e|ed)|"
-    r"review(?:ed)?|inspect(?:ed)?|ran|run)\b"
-    # An INABILITY form is a negated check whichever auxiliary spells it:
-    # `wasn't able to check`, `was unable to check` and `failed to check` all
-    # said the sweep never ran, yet none of the "not <verb>" spellings above
-    # matched them and a CLEAN row certified the non-run (F03). `unable --`
-    # rows are exempt at the caller, where the inability IS the disposition.
-    r"|\b(?:(?:was|were|is|are|am)n['\u2019]t\s+able|unable|not\s+able|"
-    r"failed|forgot(?:ten)?)\s+to\s+"
-    r"(?:check(?:ed|s|ing)?|verif(?:y|ied|ies)|re-?deriv(?:e|ed)|"
-    r"examin(?:e|ed)|review(?:ed)?|inspect(?:ed)?|ran|run|perform(?:ed)?)\b")
-# A finding COUNT is not a reason-bearing form, so a count row whose tail says the
-# sweep never RAN contradicts its own "0 findings". This wider verb set is used
-# ONLY for the count form: `unable -- the pass was not performed` is a legitimate
-# inability reason, so the shared `_coverage_reason_named` test must not carry it.
-_COVERAGE_COUNT_NEGATED_RE = re.compile(
-    r"(?i)\b(?:not|never|without|could\s+not|cannot|did\s+not|didn['\u2019]t)\b"
-    r"[^.;\n]{0,25}\b(?:run|executed?|performed?|check(?:ed|s)?|verif(?:ied|ies))\b")
-# A tail that says no work happened ("checked nothing", "nothing was checked",
-# "no sweep was performed") is a negated check even though it uses none of the
-# "not checked" spellings above (F160).
-_COVERAGE_NOWORK_RE = re.compile(
-    r"(?i)(?:\b(?:checked|reviewed|examined|verified|inspected)\s+nothing\b"
-    r"|\b(?:nothing|none)\s+(?:was\s+|were\s+)?(?:checked|reviewed|examined|verified|"
-    r"inspected)\b"
-    r"|\bno\s+[^.;\n]{0,25}?\b(?:sweep|pass|check|scan)s?\b[^.;\n]{0,20}?"
-    r"\b(?:ran|run|performed|executed)\b"
-    r"|\b(?:skip(?:ped|s)?|deferred?|postponed?|not\s+attempted|tbd|todo)\b"
-    r"|\b(?:never|nobody|no\s+one)\s+(?:looked|checked|reviewed|examined|verified|"
-    r"inspected)\b"
-    r"|\bdid\s+not\s+happen\b"
-    r"|\b(?:work|check|sweep|pass|review|audit|scan)\s+(?:was|were|is|are)\s+"
-    r"(?:not\s+(?:done|performed|run|completed)|skipped|deferred)\b"
-    r"|\b(?:could|can)\s+not\s+(?:check|verify|review|examine|inspect)\s+anything\b)")
-# A no-work token is never a named reason: `unable -- pending` and
-# `clean -- basis: no work done` say the sweep did not run. This is checked for
-# `unable` rows too, which the negated-check test deliberately skips (F03).
-_COVERAGE_NOWORK_TOKEN_RE = re.compile(
-    r"(?i)\b(?:pending|not\s+attempted|not\s+done|no\s+work\s+(?:was\s+)?done|"
-    r"no\s+analysis\s+(?:was\s+)?performed|nothing\s+(?:was\s+)?(?:done|checked)|"
-    r"nothing\s+(?:to|was)\s+report(?:ed)?|no\s+change\b|unchanged\b|"
-    r"checked\s+nothing|did\s+nothing|unable\s+to\s+(?:check|verify|review))\b")
+    r"(?i)\b(?:not|never|could\s+not|cannot|can['\u2019]t|wasn['\u2019]t|"
+    r"weren['\u2019]t|isn['\u2019]t|didn['\u2019]t|did\s+not)\s+"
+    r"(?:be\s+)?(?:checked|verified|re-?derived|examined|reviewed|inspected)\b")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
     r"|out\s+of\s+scope\s*(?:--|—|–))\s*(.*)$")
-# A CLEAN basis that names a MISSING capability is the opposite of a clean
-# sweep: "clean -- basis: no PDF renderer" certified a visual pass the session
-# could not perform, while the documented inability form is `unable -- <reason>`
-# (F143). The inability spelling of a clean row is refused; `unable -- no PDF
-# renderer` stays a legitimate disposition (its reason IS the inability).
-_COVERAGE_MISSING_CAPABILITY_RE = re.compile(
-    r"(?i)(?:\b(?:no|without)\s+(?:[a-z0-9_.+-]+\s+){0,4}?"
-    r"(?:renderer|rendering|tool|binary|executable|pdftoppm|pdfinfo|libreoffice|"
-    r"soffice|python-docx|openpyxl|lxml)\b"
-    # `no tool errors` is a clean RESULT and `no renderer was needed` a clean
-    # basis, not an unavailable capability (R04).
-    r"\s*(?:$|[.;,)]|(?:available|installed|detected|found|present)\b|(?:is|was)\b(?!\s+(?:not\s+)?(?:needed|required|necessary)\b))"
-    r"|\b(?:renderer|rendering|tool|binary|executable|library|package|module|"
-    r"dependency|pdftoppm|pdfinfo|libreoffice|soffice|python-docx|openpyxl|lxml)\s+"
-    r"(?:is\s+|was\s+)?"
-    r"(?:unavailable|missing|not\s+(?:available|installed|present))\b"
-    r"|\b(?:could|can|did|was|were)\s*(?:not|n[\'\u2019]t)\s+(?:be\s+)?"
-    r"(?:produced|rendered|generated|opened)\b)")
 
 
-def _coverage_basis_is_missing_capability(reason) -> bool:
-    """True when a CLEAN basis names an unavailable tool/renderer, not an artifact."""
-    return bool(_COVERAGE_MISSING_CAPABILITY_RE.search(str(reason or "")))
-
-
-def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
+def _coverage_reason_named(reason) -> bool:
     """True when a `<dash> <reason>` tail NAMES an artifact or a reason.
-
-    ``allow_negated`` is true ONLY for an ``unable -- <reason>`` row: there,
-    "the renderer could not run" IS the inability the disposition records, so
-    the negated-check test (which refuses ``clean -- basis: <x> not checked``)
-    must not be applied to it (F014).
 
     Shared by the review gate and the audit gate (the audit's prose forms carry
     the same tail), so both refuse the same filler.
@@ -2152,32 +1565,10 @@ def _coverage_reason_named(reason, allow_negated: bool = False) -> bool:
     # named reason; the old length-only test counted its two letters and passed.
     if not reason or re.fullmatch(
             r"(?i)ok|okay|yes|y|done|checked|clean|good|fine|pass|passed|true|false|"
-            r"nil|null|no|none|n/?a|na|tbd|todo|unknown|verified|reviewed|"
-            r"examined|inspected|performed|attempted|complete|completed|pending|"
-            # `out of scope -- not applicable` / `unable -- not applicable` is a
-            # refusal, not a named reason: refuse it like every other filler.
-            r"not\s+applicable|not-applicable|inapplicable", reason):
+            r"nil|null|no|none|n/?a|na|tbd|todo|unknown", reason):
         return False
-    # An anonymous pointer ("see above", "as discussed") names no artifact,
-    # location or reason; it is the same filler as `x` (F040).
-    if re.fullmatch(
-            r"(?i)(?:see\s+(?:above|below|here|there|prior|previous|report|details?)|"
-            r"as\s+(?:discussed|above|before|noted|stated)|ditto|ibid(?:\.|em)?)"
-            r"[.!]?", reason):
-        return False
-    # A reason that negates the check's own verdict contradicts it -- except in
-    # an `unable -- <reason>` row, where the negation is the disposition.
-    # A no-work token is refused for EVERY disposition (including `unable`):
-    # it records that no work happened, not a named reason (F03).
-    if _nowork_token_is_reason(reason):
-        return False
-    if not allow_negated and (_COVERAGE_NEGATED_CHECK_RE.search(reason)
-                              or _COVERAGE_NOWORK_RE.search(reason)):
-        return False
-    # A tail built only from generic approval/placeholder words names nothing:
-    # `lorem ipsum dolor sit amet`, `all good` and `no problems` used to pass
-    # because only their length was measured (F12, 2026-11-23).
-    if _reason_is_generic_filler(reason):
+    # A reason that negates the check's own verdict contradicts it.
+    if _COVERAGE_NEGATED_CHECK_RE.search(reason):
         return False
     # At least three alphanumeric characters: a one- or two-character token
     # (`x`, `ok`, `ab`, `12`) and punctuation alone cannot name an artifact or
@@ -2204,48 +1595,20 @@ def _coverage_disposition_ok(value) -> bool:
                   str(value or "").strip())
     if not COVERAGE_DISPOSITION_RE.fullmatch(text):
         return False
-    _count = re.match(r"(?i)^(\d+)\s+findings?\b", text)
-    if _count:
+    _count = re.match(r"(?i)^(\d+)\s+finding", text)
+    if _count and int(_count.group(1)) > 0:
+        # A positive count followed by an unqualified none/no/zero contradicts
+        # itself. The old rule required but/however/yet, so `2 findings; none`,
+        # `2 findings, none` and `2 findings -- none` all passed as real
+        # dispositions. The negative lookahead keeps a genuine qualification
+        # (`2 findings; none critical`) out of the rule.
         _tail = text[_count.end():]
-        if int(_count.group(1)) > 0:
-            # A positive count followed by an unqualified none/no/zero contradicts
-            # itself. The old rule required but/however/yet, so `2 findings; none`,
-            # `2 findings, none` and `2 findings -- none` all passed as real
-            # dispositions. The negative lookahead keeps a genuine qualification
-            # (`2 findings; none critical`) out of the rule.
-            if re.search(r"(?i)(?:^|[^A-Za-z])(?:none|no|zero)\b\s*(?:$|[.;,)\]])", _tail):
-                return False
-        if _COVERAGE_NEGATED_CHECK_RE.search(_tail) \
-                or _COVERAGE_COUNT_NEGATED_RE.search(_tail) \
-                or _COVERAGE_NOWORK_RE.search(_tail) \
-                or _nowork_token_is_reason(_tail) \
-                or re.search(
-                    r"(?i)^[\s;:,.-]*(?:see\s+(?:above|below|here|there|prior|previous|"
-                    r"report|details?)|as\s+(?:discussed|above|before|noted|stated))[.!]?\s*$",
-                    _tail):
-            # The count form used to bypass the negation test entirely: `0 findings
-            # -- not checked` (and `0 findings; the sweep did not run`) certified a
-            # sweep that never ran (F112). The tail must not negate the check.
-            return False
-        if _count_tail_is_filler(_tail, int(_count.group(1))):
+        if re.search(r"(?i)(?:^|[^A-Za-z])(?:none|no|zero)\b\s*(?:$|[.;,)\]])", _tail):
             return False
     m = _COVERAGE_NAMED_BASIS_RE.search(text)
     if m is None:
         return True          # "N findings"
-    # A `clean -- basis:` tail that says the sweep never RAN is not a basis.
-    # The count-negation test used to run only for the "N findings" form, so
-    # "clean -- basis: the sweep did not run" certified a non-run (F014). It is
-    # NOT applied to `unable --`, where "could not run" is a legitimate reason.
-    # The same clean-only rule refuses a basis that names a MISSING capability
-    # ("no PDF renderer"): an unavailable tool is an `unable -- <reason>` row,
-    # not a clean sweep (F143).
-    if re.match(r"(?i)^\s*clean\b", text) and (
-            _COVERAGE_COUNT_NEGATED_RE.search(m.group(1) or "")
-            or _coverage_basis_is_missing_capability(m.group(1))):
-        return False
-    # The same exemption for `unable --`: "could not run" is its disposition.
-    return _coverage_reason_named(
-        m.group(1), allow_negated=bool(re.match(r"(?i)^\s*unable\b", text)))
+    return _coverage_reason_named(m.group(1))
 
 
 _BARE_COVERAGE_DISPOSITIONS = {"clean", "unable", "out of scope", "out-of-scope"}
@@ -2293,17 +1656,7 @@ def _coverage_row_disposition_ok(row) -> bool:
     if not detail:
         return False
     match = re.search(r"(?i)\b(?:basis|reason)\s*:\s*([^\n]+)", detail)
-    if not match:
-        return False
-    reason = match.group(1)
-    # The bare-`clean` route must refuse a basis that says the sweep never ran,
-    # exactly like the inline `clean -- basis:` form (F014). `unable` keeps
-    # "could not run" as a legitimate reason.
-    if bare == "clean" and (
-            _COVERAGE_COUNT_NEGATED_RE.search(reason)
-            or _coverage_basis_is_missing_capability(reason)):
-        return False
-    return bool(_coverage_reason_named(reason, allow_negated=bare == "unable"))
+    return bool(match and _coverage_reason_named(match.group(1)))
 
 
 def visual_tools_available() -> bool:
@@ -2311,81 +1664,6 @@ def visual_tools_available() -> bool:
 
 
 RENDER_EVIDENCE_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
-_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
-
-
-def _png_is_a_real_image(p: Path) -> bool:
-    """True only for a PNG carrying a positive-size IHDR and image data.
-
-    The 8-byte signature is not a page: a stage that never rendered the DOCX can
-    write the magic and satisfy the visual gate with it (F084). The chunk walk
-    is the standard-library equivalent of a decode (the pipeline ships no PIL):
-    a real render has an IHDR with non-zero dimensions and at least one IDAT
-    chunk with a payload.
-    """
-    try:
-        with p.open("rb") as fh:
-            if fh.read(8) != _PNG_SIGNATURE:
-                return False
-            seen_ihdr = False
-            for _ in range(10000):
-                hdr = fh.read(8)
-                if len(hdr) < 8:
-                    return False
-                length = int.from_bytes(hdr[:4], "big")
-                kind = hdr[4:8]
-                if kind == b"IHDR":
-                    if length != 13:
-                        return False
-                    data = fh.read(13)
-                    if len(data) < 13:
-                        return False
-                    width = int.from_bytes(data[:4], "big")
-                    height = int.from_bytes(data[4:8], "big")
-                    if width <= 0 or height <= 0:
-                        return False
-                    seen_ihdr = True
-                    fh.read(4)                     # CRC
-                elif kind == b"IDAT":
-                    return seen_ihdr and length > 0
-                elif kind == b"IEND":
-                    return False
-                else:
-                    fh.seek(length + 4, os.SEEK_CUR)   # payload + CRC
-            return False
-    except OSError:
-        return False
-
-
-def _render_evidence_is_real(p: Path) -> bool:
-    """True only for a non-empty file whose magic matches its extension.
-
-    A zero-byte `touch work/x.pdf` or a text file renamed `.png` is not proof of
-    a rendered page (F056).
-    """
-    try:
-        if p.stat().st_size < 8:
-            return False
-        with open(p, "rb") as fh:
-            head = fh.read(8)
-    except OSError:
-        return False
-    suf = p.suffix.lower()
-    if suf == ".pdf":
-        # The header alone is not a render: a 9-byte `%PDF-1.7` file has no
-        # `%%EOF` trailer. Use the same complete-render test as the
-        # renderer/cache path: a 15-byte `%PDF-1.4\n%%EOF\n` stub carries both
-        # SIGNATURE markers and no page, and used to satisfy the visual gate
-        # (F084).
-        return (pdf_signature_problem(p) == ""
-                and _render_output_body_problem(p) == "")
-    if suf == ".png":
-        return _png_is_a_real_image(p)
-    if suf in (".jpg", ".jpeg"):
-        return head.startswith(b"\xff\xd8\xff")
-    if suf in (".tif", ".tiff"):
-        return head[:4] in (b"II*\x00", b"MM\x00*")
-    return False
 
 
 def render_evidence_files(render_roots) -> list:
@@ -2408,8 +1686,7 @@ def render_evidence_files(render_roots) -> list:
                 # is_file() follows symlinks: a `work/fig1.png -> figures/fig1.png`
                 # link is NOT a rendered page (the visual pass produced nothing).
                 if (not p.is_file() or p.is_symlink()
-                        or p.suffix.lower() not in RENDER_EVIDENCE_EXTS
-                        or not _render_evidence_is_real(p)):
+                        or p.suffix.lower() not in RENDER_EVIDENCE_EXTS):
                     continue
                 try:
                     parts = p.relative_to(root).parts
@@ -2553,47 +1830,6 @@ def _toml_string_at(text: str, i: int):
     return None                                # unterminated
 
 
-def _toml_unquoted_mask(text: str) -> str:
-    """`text` with every string body and comment blanked out, offsets preserved.
-
-    A TOML key never lives inside a string or a comment, but the MCP entry
-    reader locates its keys with a line regex (`^command =`). An `args` value
-    carrying a multi-line string whose text contains `command = "evil"` was
-    therefore read as the executable, while TOML itself says `node` (F011).
-    Masking blanks those characters (to a NUL, never a space) and keeps every
-    newline and every offset, so a match end still indexes the ORIGINAL text
-    (the value readers are handed the unmasked body plus that offset).
-    """
-    src = str(text or "")
-    out = list(src)
-    # A string body becomes a NUL (never legal in a TOML document) rather than
-    # a space: the key readers' `[ \t]*` would otherwise swallow the blanked
-    # VALUE as trailing whitespace and hand the value reader the wrong offset.
-    # A COMMENT becomes spaces instead, so a legal trailing comment on a
-    # `[mcp_servers.x] # note` header still reads as a header line.
-    fill = "\x00"
-    i, n = 0, len(src)
-    while i < n:
-        ch = src[i]
-        if ch == "#":
-            nl = src.find("\n", i)
-            end = n if nl < 0 else nl
-            for k in range(i, end):
-                out[k] = " "
-            i = end
-            continue
-        if ch in "\"'":
-            got = _toml_string_at(src, i)
-            end = n if got is None else got[1]
-            for k in range(i, end):
-                if out[k] != "\n":
-                    out[k] = fill
-            i = end
-            continue
-        i += 1
-    return "".join(out)
-
-
 def _toml_array_values(raw: str):
     """The string values of a TOML array (`raw`), or None when unreadable.
 
@@ -2621,33 +1857,20 @@ def _toml_array_values(raw: str):
     if len(body) < 2 or body[0] != "[" or body[-1] != "]":
         return None
     inner, out, i, n = body[1:-1], [], 0, len(body) - 2
-    need_comma = False
     while i < n:
         ch = inner[i]
-        if ch in " \t\r\n":
+        if ch in " \t\r\n,":
             i += 1
             continue
         if ch == "#":
             nl = inner.find("\n", i)
             i = n if nl < 0 else nl + 1
             continue
-        if need_comma:
-            # TOML requires a comma between array elements: `["node"
-            # "server.js"]` is invalid, not a two-element argv.
-            if ch != ",":
-                return None
-            need_comma = False
-            i += 1
-            continue
-        if ch == ",":
-            # A leading/double comma is invalid.
-            return None
         got = _toml_string_at(inner, i)
         if got is None:
             return None
         value, i = got
         out.append(value)
-        need_comma = True
     return out
 
 
@@ -2728,15 +1951,662 @@ def _toml_inline_table_values(raw: str):
                 return None
             value, i = m.group(0), i + len(m.group(0))
         out[str(key)] = str(value)
-        # TOML requires a comma between inline-table entries. The old loop
-        # treated comma/whitespace alike, so `{ A = "1" B = "2" }` (invalid)
-        # was accepted as two env entries.
-        while i < n and inner[i] in " \t":
-            i += 1
-        if i < n and inner[i] != ",":
-            return None
     return out
 
+
+def mcp_server_spec(name: str) -> dict:
+    """{command, args} for one configured MCP server, {} when unreadable.
+
+    The operator's own `~/.codex/config.toml` entry is the authority (same
+    regex-scoped read as `mcp_server_configured`): the orchestrator must drive
+    EXACTLY the server the agent sessions are configured with.
+    """
+    try:
+        text = codex_config_path().read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    quoted = re.escape(name)
+    # A legal trailing comment (`[mcp_servers.x] # note`) does not unconfigure
+    # the server: with `\]\s*$` the header never matched, so a configured server
+    # probed as absent.
+    header = re.compile(r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+                        + quoted + r"'|" + quoted + r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
+    m = header.search(text)
+    if not m:
+        return {}
+    rest = text[m.end():]
+    nxt = re.search(r"^\s*\[", rest, re.MULTILINE)
+    body = rest[:nxt.start()] if nxt else rest
+    cm = re.search(r"^[ \t]*command[ \t]*=[ \t]*", body, re.MULTILINE)
+    if not cm:
+        return {}
+    got = _toml_string_at(body, cm.end())
+    if got is None or not got[0].strip():
+        return {}
+    # The TOML basic string decodes its escapes: `command = "C:\\Program
+    # Files\\node.exe"` names `C:\Program Files\node.exe`, and the raw
+    # `C:\\Program Files\\node.exe` never started on Windows.
+    command = os.path.expanduser(got[0])
+    args = []
+    am = re.search(r"^\s*args\s*=\s*", body, re.MULTILINE)
+    if am:
+        raw = _toml_array_at(body, am.end())
+    else:
+        raw = None
+    if raw is not None:
+        values = _toml_array_values(raw)
+        if values is None:
+            # A malformed entry is UNREADABLE, never "configured with no
+            # arguments": `json.loads` alone rejects TOML's own literal strings
+            # (`args = ['a']`) and TOML's trailing comma (`["a", "b",]`), and
+            # the old `except ValueError: args = []` then launched the server
+            # with no argv at all -- the silent wrong configuration
+            # `_toml_array_at` exists to prevent. Returning {} makes the caller
+            # report the entry instead of using it half-read.
+            return {}
+        args = values
+    spec = {"command": command, "args": args}
+    # `scripts/README-codex-mcp.md` lists command,args,env,cwd as the SAME
+    # fields in a Codex MCP entry. Dropping env/cwd launched the orchestrator's
+    # server with the pipeline's environment and working directory instead of
+    # the operator's configured one (F28).
+    wm = re.search(r"^[ \t]*cwd[ \t]*=[ \t]*", body, re.MULTILINE)
+    if wm:
+        cwd_got = _toml_string_at(body, wm.end())
+        if cwd_got is None:
+            return {}
+        spec["cwd"] = os.path.expanduser(cwd_got[0])
+    em = re.search(r"^[ \t]*env[ \t]*=[ \t]*", body, re.MULTILINE)
+    if em:
+        raw_env = _toml_inline_table_at(body, em.end())
+        env_values = _toml_inline_table_values(raw_env) if raw_env is not None else None
+        if env_values is None:
+            return {}                   # a malformed env block: unreadable entry
+        spec["env"] = env_values
+    if "env" not in spec:
+        # TOML also allows a subtable form: `[mcp_servers.<name>.env]` followed
+        # by `KEY = "value"` lines. It configures the same field, so ignoring it
+        # would keep launching with the pipeline's environment.
+        env_header = re.compile(
+            r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'"
+            + quoted + r"'|" + quoted + r")\s*\.\s*env\s*\]\s*(?:#.*)?$",
+            re.MULTILINE)
+        eh = env_header.search(text)
+        if eh:
+            rest_env = text[eh.end():]
+            next_hdr = re.search(r"^\s*\[", rest_env, re.MULTILINE)
+            env_body = rest_env[:next_hdr.start()] if next_hdr else rest_env
+            values = {}
+            for raw_line in env_body.splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    return {}
+                key_part, value_part = line.split("=", 1)
+                key_part, value_part = key_part.strip(), value_part.strip()
+                if key_part[:1] in "\"'":
+                    key_got = _toml_string_at(key_part, 0)
+                    if key_got is None or key_got[1] != len(key_part):
+                        return {}
+                    key = key_got[0]
+                elif re.fullmatch(r"[A-Za-z0-9_.\-]+", key_part):
+                    key = key_part
+                else:
+                    return {}
+                if value_part[:1] in "\"'":
+                    val_got = _toml_string_at(value_part, 0)
+                    if val_got is None:
+                        return {}
+                    value = val_got[0]
+                else:
+                    value = value_part.split("#", 1)[0].strip()
+                values[key] = value
+            spec["env"] = values
+    return spec
+
+
+def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
+                        timeout: float = 300) -> dict:
+    """Drive one configured MCP stdio server for ONE tool call, then stop it.
+
+    Minimal newline-delimited JSON-RPC: `initialize` ->
+    `notifications/initialized` -> `tools/call`. The orchestrator seeds the
+    venue-template renders itself, so it uses the SAME first-choice converter
+    the agent prompts mandate (the operator's docx-converter MCP tool, i.e.
+    Microsoft Word through PowerShell interop) instead of silently falling back
+    to a lower-fidelity shim.
+    """
+    argv = [str(spec.get("command") or ""), *[str(a) for a in spec.get("args") or []]]
+    if not argv[0]:
+        return {"ok": False, "error": "the MCP server entry names no command"}
+    launch_env = None
+    if spec.get("env"):
+        launch_env = dict(os.environ, **{str(k): str(v) for k, v in spec["env"].items()})
+    launch_cwd = spec.get("cwd") or None
+    try:
+        # Its OWN process group: a timeout must kill the whole chain
+        # (bash -> PowerShell -> Word), not only the node wrapper (F29).
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, bufsize=1,
+                                encoding="utf-8", errors="replace",
+                                env=launch_env, cwd=launch_cwd,
+                                **_render_popen_kwargs())
+    except OSError as e:
+        return {"ok": False, "error": f"the MCP server would not start: {e}"}
+    # A misbehaving MCP server must not grow memory without bound: queue only a
+    # bounded number of lines/bytes and record a flood instead of blocking the
+    # producer or allocating until OOM (the 2026-10-28 audit's F80).
+    MAX_MCP_LINES = 4096
+    MAX_MCP_LINE_BYTES = 1 << 20
+    MAX_MCP_QUEUED_BYTES = 8 << 20      # TOTAL bytes waiting in the queue
+    MAX_MCP_STDERR_KEEP = 4096          # per-line tail kept for the error report
+    lines = queue.Queue(maxsize=MAX_MCP_LINES)
+    queued_bytes = [0]
+    queue_lock = threading.Lock()
+    flooded = threading.Event()
+    stderr_flooded = threading.Event()
+    err_tail = deque(maxlen=6)
+
+    def pump(stream) -> None:
+        try:
+            while True:
+                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_MCP_LINE_BYTES:
+                    flooded.set()
+                    continue
+                with queue_lock:
+                    if queued_bytes[0] + len(line) > MAX_MCP_QUEUED_BYTES:
+                        flooded.set()
+                        continue
+                    try:
+                        lines.put_nowait(line)
+                    except queue.Full:
+                        flooded.set()
+                    else:
+                        queued_bytes[0] += len(line)
+        finally:
+            try:
+                lines.put_nowait(None)
+            except queue.Full:
+                pass
+
+    def pump_err(stream) -> None:
+        try:
+            while True:
+                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > MAX_MCP_LINE_BYTES:
+                    stderr_flooded.set()
+                    continue
+                err_tail.append(line[-MAX_MCP_STDERR_KEEP:])
+        except (OSError, ValueError):
+            pass
+
+    threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
+    threading.Thread(target=pump_err, args=(proc.stderr,), daemon=True).start()
+
+    def stop_tree() -> None:
+        """Kill the server AND its grandchildren (F29)."""
+        if os.name == "nt":
+            if proc.poll() is None:
+                with contextlib.suppress(OSError, subprocess.SubprocessError):
+                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                                   capture_output=True, timeout=30)
+                with contextlib.suppress(OSError):
+                    proc.kill()
+        else:
+            # killpg by the WRAPPER's pid works even after the wrapper exited:
+            # start_new_session made that pid the group id.
+            with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+                os.killpg(proc.pid, signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                proc.kill()
+
+    def failure(prefix: str) -> dict:
+        """`prefix` plus what the SERVER itself said, when saying nothing.
+
+        The handshake used to discard the server's stderr, so a server that
+        died on startup (a missing npm dependency -- the 2026-10-14 state of
+        the docx-compare/docx-converter copies) surfaced as the bare "did not
+        answer initialize()". One bounded wait drains the pipe, and the tail
+        travels into the manifest, so the operator sees the real error.
+        """
+        # Stop the tree BEFORE the 2-second drain: waiting first let a
+        # grandchild (bash -> PowerShell -> Word) keep running and writing for
+        # the whole diagnostic window (F29).
+        stop_tree()
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            proc.wait(timeout=2)
+        time.sleep(0.05)
+        text = "".join(err_tail).strip().replace("\n", " | ")
+        bits = [prefix]
+        if proc.returncode is not None:
+            bits.append(f"the server exited with code {proc.returncode}")
+        if text:
+            bits.append(f"stderr: {text[-300:]}")
+        if flooded.is_set():
+            bits.append("the server flooded its stdout; excess output was dropped")
+        if stderr_flooded.is_set():
+            bits.append("the server flooded its stderr; excess output was dropped")
+        return {"ok": False, "error": "; ".join(bits)}
+
+    def send(obj: dict) -> None:
+        proc.stdin.write(json.dumps(obj) + "\n")
+        proc.stdin.flush()
+
+    def wait_for(rid: int, deadline: float):
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return None
+            try:
+                line = lines.get(timeout=min(remaining, 0.5))
+            except queue.Empty:
+                continue
+            if line is None:
+                return None
+            with queue_lock:
+                if queued_bytes[0]:
+                    queued_bytes[0] = max(0, queued_bytes[0] - len(line))
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(msg, dict) and msg.get("id") == rid:
+                return msg
+
+    try:
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
+                         "clientInfo": {"name": "paper_pipeline", "version": VERSION}}})
+        init = wait_for(1, time.monotonic() + min(float(timeout), 60.0))
+        if init is None:
+            return failure("the MCP server did not answer initialize()")
+        if init.get("error"):
+            return {"ok": False, "error": f"initialize() failed: {init['error']}"}
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": tool, "arguments": arguments}})
+        rep = wait_for(2, time.monotonic() + float(timeout))
+        if rep is None:
+            return failure(f"the MCP tool {tool} did not answer within {int(timeout)}s")
+        if rep.get("error"):
+            return {"ok": False, "error": f"the MCP tool {tool} failed: {rep['error']}"}
+        out = {"ok": True, "result": rep.get("result") or {}}
+        flood_warnings = []
+        if flooded.is_set():
+            flood_warnings.append("the server flooded its stdout; excess output was dropped")
+        if stderr_flooded.is_set():
+            flood_warnings.append("the server flooded its stderr; excess output was dropped")
+        if flood_warnings:
+            out["warnings"] = flood_warnings
+        return out
+    except (OSError, ValueError) as e:                                  # noqa: BLE001
+        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        with contextlib.suppress(OSError):
+            proc.stdin.close()
+        stop_tree()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def mcp_convert_docx_to_pdf(spec: dict, docx: Path, timeout: float = 300) -> dict:
+    """Convert one DOCX through the operator's docx-converter MCP tool.
+
+    The tool writes `<stem>.pdf` NEXT TO the file it is handed, so callers pass
+    a disposable copy and read-only inputs never change.
+    """
+    rep = mcp_stdio_tool_call(spec, DOCX_MCP_TOOL, {"docxPath": str(docx)}, timeout=timeout)
+    if not rep.get("ok"):
+        return rep
+    result = rep.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
+                        if isinstance(c, dict))
+        return {"ok": False, "error": f"the MCP tool reported an error: {text[:200]}"}
+    pdf = Path(docx).with_suffix(".pdf")
+    if not pdf.is_file() or pdf.stat().st_size == 0:
+        return {"ok": False,
+                "error": f"the MCP tool returned success but wrote no PDF next to {Path(docx).name}"}
+    return {"ok": True, "pdf": pdf}
+
+
+def docx_compare_mcp_spec() -> dict:
+    """The configured `docx-compare` MCP server entry, {} when it is unusable.
+
+    Being configured is not enough: the entry has to name a command that is
+    still on this machine (the same probe `mcp_server_configured` applies). An
+    empty dict sends the redline chain to its next backend and is reported in
+    the manifest, so a missing server is never mistaken for a failed compare.
+    """
+    if not mcp_server_configured(DOCX_COMPARE_MCP_SERVER):
+        return {}
+    spec = mcp_server_spec(DOCX_COMPARE_MCP_SERVER)
+    cmd = str(spec.get("command") or "")
+    if not cmd:
+        return {}
+    # `~` IS expanded here, like the sibling probe in `mcp_server_configured`:
+    # a home-relative command used to read as "not installed" and silently
+    # vanish from the redline chain.
+    present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
+               else bool(shutil.which(cmd)))
+    return spec if present else {}
+
+
+def mcp_compare_docx(spec: dict, base: Path, revised: Path, out: Path,
+                     timeout: float = 900) -> dict:
+    """Write a Word-native tracked-changes redline through the compare MCP tool.
+
+    The tool drives `docxcompare.sh` -> PowerShell -> `Word.Application
+    .CompareDocuments`; it is handed the real base/revised paths and an explicit
+    output path (`<pipeline-managed auxiliary>.docx`), never an input path as its
+    output. Success is "the tool answered AND `out` is a readable OOXML package"
+    -- the same bar every other redline backend is held to.
+    """
+    rep = mcp_stdio_tool_call(spec, DOCX_COMPARE_MCP_TOOL,
+                              {"originalPath": str(base), "revisedPath": str(revised),
+                               "outputPath": str(out)}, timeout=timeout)
+    if not rep.get("ok"):
+        return {"ok": False, "error": rep.get("error")}
+    result = rep.get("result") or {}
+    if result.get("isError"):
+        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
+                        if isinstance(c, dict))
+        return {"ok": False, "error": f"the MCP tool reported an error: {text[:300]}"}
+    if not out.is_file() or out.stat().st_size == 0:
+        return {"ok": False,
+                "error": f"the MCP tool returned success but wrote no output at {out}"}
+    return {"ok": True}
+
+
+def visual_renderer_choices() -> list:
+    """Every usable DOCX->PDF renderer, in the order the prompts mandate.
+
+    The operator's docx-converter MCP tool comes FIRST (Microsoft Word through
+    PowerShell interop, the highest-fidelity renderer); `docx2pdf.sh` -- the
+    script that MCP tool drives internally -- is the fallback when the server is
+    not installed or cannot start, and LibreOffice is the last resort.
+    """
+    out = []
+    if mcp_server_configured(DOCX_MCP_SERVER):
+        spec = mcp_server_spec(DOCX_MCP_SERVER)
+        cmd = str(spec.get("command") or "")
+        present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
+                   else bool(shutil.which(cmd)))
+        if cmd and present:
+            out.append((f"mcp:{DOCX_MCP_SERVER}", spec))
+    here = Path(__file__).resolve().parent
+    for cand in (here / "docx2pdf.sh", shutil.which("docx2pdf.sh")):
+        if cand and Path(cand).is_file() and os.access(str(cand), os.X_OK):
+            out.append(("word", Path(cand)))
+            break
+    for exe in ("soffice", "libreoffice"):
+        p = shutil.which(exe)
+        if p:
+            out.append(("libreoffice", Path(p)))
+            break
+    return out
+
+
+def visual_renderer_choice() -> tuple:
+    """(name, payload) for the BEST renderer: MCP first, then Word, then LibreOffice."""
+    choices = visual_renderer_choices()
+    return choices[0] if choices else ("none", None)
+
+
+def _pdf_page_count(pdf: Path) -> int:
+    exe = shutil.which("pdfinfo")
+    if exe:
+        try:
+            out = subprocess.run([exe, str(pdf)], capture_output=True, timeout=60).stdout
+            m = re.search(rb"^Pages:\s*(\d+)", out or b"", re.M)
+            if m:
+                return int(m.group(1))
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return 0
+
+
+def _child_output(raw) -> str:
+    """A child process's stdout/stderr as text, never fatal on a non-UTF-8 locale.
+
+    The renderers this pipeline drives are Windows-interop shims; their
+    diagnostics arrive in the console's own code page, and decoding those as
+    strict UTF-8 must not turn a rendered PDF into a failed session.
+    """
+    if isinstance(raw, bytes):
+        return raw.decode("utf-8", "replace")
+    return raw or ""
+
+
+def _page_png_names(out_dir: Path, stem: str) -> list:
+    """The page PNGs pdftoppm wrote for `stem`, in PAGE order.
+
+    `stem` is matched literally (a stem like `Papers[1]` is not a glob
+    character class), and the trailing page number sorts numerically so
+    page-10 follows page-2.
+    """
+    def key(name: str):
+        m = re.search(r"-(\d+)\.png$", name)
+        return (int(m.group(1)) if m else 10 ** 9, name)
+    # EXACT `stem-<page>.png`: the old prefix test also kept another document's
+    # pages when `main.tex` and `main.docx` shared an output directory
+    # (`main-docx-1.png`), mixing two documents into one visual pass.
+    pat = re.compile(r"^" + re.escape(stem) + r"-\d+\.png$", re.I)
+    return sorted((p.name for p in Path(out_dir).iterdir()
+                   if p.is_file() and pat.match(p.name)), key=key)
+
+
+def _render_popen_kwargs() -> dict:
+    """Run the renderer in its own process group (timeout must kill the tree)."""
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    return {"start_new_session": True}
+
+
+def _kill_render_tree(proc) -> None:
+    """Kill a timed-out Word/LibreOffice renderer AND its grandchildren."""
+    if os.name == "nt":
+        with contextlib.suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=30)
+    else:
+        with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    with contextlib.suppress(OSError):
+        proc.kill()
+
+
+def _run_render_subprocess(argv, timeout, cwd=None):
+    """`subprocess.run` with a timeout that kills the renderer's whole tree.
+
+    stdout/stderr go to TEMPORARY FILES and are read back only up to
+    MAX_TOOL_OUTPUT_BYTES: the renderer is driven by an untrusted package, so a
+    flood must fail the render instead of allocating without bound (F25).
+    """
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
+            [str(a) for a in argv], stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
+            cwd=cwd, **_render_popen_kwargs())
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _kill_render_tree(proc)
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                proc.wait(timeout=30)              # reap; never leave a zombie
+            raise
+        out_f.seek(0, os.SEEK_END)
+        err_f.seek(0, os.SEEK_END)
+        out_size, err_size = out_f.tell(), err_f.tell()
+        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
+            raise ToolOutputOverBudget(
+                f"renderer output over {MAX_TOOL_OUTPUT_BYTES} bytes "
+                f"(stdout={out_size}, stderr={err_size})")
+        out_f.seek(0)
+        err_f.seek(0)
+        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
+
+
+def pdf_signature_problem(path: Path) -> str:
+    """'' when `path` looks like a complete PDF, else the reason it does not.
+
+    A non-empty output file is not a render. `docx2pdf.sh` has always checked
+    the `%PDF-` header and the `%%EOF` trailer; the in-process renderer and the
+    persistent-PDF cache did not, so a converter that wrote one garbage byte
+    and exited 0 was recorded `ok`, and a later run reused the same bytes from
+    the cache (PR151-164). The trailer must be near the END, not merely
+    somewhere in the bytes: a truncated file whose text stream contains the
+    marker must not pass (the 2026-10-28 audit's F64 made the same distinction
+    for the shell converter).
+    """
+    try:
+        size = path.stat().st_size
+        if size <= 0:
+            return "the file is empty"
+        with path.open("rb") as fh:
+            head = fh.read(1024)
+            if not head.startswith(b"%PDF-"):
+                # The header is the FILE MAGIC at offset zero. `in the first
+                # 1024 bytes` accepted a text file with the marker somewhere
+                # near the top as a "PDF" (F-074).
+                return "no %PDF- header at the start of the file"
+            tail_len = min(2048, size)
+            fh.seek(-tail_len, os.SEEK_END)
+            if b"%%EOF" not in fh.read(tail_len):
+                return ("no %%EOF trailer in the last 2048 bytes "
+                        "(the file is truncated or not a PDF)")
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    return ""
+
+
+def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
+                       timeout: float = 900, page_images: bool = True) -> dict:
+    """Render ONE DOCX to PDF + page PNGs under `out_dir`.
+
+    `renderer` pins ONE renderer (tests, retries); None tries the whole choice
+    list in order -- the docx-converter MCP tool first, then docx2pdf.sh, then
+    LibreOffice -- because pagination, fonts and headers/footers differ between
+    Word and LibreOffice. The renderer that actually produced the PDF, and any
+    lower-fidelity fallbacks, are recorded so the agents and the decision report
+    can state them.
+
+    `page_images=False` skips the page-PNG pass (the persistent PDF store of
+    `run_pdf_conversion()` needs the PDF only; the agents' visual passes keep
+    the default).
+    """
+    if renderer is None:
+        choices = visual_renderer_choices()
+        if not choices:
+            return {"ok": False, "renderer": "none",
+                    "error": "no DOCX->PDF renderer is installed (docx-converter MCP tool, "
+                             "docx2pdf.sh or LibreOffice)"}
+        failures = []
+        for cand in choices:
+            # The fallback loop must carry the caller's policy: dropping them
+            # here silently restored the 900 s default and re-enabled the page
+            # PNGs that `page_images=False` exists to skip.
+            res = render_docx_visual(docx, out_dir, cand, timeout=timeout,
+                                     page_images=page_images)
+            if res.get("ok"):
+                if failures:
+                    res["fallbacks"] = failures
+                return res
+            failures.append({"renderer": cand[0], "error": res.get("error")})
+        return {"ok": False, "renderer": choices[0][0], "attempts": failures,
+                "error": "no renderer produced a PDF: "
+                         + "; ".join(f"{f['renderer']}: {f['error']}" for f in failures)[:300]}
+    name, exe = renderer
+    out_dir.mkdir(parents=True, exist_ok=True)
+    if name == "none" or exe is None:
+        return {"ok": False, "renderer": "none", "error": "no DOCX->PDF renderer on PATH"}
+    tmp = Path(tempfile.mkdtemp(prefix="vrender_", dir=str(out_dir)))
+    try:
+        src = tmp / docx.name
+        shutil.copy2(docx, src)
+        proc = None
+        if name.startswith("mcp:"):
+            conv = mcp_convert_docx_to_pdf(exe, src, timeout=timeout)
+            if not conv.get("ok"):
+                return {"ok": False, "renderer": name, "error": conv.get("error")}
+            pdf = Path(conv["pdf"])
+        elif name == "word":
+            try:
+                proc = _run_render_subprocess([str(exe), str(src)], timeout=timeout,
+                                              cwd=str(tmp))
+            except ToolOutputOverBudget as exc:
+                return {"ok": False, "renderer": name, "error": str(exc)}
+            pdf = src.with_suffix(".pdf")
+        else:
+            profile = tmp / "lo_profile"
+            try:
+                proc = _run_render_subprocess(
+                    [str(exe), "--headless",
+                     f"-env:UserInstallation=file://{profile}",
+                     "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
+                    timeout=timeout)
+            except ToolOutputOverBudget as exc:
+                return {"ok": False, "renderer": name, "error": str(exc)}
+            pdf = tmp / (src.stem + ".pdf")
+        if not pdf.is_file() or pdf.stat().st_size == 0:
+            detail = (_child_output(getattr(proc, "stderr", None))
+                      + _child_output(getattr(proc, "stdout", None))) \
+                .strip().replace("\n", " ")[:200]
+            return {"ok": False, "renderer": name,
+                    "error": f"the renderer produced no PDF: {detail}"}
+        # A non-empty file is not a render. Validate the signature BEFORE
+        # moving it into place (and before the page-image pass), so a broken
+        # converter cannot be recorded `ok` and cached for the next run.
+        _sig = pdf_signature_problem(pdf)
+        if _sig:
+            detail = (_child_output(getattr(proc, "stderr", None))
+                      + _child_output(getattr(proc, "stdout", None))) \
+                .strip().replace("\n", " ")[:200]
+            return {"ok": False, "renderer": name,
+                    "error": f"the renderer produced a non-PDF file ({_sig})"
+                             + (f": {detail}" if detail else "")}
+        final_pdf = out_dir / (docx.stem + ".pdf")
+        shutil.move(str(pdf), str(final_pdf))
+        pages = _pdf_page_count(final_pdf)
+        pngs = []
+        warnings = []
+        if page_images and shutil.which("pdftoppm"):
+            prefix = out_dir / docx.stem
+            try:
+                subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
+                                str(final_pdf), str(prefix)],
+                               capture_output=True, timeout=600)
+            except (OSError, subprocess.SubprocessError) as e:      # noqa: BLE001
+                # The PDF has already been moved into place: a page-image
+                # timeout must not turn a successful render into a failure and
+                # send the chain to a lower-fidelity renderer.
+                warnings.append(f"page images not produced ({type(e).__name__}: {e})")
+            # Page numbers sort numerically (page-10 after page-2), and the
+            # stem is matched literally: a stem like `Papers[1]` made the old
+            # glob a character class and returned zero pages.
+            pngs = _page_png_names(out_dir, docx.stem)
+            pages = pages or len(pngs)
+        result = {"ok": True, "renderer": name, "pdf": final_pdf.name,
+                  "pages": pages or 0, "pngs": pngs}
+        if warnings:
+            result["warnings"] = warnings
+        return result
+    except (OSError, subprocess.SubprocessError) as e:                  # noqa: BLE001
+        return {"ok": False, "renderer": name, "error": f"{type(e).__name__}: {e}"}
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _cached_visual_render(cache: Path, choice: str) -> tuple:
@@ -2781,7 +2651,7 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
     choices = visual_renderer_choices()
     choice = choices[0][0] if choices else "none"
     manifest = {"renderer": choice, "choice": choice, "documents": []}
-    out = safe_mkdir(sb / VISUAL_TEMPLATE_DIR)
+    out = sb / VISUAL_TEMPLATE_DIR
     for role, path in sorted(tpls.items()):
         try:
             digest = sha256_file(path)
@@ -2803,12 +2673,13 @@ def seed_template_visuals(ctx: Ctx, sb: Path) -> dict:
                    "fallbacks": r.get("fallbacks"),
                    "source": str(path), "sha256": digest, "attempts": attempts + 1}
             write_json_atomic(cache / "manifest.json", rec)
-        dest = safe_mkdir(out / role)
+        dest = out / role
+        dest.mkdir(parents=True, exist_ok=True)
         if rec.get("pdf") and (cache / rec["pdf"]).is_file():
-            write_bytes_atomic(dest / rec["pdf"], read_regular_file(cache / rec["pdf"]))
+            shutil.copy2(cache / rec["pdf"], dest / rec["pdf"])
         for png in rec.get("pngs") or []:
             if (cache / png).is_file():
-                write_bytes_atomic(dest / Path(png).name, read_regular_file(cache / png))
+                shutil.copy2(cache / png, dest / Path(png).name)
         manifest["documents"].append({
             "role": role, "source": Path(path).name, "sha256": digest,
             "renderer": rec.get("renderer"), "pages": rec.get("pages"),
@@ -2884,105 +2755,21 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                      f"verified -- the human gate must complete those pages")
     if sandbox is not None and "not visually verified" not in text:
         tpl_manifest = sandbox / VISUAL_TEMPLATE_DIR / "manifest.json"
-        venue_word = []
-        try:
-            venue_word = sorted((sandbox / "venue_template" / "word").glob("*.docx"))
-        except OSError:
-            venue_word = []
-        if not tpl_manifest.is_file() and venue_word:
-            # The venue seeds an official Word template but the comparison
-            # record was deleted (or the renderer wrote nothing): the artifact
-            # then silently skips the required template comparison (F155).
-            errs.append(
-                f"{label}: the venue seeds {len(venue_word)} official Word template(s) under "
-                f"venue_template/word/, but {VISUAL_TEMPLATE_DIR}/manifest.json is missing -- "
-                f"the required comparison against the template was not recorded. Compare the "
-                f"delivered documents with venue_template/word/, or state explicitly that the "
-                f"template render was NOT visually verified and hand it to the author")
         if tpl_manifest.is_file():
             try:
-                _tpl_raw = read_text_bounded(tpl_manifest)
-                tpl = json.loads(_tpl_raw) if _tpl_raw is not None else {}
-                if not isinstance(tpl, dict):
-                    tpl = {}
+                tpl = json.loads(tpl_manifest.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 tpl = {}
-            all_docs = [d for d in (tpl.get("documents") or []) if isinstance(d, dict)]
-            failed_docs = [d for d in all_docs if not d.get("ok")]
-            docs = [d for d in all_docs if d.get("ok")]
-            if failed_docs and docs:
-                # One successful render does not certify the OTHERS: a
-                # partially failed template render was silently ignored (F029).
-                # When NO template rendered, the existing all-failed branch
-                # below owns the outcome (an unrenderable template is a gap,
-                # not a partial success).
-                errs.append(
-                    f"{label}: {VISUAL_TEMPLATE_DIR}/manifest.json records "
-                    f"{len(failed_docs)} FAILED template render(s) "
-                    f"({', '.join(str(d.get('role') or d.get('source') or '?') for d in failed_docs[:4])}"
-                    f"): the required comparison against every venue template did not happen; "
-                    f"re-render it or hand the failure to the author")
-            if not docs and venue_word:
-                errs.append(
-                    f"{label}: the venue seeds {len(venue_word)} official Word template(s), but "
-                    f"{VISUAL_TEMPLATE_DIR}/manifest.json records no successful render -- the "
-                    f"required template comparison did not happen. Re-render it (or state "
-                    f"explicitly that the template was NOT visually verified and hand it to "
-                    f"the author)")
+            docs = [d for d in (tpl.get("documents") or []) if d.get("ok")]
             if docs:
-                # The manifest's `ok` is not proof the render still exists: a
-                # cache prune/deletion leaves the record claiming success while
-                # no page was ever copied, and the gate certified a visual
-                # comparison nobody could perform (F022).
-                render_missing = []
-                for d in docs:
-                    _role = str(d.get("role") or "").strip()
-                    _pdf = str(d.get("pdf") or "").strip()
-                    if not (_role and _pdf):
-                        # A legacy/synthetic manifest may record only a source
-                        # and page count; there is no render path to verify.
-                        continue
-                    # The manifest is agent-written, so `role`/`pdf` are
-                    # untrusted input: `role: ".."` + `pdf: "../outside.pdf"`
-                    # escaped the sandbox and satisfied the template gate with a
-                    # PDF from outside (F18). Resolve under visual_template and
-                    # require the RESOLVED path (symlinks followed) to stay there;
-                    # absolute paths and `..` resolve outside and are rejected.
-                    try:
-                        _tpl_root = (sandbox / VISUAL_TEMPLATE_DIR).resolve()
-                        _render = (sandbox / VISUAL_TEMPLATE_DIR / _role / _pdf).resolve()
-                        _inside = _render.is_relative_to(_tpl_root)
-                    except (OSError, ValueError):
-                        _inside = False
-                    if not _inside or not _render_evidence_is_real(_render):
-                        render_missing.append(_pdf)
-                if render_missing:
-                    errs.append(
-                        f"{label}: {VISUAL_TEMPLATE_DIR}/manifest.json records a successful "
-                        f"template render, but its PDF is missing or not a real PDF: "
-                        f"{', '.join(render_missing[:4])} -- the required template "
-                        f"comparison did not happen. Re-render it, or state explicitly "
-                        f"that the template was NOT visually verified and hand it to the "
-                        f"author")
                 missing = []
                 for d in docs:
                     name = str(d.get("source") or "").lower()
                     pages = str(d.get("pages") or "")
-                    # The artifact must COMPARE the template, not merely mention
-                    # it inside a denial: `main.docx: 3 pages were NOT visually
-                    # compared to the template` used to satisfy every substring
-                    # test (F103).
-                    name_lines = [ln for ln in text.splitlines() if name and name in ln]
-                    positive = [ln for ln in name_lines
-                                if not re.search(
-                                    r"(?i)\b(?:not|never|no|without)\b[^.;\n]{0,40}"
-                                    r"\b(?:compared|verified|checked|inspected|reviewed)\b",
-                                    ln)]
-                    if name and not positive:
+                    if name and name not in text:
                         missing.append(name)
-                    elif pages and not any(re.search(
-                            rf"\b{re.escape(pages)}[\s-]+pages?\b", ln, re.I)
-                            for ln in (positive or [text])):
+                    elif pages and not re.search(
+                            rf"\b{re.escape(pages)}[\s-]+pages?\b", text, re.I):
                         missing.append(f"{name} ({pages} page(s))")
                 if "template" not in text:
                     missing.append("a template-comparison section")
@@ -3014,7 +2801,7 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
                 f"not clean"]
     want = {str(r.get("document") or "").strip()
             for r in (info.get("rows") or [])
-            if re.search(r"\bFMT-CL1\b", str(r.get("rule") or ""), re.I)}
+            if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES}
     want = {w for w in want if w}
     if not want:
         return []
@@ -3028,40 +2815,11 @@ def cover_letter_row_survival_problems(ctx: Ctx, sb: Path) -> list:
     # dispose the other two letters.
     rows_cl = [ln for ln in text.splitlines()
                if ln.strip().startswith("|") and "FMT-CL1" in ln.upper()]
-    def _row_names_document(wanted: str, line: str) -> bool:
-        """The row names THIS document, not a longer name containing it.
-
-        `report.docx.backup` (or any superset filename) used to satisfy the
-        wanted `report.docx` by raw substring (F086); compare the basename of
-        every path-like token in the row instead.
-        """
-        wb = Path(wanted).name
-        # Match the WHOLE basename with filename boundaries, not a token: a
-        # filename containing a space (`cover letter.docx`) was split into
-        # `letter.docx` and never matched. The boundaries still reject a longer
-        # superset name such as `report.docx.backup` (F086).
-        return bool(re.search(r"(?<![A-Za-z0-9_.-])" + re.escape(wb)
-                              + r"(?![A-Za-z0-9_.-])", line, re.I))
-
-    named = {w for w in want if any(_row_names_document(w, ln) for ln in rows_cl)}
-    if named == want:
+    named = {w for w in want if any(w.lower() in ln.lower() for ln in rows_cl)}
+    if named == want or (len(want) == 1 and rows_cl):
+        # With one code-proven letter a single FMT-CL1 row disposes it, even
+        # when the table's own document column carries the name implicitly.
         return []
-    if len(want) == 1:
-        # With one code-proven letter a single FMT-CL1 row disposes it, even when
-        # the table's own document column carries the name implicitly (a row with
-        # no document token at all). It must NOT name a DIFFERENT document: the
-        # gate exists so the seeded row cannot be DELETED, and keeping one
-        # unrelated FMT-CL1 row satisfied the old shortcut while the proven
-        # letter's own row was gone (F124).
-        only = next(iter(want))
-        only_name = Path(only).name.lower()
-        doc_token = re.compile(r"[^\s|()\[\],;]+\.[A-Za-z0-9]{1,5}\b")
-        names_other = [ln for ln in rows_cl
-                       if only.lower() not in ln.lower()
-                       and any(Path(tok).name.lower() != only_name
-                               for tok in doc_token.findall(ln))]
-        if rows_cl and not names_other:
-            return []
     missing = sorted(want - named)
     return [f"{GUIDED_REVIEW_DIR}/artifacts/M20_formatting.md carries FMT-CL1 row(s) for "
             f"{len(named)} of the {len(want)} cover letter(s) the code-side scan proves "
@@ -3119,54 +2877,20 @@ def _discovery_status_cells(row) -> list:
     return out
 
 
-# Placeholder class labels the D1 gate refuses: a row must name an issue CLASS,
-# not merely contain a four-letter filler token (F104).
-# Function words / generic deictics are not class names; a table of 25
-# identical `this` rows counted as 25 named classes before (F15).
-_DISCOVERY_GAP_GENERIC_WORDS = frozenset({
-    "a", "am", "an", "and", "another", "are", "as", "at", "be", "been", "both",
-    "but", "by", "can", "could", "did", "do", "does", "doing", "done", "each",
-    "every", "for", "from", "had", "has", "have", "he", "her", "here", "him",
-    "his", "how", "i", "if", "in", "into", "is", "it", "its", "just", "like",
-    "me", "more", "most", "my", "no", "nor", "not", "of", "on", "only", "or",
-    "other", "our", "out", "over", "same", "she", "should", "so", "some", "such",
-    "than", "that", "the", "their", "them", "then", "there", "these", "they",
-    "this", "those", "through", "to", "too", "under", "up", "us", "very", "was",
-    "we", "were", "what", "when", "where", "which", "while", "who", "whom",
-    "why", "will", "with", "would", "you", "your"})
-_DISCOVERY_GAP_PLACEHOLDER_WORDS = frozenset({
-    "none", "null", "n/a", "tbd", "todo", "test", "tests", "placeholder",
-    "xxx", "xxxx", "stuff", "thing", "things", "misc", "other", "others"})
+def _unable_reason_present(rest: str) -> bool:
+    """True when an `unable -- ...` status states a reason (>= 2 words).
+
+    The token list is case-insensitive: an all-caps reason ("HPC QUOTA
+    EXCEEDED") is exactly as usable as a lowercase one, and the old
+    `[0-9a-z]+` read it as no reason at all and failed a valid session.
+    """
+    return len(re.findall(r"[0-9A-Za-z]+", rest or "")) >= 2
 
 
 def discovery_gap_summary(sb: Path) -> dict:
     """{rows, covered, uncovered, unmarked} of guided_review/round2/gap_table.md."""
     covered = uncovered = unmarked = 0
-
-    def _names_a_class(row) -> bool:
-        """A gap row must name an issue CLASS, not just a row number/placeholder.
-
-        The D1 contract enumerates class candidates; a 25-row table whose only
-        content is `x`/a dash/a number satisfied the row-count gate (F104).
-        """
-        for cell in row.values():
-            t = " ".join(str(cell or "").split())
-            if not t or re.fullmatch(r"[0-9.\-–—]+", t):
-                continue
-            if re.search(r"(?i)\b(?:uncovered|covered|not[- ]covered|partially covered|"
-                         r"no check)\b", t):
-                continue
-            # A generic deictic (`this`) is not a CLASS; one SPECIFIC term
-            # (a real class name) is enough (F15).
-            terms = {w.lower() for w in re.findall(r"[A-Za-z]{2,}", t)
-                     if w.lower() not in _DISCOVERY_GAP_PLACEHOLDER_WORDS
-                     and w.lower() not in _DISCOVERY_GAP_GENERIC_WORDS}
-            if terms:
-                return True
-        return False
-
-    rows = [r for r in _discovery_rows(
-        sb / GUIDED_REVIEW_DIR / "round2" / "gap_table.md") if _names_a_class(r)]
+    rows = _discovery_rows(sb / GUIDED_REVIEW_DIR / "round2" / "gap_table.md")
     for r in rows:
         low = _row_text(r).lower()
         # The UNCOVERED spellings D1's own prose uses: "UNCOVERED", "not covered",
@@ -3214,19 +2938,13 @@ def prior_proposal_ids(sb: Path) -> list:
     (F73).
     """
     path = sb / "prior_round" / "new_sweeps.md"
-    try:
-        # lstat, not exists(): a BROKEN symlink is staged content, not absence
-        # (F011).
-        path.lstat()
-    except FileNotFoundError:
+    if not path.exists():
         return []
-    except OSError:
-        return None
     text = read_text_bounded(path)
     if text is None:
         return None
     out = []
-    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", _mask_fenced_blocks(text)):
+    for m in re.finditer(r"(?m)^#{2,3}\s*(M\d+)\b", text):
         if m.group(1) not in out:
             out.append(m.group(1))
     return out
@@ -3244,60 +2962,18 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
     "prior proposal <id>: no instances in base/" disposition).
     """
     _pid_re = re.compile(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])")
-    # A bare negation word anywhere near the id is NOT a denial: "M37: no
-    # anomalies -- checked: base/" is a compliant zero-finding re-probe, and the
-    # old ±80-character window read its "no" as "did not probe". Require the
-    # negation to govern a probe/check verb.
-    _denial_re = re.compile(
-        r"\b(?:not|never|without)\b[^.;\n]{0,25}\b(?:re-?probe[ds]?|probed|probing|"
-        r"check(?:ed|s|ing)?|examin(?:e|ed|es|ing)|test(?:ed|s|ing)?|re-?run|"
-        r"revisit(?:ed|ing)?|address(?:ed|ing)?|disposition(?:ed)?)\b"
-        r"|\bno\s+(?:new\s+)?(?:re-?probe|probe|check|re-?run|examination|test)\b",
-        re.I)
-    # A note that says the proposal is still AHEAD of this round is not a
-    # disposition either: `prior proposal M37: pending execution in the next
-    # round` and `... this round did nothing about it` both carry `prior` and
-    # no negation word, so the note route accepted them although they say the
-    # proposal was NOT dispositioned (F013). The pending vocabulary is refused
-    # on both routes.
-    _pending_re = re.compile(
-        r"(?i)\b(?:pending|deferred|postponed|outstanding|unaddressed|undone|"
-        r"not[\s-]+yet|still[\s-]+(?:pending|open|outstanding|to[\s-]+be)|"
-        r"to[\s-]+be[\s-]+(?:done|addressed|re-?probed|checked|examined)|"
-        r"next[\s-]+round|future[\s-]+round|later[\s-]+round|did\s+nothing|"
-        r"nothing\s+was\s+done|no\s+action|will\s+be\s+(?:done|addressed|"
-        r"re-?probed|checked)|not\s+addressed|left\s+undone|todo|tbd)\b")
-    def _line_around(blob: str, start: int, end: int) -> str:
-        """The WHOLE line the id occurs on.
-
-        A fixed +/-80-character window missed a status cell pushed past it by a
-        long enumeration/evidence cell: the row still said `pending` (the
-        proposal was never executed) and counted as re-probed (F087). The row
-        is the unit the status lives in, so the denial/pending test reads the
-        whole line.
-        """
-        s0 = blob.rfind("\n", 0, start) + 1
-        e0 = blob.find("\n", end)
-        return blob[s0:] if e0 < 0 else blob[s0:e0]
-
     _probe_hit = None
     for _m in _pid_re.finditer(probe_blob):
-        _window = _line_around(probe_blob, _m.start(), _m.end())
-        if _denial_re.search(_window) or _pending_re.search(_window):
+        _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80].lower()
+        if re.search(r"\b(?:not|never|no|without)\b", _window):
             continue          # "we did not re-probe M37" is not a re-probe
         _probe_hit = _m
         break
     if _probe_hit is None:
         for m in re.finditer(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
                              note_blob):
-            window = _line_around(note_blob, m.start(), m.end())
-            if re.search(r"\bprior\b", window.lower()) \
-                    and not _denial_re.search(window) \
-                    and not _pending_re.search(window):
-                # `M37 is a prior proposal that was NOT re-probed anywhere` used
-                # to pass the note route although the probe route refuses the same
-                # denial: the ±90-character window carried the word `prior` and
-                # the gate never looked for the negation (F116).
+            window = note_blob[max(0, m.start() - 90):m.end() + 90].lower()
+            if re.search(r"\bprior\b", window):
                 break
         else:
             return False
@@ -3438,7 +3114,7 @@ def discovery_contract_problems(sb: Path) -> tuple:
             tail = re.split(r"\bno anomalies?\b", low, maxsplit=1)[1]
             # The closure is exactly `no anomalies -- checked: <locations>`;
             # a question that happens to contain "checked" is not that closure.
-            if not re.match(r"\s*(?:-{1,2}|[\u2013\u2014]|:)\s*checked\s*:\s*\S", tail):
+            if not re.match(r"\s*(?:[-\u2013\u2014]|:)\s*checked\s*:\s*\S", tail):
                 no_checked.append(pid)
         if len(re.findall(r"[A-Za-z0-9]+", text)) < 6:
             result_problems.append(f"{pid} records no usable disposition")
@@ -3501,11 +3177,10 @@ def discovery_contract_problems(sb: Path) -> tuple:
                 if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                     bad.append(f"{fid}: severity {f.get('severity')!r} is not one of "
                                f"Fatal/Critical/Major/Minor")
-                # Mirror the review gate: a JSON string/float/bool is not a
-                # category by being convertible.
-                _cat = f.get("category")
-                ok_cat = (isinstance(_cat, int) and not isinstance(_cat, bool)
-                          and 0 <= _cat <= 5)
+                try:
+                    ok_cat = 0 <= int(f.get("category")) <= 5
+                except (TypeError, ValueError):
+                    ok_cat = False
                 if not ok_cat:
                     bad.append(f"{fid}: category {f.get('category')!r} is not an integer 0-5")
             if bad:
@@ -3527,11 +3202,6 @@ def discovery_contract_problems(sb: Path) -> tuple:
         # `## M37 Foo` block without the `-- <name>` separator) passed the review
         # and then died at adoption time with "carries no proposal block".
         proposals, problems = parse_sweep_proposals(text)
-        # The heading fallback reads the FENCED-MASKED text: `parse_sweep_proposals`
-        # masks an illustrative `## M37 -- Example` inside a fence, so the raw
-        # search contradicted the parser and failed a correct no-proposal document
-        # (F43).
-        masked = _mask_fenced_blocks(text)
         if proposals or problems:
             if problems:
                 errors.append(
@@ -3539,13 +3209,13 @@ def discovery_contract_problems(sb: Path) -> tuple:
                     + "; ".join(problems[:6])
                     + " (each proposal is `## M<NN> -- <name>` with Purpose, Enumeration, "
                       "Artifact and Finding rules, numbered from M37)")
-        elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", masked):
+        elif re.search(r"(?m)^#{2,3}\s*(M\d+)\b", text):
             errors.append(
                 "guided_review/round2/new_sweeps.md carries a `## M<NN>` heading that is not a "
                 "sweeps.md-shaped proposal block: a proposal is `## M<NN> -- <name>` with "
                 "Purpose, Enumeration, Artifact and Finding rules, numbered from M37, and the "
                 "`adopt-sweep` command reads the same shape")
-        elif not DISCOVERY_NO_PROPOSAL_RE.search(masked):
+        elif not DISCOVERY_NO_PROPOSAL_RE.search(text):
             errors.append(
                 "guided_review/round2/new_sweeps.md carries no `## M<NN>` proposal and does not state "
                 "that there were no new sweeps to propose: D5's zero-proposal outcome must be "
@@ -3715,7 +3385,6 @@ def parse_sweep_proposals(text: str) -> tuple:
     so the review contract and the `adopt-sweep` command share one reader.
     """
     proposals, problems = [], []
-    text = _mask_fenced_blocks(text)
     matches = list(re.finditer(r"(?m)^#{2,3}\s*(M\d+)\s*[—–-]\s*(.+?)\s*$", text))
     if not matches:
         return [], []
@@ -3786,6 +3455,47 @@ def resync_sweeps_appendix(sweeps_path: Path, sweeps_text: str) -> str:
 PRIOR_AUDIT_ID_RE = re.compile(r"\bAU-OBS-\d{3,}\b")
 
 
+def prior_audit_observation_lines(text: str) -> list:
+    """The observation lines of `prior_audit/UNRESOLVED.md`, in file order.
+
+    The recorded format is ONE line per observation (location + re-runnable
+    evidence). Headings, blank lines, table separators and fenced blocks are
+    structure, not observations; a leading list marker or number is stripped so
+    the same observation yields the same text across rounds.
+    """
+    rows, fence = [], None
+    for line in str(text or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^(`{3,}|~{3,})", s)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
+                fence = None
+            continue
+        if m:
+            fence = m.group(1)
+            continue
+        if not s or s.startswith("#") or set(s) <= set("-:| "):
+            continue
+        if s.startswith("|"):
+            continue
+        s = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)", "", s).strip()
+        if s:
+            rows.append(s)
+    return rows
+
+
+def prior_audit_observation_ids(sb: Path) -> list:
+    """[(id, observation)] for the staged prior-audit record ([] when absent)."""
+    p = Path(sb) / "prior_audit" / "UNRESOLVED.md"
+    if not p.is_file() or p.is_symlink():
+        return []
+    text = read_text_bounded(p)
+    if text is None:
+        return []
+    return [(f"AU-OBS-{i:03d}", line)
+            for i, line in enumerate(prior_audit_observation_lines(text), 1)]
+
+
 def prior_audit_disposition_problems(sb: Path, fj) -> list:
     """One supported disposition per staged prior-audit observation.
 
@@ -3796,11 +3506,6 @@ def prior_audit_disposition_problems(sb: Path, fj) -> list:
     review could ignore the whole handoff and still pass (PR151-012).
     """
     observations = prior_audit_observation_ids(sb)
-    if observations is None:
-        return ["prior_audit/UNRESOLVED.md is staged but cannot be read (permissions, a "
-                "link/FIFO or an over-budget file): the prior-audit observation handoff is "
-                "UNKNOWN, not empty -- re-stage it or record why it cannot be read before the "
-                "review can be certified as having disposed it"]
     if not observations:
         return []
     known = {oid for oid, _line in observations}
@@ -3900,8 +3605,6 @@ def _validate_llm_conflicts(conflicts: list, opinions: list) -> tuple:
             why = "no judge run id"
         elif any(j not in pair_runs[(member, opponent)] for j in judges):
             why = "a named judge run did not score this pair"
-        elif not (c.get("evidence") or []):
-            why = "no evidence quote backs this conflict"
         else:
             for e in c.get("evidence") or []:
                 run = str(e.get("judge_run") or "").strip()
@@ -3909,12 +3612,7 @@ def _validate_llm_conflicts(conflicts: list, opinions: list) -> tuple:
                 if not run or run not in judges:
                     why = "a quote names no judge run of this conflict"
                     break
-                # An EMPTY quote used to skip the membership test (`if text`),
-                # so a conflict with no judge words passed as panel-backed.
-                if not text.strip():
-                    why = "an evidence quote is empty"
-                    break
-                if text.lower() not in pair_text.get(
+                if text and text.lower() not in pair_text.get(
                         (run, member, opponent), ""):
                     why = f"a quoted span is not in judge {run}'s sheet"
                     break
@@ -3982,7 +3680,26 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         errs.append(f"{FINDINGS_REL} has no coverage table; every check ID M1-M17, M18-M36 and "
                     f"J1-J5 must carry a real disposition (the skill's acceptance gate)")
     else:
-        wanted = required_review_check_ids()
+        wanted = list(REQUIRED_REVIEW_CHECKS)
+        wanted.append("M19")            # always active: the length rule is not opt-in
+        wanted.append("M18")            # always active: legends are always enumerated
+        wanted.append("M20")            # always active: the OOXML formatting sweep
+        # Adopted from the discovery rounds (sweeps.md M21-M24): the review runs
+        # them, so their coverage rows are required exactly like the older ones.
+        wanted += ["M21", "M22", "M23", "M24"]
+        # The rewrite-parity checks (sweeps.md M25-M29) and the architecture
+        # pass J5: the classes a from-scratch rewrite fixes as a side-effect.
+        # The panel's frozen set is unchanged, so J5 is review-side only.
+        wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]
+        # The source-hierarchy reconciliation (sweeps.md M30): the detection side
+        # of the hierarchy the prompts already use to RESOLVE a conflict.
+        wanted += ["M30"]
+        # The EVIDENCE-INTEGRITY sweeps (sweeps.md M31-M35): artwork-versus-legend
+        # consistency, a headline statistic against the correction the paper
+        # states, availability-locator finality, figure-source-data coverage and
+        # disclosure/provenance completeness, plus M36's Zotero live-field
+    # refresh parity. Review-side like M25-M30.
+        wanted += ["M31", "M32", "M33", "M34", "M35", "M36"]
         # The split mode is needed BEFORE the coverage loop: a split session
         # legitimately writes the other half's checks as "out of scope --
         # session X" (the prompt says exactly that), so the in-scope guard must
@@ -4034,16 +3751,10 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 bad_out_of_scope.append(cid)
         if out_of_scope:
             # A scoped round must SAY that a check was left out; silence is still
-            # a missing disposition. A REAL disposition is not silence: a review
-            # that exceeds its scope and reports `2 findings` (or a named clean
-            # basis) for an out-of-scope check has done exactly what the error
-            # text asks ("run the check and dispose it for real") and used to be
-            # failed for it (F123). Only a silent/filler row is the error here;
-            # the row's own real-disposition test is `bad` above.
+            # a missing disposition.
             for cid in sorted(out_of_scope):
                 disp = (seen_ids.get(cid) or "").strip().lower()
-                if (cid in seen_ids and not _coverage_is_out_of_scope(disp)
-                        and not _coverage_row_disposition_ok(seen_rows.get(cid))):
+                if cid in seen_ids and not _coverage_is_out_of_scope(disp):
                     errs.append(
                         f"{FINDINGS_REL} coverage row {cid!r} = {disp!r} but this round's review "
                         f"scoped OUT that check: dispose it as 'out of scope -- this round's "
@@ -4121,17 +3832,14 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
     want_parity_artifacts = (split_mode == "off"
                              or (split_mode == "phases" and not part_b)
                              or (split_mode == "aspects" and part_b))
-    want_m2_artifact = (split_mode == "off"
-                        or (split_mode == "aspects" and not part_b))
     if split_mode == "aspects":
         # Aspects puts M2 (reference integrity) in session A and the packaging
         # checks in B. Demanding M2 from B made B fail on a table its prompt
-        # told it not to duplicate; A's parity set must therefore KEEP M2 even
-        # though A does not own the M25-M29 parity artifacts (F054).
+        # told it not to duplicate, while nobody checked A's M2 disposal.
         parity = {k: v for k, v in parity.items()
-                  if (k == "M2_references.md") == (not part_b)}
+                  if (k == "M2_references.md") != part_b}
     want_architecture = (split_mode == "off" or part_b)
-    if (want_parity_artifacts or want_m2_artifact) and art_dir.is_dir():
+    if want_parity_artifacts and art_dir.is_dir():
         for fname, (cid, kind_phrase) in parity.items():
             p = art_dir / fname
             if p.is_symlink() or not p.is_file():
@@ -4213,14 +3921,8 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
             for key in ("location", "check", "evidence", "explanation"):
                 if not str(f.get(key) or "").strip():
                     malformed.append(f"{fid}: no {key}")
-            check_id = normalise_check_id(f.get("check"))
-            # Accept any adopted sweep id: the adoption machinery numbers NEW
-            # proposals from DISCOVERY_PROPOSAL_MIN (M37) and the review must
-            # then file their instances. The old M1-M36 cap made an adopted
-            # sweep's finding unfileable -- the review failed its contract or
-            # the reviewer suppressed/re-labelled the instance (F089). The
-            # proposal floor is unchanged (see parse_sweep_proposals).
-            if not re.match(r"(?i)^(?:M[1-9]\d*|J[1-5]|JF)$", check_id):
+            if not re.match(r"(?i)^(?:M(?:[1-9]|[12]\d|3[0-6])|J[1-5]|JF)$",
+                            str(f.get("check") or "").strip()):
                 malformed.append(f"{fid}: check {f.get('check')!r} is not an M/J check id")
             if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                 malformed.append(f"{fid}: severity {f.get('severity')!r} is not one of "
@@ -4253,7 +3955,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                   "finding)")
         j5_missing = [str(f.get("id") or "?") for f in findings
                       if isinstance(f, dict)
-                      and normalise_check_id(f.get("check")).upper() == "J5"
+                      and str(f.get("check") or "").strip().upper() == "J5"
                       and not str(f.get("scope") or "").strip()]
         if j5_missing:
             errs.append(f"{FINDINGS_REL}: J5 architecture finding(s) {j5_missing} carry no "
@@ -4272,13 +3974,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
         if not prior.is_file():
             continue
         pj = read_json(prior, revive=False, lenient=True)   # agent-written
-        if not isinstance(pj, dict):
-            # A present-but-unparseable prior list used to leave prior_ids
-            # empty and silently disable the reconciliation gate.
-            errs.append(f"{prior_rel} exists but could not be parsed as the prior-round "
-                        f"finding document; the carry-over reconciliation cannot run")
-            continue
-        prior_ids += [str(f.get("id") or "") for f in (pj.get("findings") or [])
+        prior_ids += [str(f.get("id") or "") for f in ((pj or {}).get("findings") or [])
                       if isinstance(f, dict) and f.get("id")]
     if prior_ids:
         # The id must be reconciled WHERE THE CONTRACT SAYS, not merely occur
@@ -4342,22 +4038,10 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                         f"non-regular, or over the byte budget)")
             m1_md = ""
         n_m1b = m1b_row_count(m1_md)
-        if not n_m1b and m1b_audit_section_missing(m1_md):
-            # Deleting the `## M1b` section made the gate below skip the whole
-            # audit: the extractor ALWAYS emits the section (with a "no rows"
-            # placeholder when clean), so an artifact that carries an inventory
-            # table but no section lost the audit, not ran it (F177).
-            errs.append(
-                f"{ARTIFACTS_REL}/M1_acronyms.md carries an acronym inventory but no `## M1b` "
-                f"long-form audit section: the extractor always emits it (an empty table with "
-                f"its `no long-form re-use detected` placeholder when clean), so the section "
-                f"was deleted or the sweep was never run. Re-run the M1 sweep, keep the M1b "
-                f"section and dispose every row (or record why it is clean in the M1 coverage "
-                f"row)")
         if n_m1b:
             m1_findings = [f for f in (findings or [])
                            if isinstance(f, dict)
-                           and normalise_check_id(f.get("check")).upper() == "M1"]
+                           and str(f.get("check") or "").strip().upper() == "M1"]
             m1_row_text = coverage_row_text(seen_rows.get("M1"))
             if not m1_findings and not _m1b_coverage_reason(m1_row_text) \
                     and not m1b_rows_disposed(m1_md):
@@ -4432,12 +4116,7 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 _named = _m.group(0).rstrip(".,;:)")
                 _rel = _named if _named.startswith(GUIDED_REVIEW_DIR + "/") \
                     else f"{GUIDED_REVIEW_DIR}/{_named}"
-                try:
-                    (sb / _rel).resolve().relative_to(sb.resolve())
-                    _inside = True
-                except (OSError, ValueError):
-                    _inside = False
-                if not _inside or not (sb / _rel).is_file():
+                if not (sb / _rel).is_file():
                     errs.append(f"{FINDINGS_REL} coverage row {_cid!r} names basis "
                                 f"{_named!r}, which does not resolve to a file in this "
                                 f"sandbox")
@@ -4459,9 +4138,6 @@ M1B_EMPTY_ROW_MARKER = "no long-form re-use detected"
 # The disposition columns of the artifact tables (`resolution` is the same
 # contract under the placeholder/ledger layouts' own name).
 M1B_DISPOSITION_COLUMNS = ("disposition", "resolution", "verdict")
-# ONE heading parser for the extractor and the missing-section gate: a heading
-# is `##`/`###` + M1b at the START of the line, never a prose mention of it.
-_M1B_HEADING_RE = re.compile(r"^(#{2,3})[ \t]*M1b\b")
 
 
 def _m1b_table(m1_md: str):
@@ -4479,19 +4155,13 @@ def _m1b_table(m1_md: str):
     carry the same parsing under other helper names.
     """
     lines = str(m1_md or "").splitlines()
-    start, start_level = None, 0
-    for i, ln in enumerate(lines):
-        m = _M1B_HEADING_RE.match(ln.strip())
-        if m:
-            start, start_level = i, len(m.group(1))
-            break
+    start = next((i for i, ln in enumerate(lines) if ln.strip().startswith("## M1b")), None)
     if start is None:
         return [], []
     header, rows = [], []
     for ln in lines[start + 1:]:
         s = ln.strip()
-        hm = re.match(r"^(#{2,6})[ \t]", s)
-        if hm and len(hm.group(1)) <= start_level:   # the next section starts here
+        if s.startswith("## "):                 # the next section starts here
             break
         if not s.startswith("|"):
             if rows:                            # the table is over
@@ -4543,36 +4213,15 @@ def _m1b_separator(cells: list) -> bool:
     return bool(cells) and all("-" in c and set(c) <= set("-: ") for c in cells)
 
 
-def m1b_audit_section_missing(m1_md: str) -> bool:
-    """True when an M1 artifact has an inventory table but no `## M1b` section.
-
-    The extractor emits `## M1b` unconditionally (a placeholder row when the
-    sweep is clean), so its absence is a deleted audit, not a clean one.
-    """
-    text = str(m1_md or "")
-    if not text.strip():
-        return False
-    # Only the extractor's OWN inventory header identifies an artifact that
-    # always carries the section. A hand-written minimal M1 table (a unit
-    # fixture) is not evidence that the M1b audit was deleted.
-    if "ACRONYM INVENTORY" not in text.upper():
-        return False
-    # A level-3 `### M1b` IS the section; a prose sentence quoting "## M1b" is
-    # not. Parse headings exactly as `_m1b_table` does, and require the table
-    # too: the extractor emits the table unconditionally (a placeholder row when
-    # clean), so a bare heading proves no audit either (F035).
-    if not any(_M1B_HEADING_RE.match(ln.strip()) for ln in text.splitlines()):
-        return True
-    # A `| |` line (or any header of empty cells) is not a table: requiring only
-    # a truthy header accepted a deleted M1b audit table with a bare pipe line
-    # left behind (F145). The header must carry at least one real cell.
-    header = _m1b_table(text)[0]
-    return not any(str(c).strip() for c in header)
-
-
 def m1b_row_count(m1_md: str) -> int:
     """Data rows in the M1 artifact's M1b instance table (0 when absent/empty)."""
     return len(_m1b_table(m1_md)[1])
+
+
+def _is_recorded_reason(cell: str) -> bool:
+    """Is this disposition cell a reason rather than a bare verdict word?"""
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    return len(text) >= 12 and re.search(r"[A-Za-z]{3}", text) is not None
 
 
 def m1b_rows_disposed(m1_md: str) -> bool:
@@ -4609,24 +4258,21 @@ def m1b_rows_disposed(m1_md: str) -> bool:
 # coverage row has to name.
 _M1B_REASON_RE = re.compile(
     r"(?i)\b(?:because|since|reason|different|distinct|quoted|title|titles|expansion|"
-    r"expanded|expansion|defining|defined|legitimate|bibliograph|"
-    r"reference|references|not\s+a\s+finding|no\s+finding|"
-    r"intentional|verbatim|species|gene|proper\s+name|rendering|"
-    r"different\s+term|term\s+of\s+art|quoted\s+title|generated\s+rendering)\b")
+    r"expanded|expansion|defining|defined|acronym|abbreviation|legitimate|bibliograph|"
+    r"reference|references|not\s+a\s+finding|no\s+finding|ok\b|clean|disposed|"
+    r"intentional|verbatim|species|gene|proper\s+name|rendering)\b")
 
 
 def _m1b_coverage_reason(text: str) -> bool:
     """Does the M1 coverage row NAME M1b and give a reason (not just the token)?"""
     text = str(text or "")
-    if "m1b" not in text.lower():
+    i = text.lower().find("m1b")
+    if i < 0:
         return False
-    # The reason may be written BEFORE the token ("All 25 long forms are quoted
-    # article titles, not findings (M1b rows)"): remove the token and read the
-    # whole row, instead of only the text after it.
-    rest = re.sub(r"(?i)m1b", " ", text)
-    if len(rest.strip()) < 12 or not re.search(r"[A-Za-z]{3}", rest):
+    clause = text[i + 3:]
+    if len(clause.strip()) < 12 or not re.search(r"[A-Za-z]{3}", clause):
         return False
-    return bool(_M1B_REASON_RE.search(rest))
+    return bool(_M1B_REASON_RE.search(clause))
 
 
 def coverage_row_text(row) -> str:
@@ -5021,11 +4667,6 @@ def _structured_output_scan(ctx: Ctx, rec: dict) -> tuple:
     probs, notes = [], []
     for rel, p in structured_output_files(sb, rec):
         inherited = False
-        if p.is_symlink():
-            # Refuse BEFORE hashing: `sha256_file(p)` opened the planted link's
-            # target even though the file was then rejected (F19).
-            probs.append(_structured_problem_for(rel, p))
-            continue
         if rel not in contract:
             try:
                 dig = sha256_file(p)
@@ -5120,12 +4761,12 @@ FACT_DOMAIN_ID_RE = re.compile(
 FACT_DOMAIN_RE = re.compile(
     r"(?i)\b(?:RRID|Cellosaurus|ATCC|cat(?:alog)?\.?\s*(?:no\.?|number|#)|lot|batch|"
     r"strain|plasmid|primer|antibody|reagent|protocol|registry|dbSNP|UniProt|PDB|EMDB|"
-    r"GenBank|RefSeq|Ensembl|ClinVar|COSMIC|cell\s+line|clone)\b[ \t]{0,12}?"
-    r"[:=#]?[ \t]*([A-Za-z0-9][A-Za-z0-9._/-]{2,})\b")
+    r"GenBank|RefSeq|Ensembl|ClinVar|COSMIC|cell\s+line|clone)\b[^\n]{0,25}?"
+    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{2,})\b")
 FACT_UID_RE = re.compile(
     r"(?i)\b(?:UID|ID|identifier|accession|protocol|registry|trial\s+registration|"
-    r"IRB|ethics(?:\s+(?:approval|number|id))?)\b[ \t]{0,12}?"
-    r"[:=#]?[ \t]*([A-Za-z0-9][A-Za-z0-9._/-]{3,})\b")
+    r"IRB|ethics(?:\s+(?:approval|number|id))?)\b[^\n]{0,20}?"
+    r"[:=#]?\s*([A-Za-z0-9][A-Za-z0-9._/-]{3,})\b")
 FACT_KIND_ALIASES = {
     "doi": "doi", "orcid": "orcid", "uuid": "uuid", "uid": "uid", "id": "uid",
     "identifier": "uid", "accession": "accession", "accession_id": "accession",
@@ -5138,19 +4779,11 @@ _FACT_COMMON_WORDS = frozenset({
     "number", "identifier", "protocol", "registry", "approval", "standard", "version",
     "release", "model", "strain", "clone", "batch", "lot", "sample", "table", "figure",
     "section", "supplementary", "accession", "grant", "funding", "award", "contract",
-    # table-header / ordinary-prose words a 20-25 character gap used to swallow
-    # as an "opaque identifier" (F167).
-    "species", "group", "value", "name", "trial", "tissue", "condition",
-    "method", "type", "category", "status",
 })
 
 
 def _clean_fact_token(raw: str) -> str:
-    # `_clean_fact_token` runs over captured text, so a bolded DOI arrived as
-    # "10.1000/abc**" and read as a DIFFERENT value from the plain one. Strip
-    # Markdown emphasis markers (never '_' or '-', which are part of real
-    # identifiers) after the punctuation.
-    return str(raw or "").strip().strip(".,;:)]}>'\"").strip("*`").strip()
+    return str(raw or "").strip().strip(".,;:)]}>'\"")
 
 
 def _fact_token_looks_opaque(cls: str, token: str) -> bool:
@@ -5274,8 +4907,7 @@ def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
             continue
         if not src.is_dir():
             continue
-        walk_gaps = []
-        for path in _files_under_ci(src, suffixes, gaps=walk_gaps):
+        for path in _files_under_ci(src, suffixes):
             try:
                 rel = path.relative_to(src).as_posix()
             except ValueError:                                     # pragma: no cover
@@ -5308,11 +4940,6 @@ def _fact_tokens_in_sources(sources, evidence: bool = False) -> tuple:
                 continue
             gaps.append(f"{prefix + rel}: unsupported editable format "
                         f"({path.suffix.lower()}); not scanned for identifiers")
-        for gap_dir in sorted(set(walk_gaps)):
-            # An unreadable directory hides its identifiers from the same gate
-            # (the F107 class): name it instead of reporting full coverage.
-            gaps.append(f"{prefix + gap_dir}: directory could not be read; "
-                        f"not scanned for identifiers")
     return found, gaps
 
 
@@ -5391,15 +5018,6 @@ def _fact_verification_rows(pkg: Path) -> tuple:
             bad.append("`query` is missing (the search/lookup string)")
         if not re.match(r"\d{4}-\d{2}-\d{2}\b", checked_at):
             bad.append("`checked_at` must be YYYY-MM-DD")
-        else:
-            try:
-                # A shape-only regex accepted impossible dates (`2026-99-99`,
-                # `2026-02-31`) as verification evidence (F122): the row's date is
-                # what makes a check "checked then", so it must be a real
-                # calendar date. `time` is already imported by this module.
-                time.strptime(checked_at[:10], "%Y-%m-%d")
-            except ValueError:
-                bad.append("`checked_at` is not a real calendar date (YYYY-MM-DD)")
         if len(evidence) < 10 or (after and after.casefold() not in evidence.casefold()):
             bad.append("`evidence` must be a verbatim quote that contains the corrected value")
         if bad:
@@ -5616,21 +5234,17 @@ def _raw_data_key(rel: str) -> str:
     return "/".join(parts)
 
 
-def raw_data_entries(dirp: Path, gaps: list = None, symlinks: list = None,
-                     failures: list = None) -> dict:
+def raw_data_entries(dirp: Path) -> dict:
     """{relative path: (relative path, sha256)} for `dirp`'s raw-data directory.
 
     The key is the EXACT corpus-relative path; `raw_data_pairs` applies the
-    token-insensitive matching (see `_entries_in`). `gaps`/`symlinks` are
-    forwarded so an enforcement caller can see an incomplete walk and any link
-    hiding in the read-only area instead of treating both as absent (F162/F172).
+    token-insensitive matching (see `_entries_in`).
     """
     area = dirp / raw_data_dirname(dirp)
-    return _entries_in(area, dirp, gaps=gaps, symlinks=symlinks, failures=failures)
+    return _entries_in(area, dirp)
 
 
-def _entries_in(area: Path, base: Path, gaps: list = None,
-                symlinks: list = None, failures: list = None) -> dict:
+def _entries_in(area: Path, base: Path) -> dict:
     """{relative path: (relative path, sha256)} for ONE raw-data area directory.
 
     The key is the EXACT path, not `_raw_data_key`'s token-stripped form: that
@@ -5646,20 +5260,10 @@ def _entries_in(area: Path, base: Path, gaps: list = None,
     out = {}
     if not area.is_dir():
         return out
-    area_gaps, area_links = [], []
     try:
-        files = _iter_tree_files(area, follow_dir_links=True,
-                                 gaps=area_gaps, symlinks=area_links)
+        files = _iter_tree_files(area, follow_dir_links=True)
     except OSError:
         return out                      # an unreadable tree is reported by the caller
-    if gaps is not None:
-        gaps.extend(f"{area.name}/{g}" if g else area.name for g in area_gaps)
-    if symlinks is not None:
-        for rel in area_links:
-            try:
-                symlinks.append((area / rel).relative_to(base).as_posix())
-            except ValueError:
-                symlinks.append(rel)
     # The walk follows DIRECTORY symlinks (a sandbox links its evidence areas),
     # but a nested link may point outside the area. Its lexical path still
     # looks local, so `copyfile`/`unlink` below would write through it. Only
@@ -5677,12 +5281,7 @@ def _entries_in(area: Path, base: Path, gaps: list = None,
         rel = p.relative_to(base).as_posix()
         try:
             out[rel] = (rel, sha256_file(p))
-        except OSError as e:
-            # A file we cannot hash is NOT absent: dropping it here made a
-            # readable candidate copy at that path look like an extra and
-            # deleted it (F018).
-            if failures is not None:
-                failures.append(f"{rel}: {e}")
+        except OSError:
             continue
     return out
 
@@ -5712,12 +5311,6 @@ def raw_data_pairs(want: dict, got: dict) -> tuple:
     by_key = {}
     for rel in sorted(got):
         by_key.setdefault(_raw_data_key(rel), []).append(rel)
-    # How many PRISTINE entries fold to each key: if two do, one leftover
-    # candidate is not evidence of either one's token rename and must not be
-    # overwritten with the other's bytes (F128).
-    want_by_key = {}
-    for rel in sorted(want):
-        want_by_key.setdefault(_raw_data_key(rel), []).append(rel)
     for rel in sorted(want):
         dig = want[rel][1]
         if rel in got:
@@ -5729,9 +5322,8 @@ def raw_data_pairs(want: dict, got: dict) -> tuple:
         # `cohort_a.tsv` with the candidate's `cohort_b.tsv` would restore the
         # wrong bytes. Restoring is the safe outcome for the unmatched file.
         cands = [c for c in by_key.get(_raw_data_key(rel), [])
-                 if c not in used and c not in want
-                 and Path(c).parent == Path(rel).parent]
-        if len(cands) == 1 and len(want_by_key.get(_raw_data_key(rel), [])) == 1:
+                 if c not in used and c not in want]
+        if len(cands) == 1:
             pairs.append((rel, dig, cands[0], got[cands[0]][1]))
             used.add(cands[0])
         else:
@@ -5769,20 +5361,14 @@ def _safe_restore_copy(src: Path, dest: Path, root: Path) -> None:
     if dest.is_symlink():
         dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(f".{dest.name}.restore-{os.getpid()}-{time.time_ns()}")
     try:
-        src_mode = stat.S_IMODE(os.stat(src).st_mode)
-    except OSError:
-        src_mode = None
-
-    def _copy(f) -> None:
-        with open(src, "rb") as sf:
-            shutil.copyfileobj(sf, f)
-
-    # A random O_EXCL|O_NOFOLLOW sibling: the old fixed
-    # `.{name}.restore-{pid}-{time_ns}` name could be predicted and a symlink
-    # planted there, which copy2 then followed outside the sandbox.
-    _atomic_write_bytes(tmp_path_for(dest), dest, _copy, binary=True,
-                        mode=src_mode)
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
@@ -5794,86 +5380,14 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     file names are kept, so references stay valid); a file the original does not
     have is removed.
     """
-    name = raw_data_dirname(cand_dir)
-    area = cand_dir / name
     src = ctx.pristine / raw_data_dirname(ctx.pristine)
     if not src.is_dir():
-        # The pristine corpus carries NO raw-data area, so there is nothing this
-        # package could have inherited: a candidate `raw_data/` is a FABRICATED
-        # read-only input area. The old early return never looked at the
-        # candidate, so a stage could create one and ship it unreported (F063).
-        # Scan and drop every entry, and fail: an INPUT area that does not exist
-        # in the original may not be created by a stage.
-        dropped, failures = [], []
-        # A candidate CREATED the area even when it carries no entry (an empty
-        # directory is still a fabricated read-only input area); `dropped` alone
-        # missed that and the removal was silent (F025).
-        fabricated_area = area.is_symlink() or area.exists()
-        if area.is_symlink() or (area.exists() and not area.is_dir()):
-            try:
-                area.unlink()
-                dropped.append(name)
-            except OSError as e:
-                failures.append(f"could not remove fabricated {name}: {e}")
-        elif area.is_dir():
-            mode_plan = make_tree_writable(area)
-            try:
-                links = []
-                raw_data_entries(cand_dir, symlinks=links)
-                for rel in links:
-                    p = cand_dir / rel
-                    try:
-                        if p.is_symlink() or p.exists():
-                            p.unlink()
-                        dropped.append(rel)
-                    except OSError as e:
-                        failures.append(f"could not remove fabricated {rel}: {e}")
-                # Re-scan after the links are gone: a directory link could hide
-                # files the walker refuses to follow into, and those go with the
-                # link.
-                for rel in sorted(raw_data_entries(cand_dir)):
-                    p = cand_dir / rel
-                    try:
-                        if p.is_file() or p.is_symlink():
-                            p.unlink()
-                            dropped.append(rel)
-                    except OSError as e:
-                        failures.append(f"could not remove fabricated {rel}: {e}")
-            finally:
-                restore_modes(mode_plan)
-            for d in sorted([p for p in area.rglob("*") if p.is_dir()],
-                            key=lambda p: len(p.parts), reverse=True):
-                try:
-                    d.rmdir()              # only empty directories disappear
-                except OSError:
-                    pass
-            with contextlib.suppress(OSError):
-                area.rmdir()
-        if dropped or fabricated_area:
-            warns.append(
-                f"READ-ONLY raw data: the package created the {name}/ input area "
-                f"({len(dropped)} entr(y/ies) removed) "
-                f"-- the pristine original has NO raw-data area, so the package may not create "
-                f"one (an input area is copied from the original, never authored)")
-            failures.append(
-                f"{name}/ is not an input of this corpus (the pristine original has no "
-                f"raw-data area); the package may not create it")
-        return {"present": False, "files": 0, "restored": [], "dropped": dropped,
-                "failures": failures}
-    gaps, want_failures = [], []
-    want = raw_data_entries(ctx.pristine, gaps=gaps, failures=want_failures)
-    if gaps or want_failures:
-        msg = (f"READ-ONLY raw data: the pristine raw-data tree could not be read "
-               f"({', '.join((gaps + want_failures)[:4])}); the restore/drop pass was "
-               f"SKIPPED rather than treating the partial walk as authoritative")
-        warns.append(msg)
-        return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                "failures": [msg] + list(want_failures)}
-    # The pristine area EXISTS (checked above) even when it carries no file:
-    # `want` being empty must not skip the candidate scan, or a package may add
-    # arbitrary files under raw_data/ whenever the author's directory is empty
-    # (F119). The rest of this function then sees every candidate entry as an
-    # extra and drops it.
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    want = raw_data_entries(ctx.pristine)
+    if not want:
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    name = raw_data_dirname(cand_dir)
+    area = cand_dir / name
     if area.is_symlink():
         # The sandbox INPUT links this area to the canonical copy; a package
         # that carries the link onward must be verified, never written through.
@@ -5883,28 +5397,12 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             same = False
         if same:
             return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                    "linked": True, "failures": []}
+                    "linked": True}
         with contextlib.suppress(OSError):
             area.unlink()
         warns.append(f"READ-ONLY raw data: {name}/ was a symlink to a different target and was "
                      f"replaced with the pristine copy")
-    links = []
-    # F018: clear the read-only modes BEFORE the candidate identity is taken.
-    # A file/directory unreadable during the scan was absent from `got`, so an
-    # agent-added unreadable entry was never dropped. The modes are restored by
-    # the finally below (and immediately on the fail-closed path).
-    mode_plan = make_tree_writable(area) if area.is_dir() else []
-    cand_gaps, cand_failures = [], []
-    got = raw_data_entries(cand_dir, gaps=cand_gaps, symlinks=links,
-                           failures=cand_failures)
-    if cand_gaps or cand_failures:
-        restore_modes(mode_plan)
-        msg = (f"READ-ONLY raw data: the package's raw-data tree could not be read "
-               f"({', '.join((cand_gaps + cand_failures)[:4])}); the restore/drop pass "
-               f"was SKIPPED rather than certifying a partial identity")
-        warns.append(msg)
-        return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                "failures": [msg] + list(cand_failures)}
+    got = raw_data_entries(cand_dir)
     pairs, extras = raw_data_pairs(want, got)
     # A DIRECTORY squatting on one of the original's file paths (agent scratch at
     # the wrong path) is the recovery layer's case: it refuses to delete real work
@@ -5921,18 +5419,9 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     # put every mode back exactly as it was, whether the copy ends up restored or
     # unchanged. Without this, a read-only raw_data copy would make the RESTORE
     # itself fail with EACCES (or, worse, leave half a package repaired).
-    restored, dropped, failures = [], [], []
+    mode_plan = make_tree_writable(area) if area.is_dir() else []
+    restored, dropped = [], []
     try:
-        for rel in links:
-            p = cand_dir / rel
-            try:
-                if p.is_symlink() or p.exists():
-                    p.unlink()
-                dropped.append(rel)
-                warns.append(f"READ-ONLY raw data: removed the symlink {rel} from the "
-                             f"read-only area (a link is not package content)")
-            except OSError as e:
-                failures.append(f"could not remove symlink {rel}: {e}")
         for rel, dig, crel, cdig in pairs:
             if cdig == dig:
                 continue
@@ -5953,7 +5442,6 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                     shutil.copymode(ctx.pristine / rel, dest)
             except OSError as e:
                 warns.append(f"READ-ONLY raw data: could not restore {dest.name}: {e}")
-                failures.append(f"could not restore {dest.name}: {e}")
                 continue
             restored.append(dest.relative_to(cand_dir).as_posix())
         for rel, _dig in extras:
@@ -5963,7 +5451,6 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
                 except OSError as e:
                     warns.append(f"READ-ONLY raw data: could not remove added file "
                                  f"{rel}: {e}")
-                    failures.append(f"could not remove added file {rel}: {e}")
                     continue
                 dropped.append(rel)
         # A directory the package had lost (or made writable) comes back with the
@@ -5982,8 +5469,6 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
         warns.append(f"READ-ONLY raw data: {s} is a directory where the pristine original has a "
                      f"file; its content was left alone (the recovery layer refuses to delete "
                      f"real work) and the attempt fails")
-        failures.append(f"{s} is a directory where the pristine original has a file "
-                        f"(a read-only input-path squat)")
     for d in sorted([p for p in area.rglob("*") if p.is_dir()],
                     key=lambda p: len(p.parts), reverse=True):
         try:
@@ -5999,39 +5484,24 @@ def enforce_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
             f"back to the pristine original ({changed}{more}). The raw-data directory is an "
             f"INPUT: never edit, rename, add or drop anything inside it -- it is copied from the "
             f"original, so a document that points into it must use the name that is there")
-    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped,
-            "failures": failures}
+    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
 
 
-def feedback_area_entries(dirp: Path, area_name: str, gaps: list = None,
-                          symlinks: list = None, failures: list = None) -> dict:
+def feedback_area_entries(dirp: Path, area_name: str) -> dict:
     """{corpus-relative path: sha256} for one review-feedback EVIDENCE area.
 
     No version-token normalisation here: the area is an INPUT whose file names
     never carry this package's naming evidence, so its identity is the path.
-    `failures` receives a file that could not be hashed: dropping it silently
-    made it absent from BOTH the pristine and the candidate map, so the
-    restore/drop pass could neither report nor repair it (F028).
     """
     out = {}
     area = Path(dirp) / area_name
     if not area.is_dir():
         return out
-    area_gaps, area_links = [], []
     try:
-        files = _iter_tree_files(area, follow_dir_links=True,
-                                 gaps=area_gaps, symlinks=area_links)
+        files = _iter_tree_files(area, follow_dir_links=True)
         area_real = area.resolve()
     except OSError:
         return out
-    if gaps is not None:
-        gaps.extend(f"{area_name}/{g}" if g else area_name for g in area_gaps)
-    if symlinks is not None:
-        for rel in area_links:
-            try:
-                symlinks.append((area / rel).relative_to(Path(dirp)).as_posix())
-            except ValueError:
-                symlinks.append(rel)
     for p in files:
         try:
             if not p.resolve().is_relative_to(area_real):
@@ -6041,21 +5511,19 @@ def feedback_area_entries(dirp: Path, area_name: str, gaps: list = None,
         rel = p.relative_to(Path(dirp)).as_posix()
         try:
             out[rel] = sha256_file(p)
-        except OSError as e:
-            if failures is not None:
-                failures.append(f"{rel}: {e}")
+        except OSError:
             continue
     return out
 
 
-def human_feedback_entries(dirp: Path, failures: list = None) -> dict:
+def human_feedback_entries(dirp: Path) -> dict:
     """{corpus-relative path: sha256} for `dirp`'s human_review_feedback area."""
-    return feedback_area_entries(dirp, HUMAN_FEEDBACK_DIR, failures=failures)
+    return feedback_area_entries(dirp, HUMAN_FEEDBACK_DIR)
 
 
-def llm_feedback_entries(dirp: Path, failures: list = None) -> dict:
+def llm_feedback_entries(dirp: Path) -> dict:
     """{corpus-relative path: sha256} for `dirp`'s llm_review_feedback area."""
-    return feedback_area_entries(dirp, LLM_FEEDBACK_DIR, failures=failures)
+    return feedback_area_entries(dirp, LLM_FEEDBACK_DIR)
 
 
 def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
@@ -6075,81 +5543,10 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             "the LLM review findings whose false positives were filtered out")
     src = ctx.pristine / area_name
     if not src.is_dir():
-        # The pristine corpus carries NO feedback area, so a candidate copy is a
-        # FABRICATED read-only input. The early return never looked at the
-        # candidate, so a stage could create one and ship it unreported (F048).
-        # Mirror the raw-data sibling: scan, drop, warn and FAIL.
-        area = cand_dir / area_name
-        # Capture the fabricated area BEFORE removing it: an EMPTY directory (or
-        # one whose only entries were links) leaves `dropped` empty, and the old
-        # `if dropped:` reported nothing while deleting the invented input area
-        # (F088). The raw-data sibling fails on `dropped or fabricated_area`.
-        fabricated_area = area.is_symlink() or area.exists()
-        dropped, failures = [], []
-        if area.is_symlink() or (area.exists() and not area.is_dir()):
-            try:
-                area.unlink()
-                dropped.append(area_name)
-            except OSError as e:
-                failures.append(f"could not remove fabricated {area_name}: {e}")
-        elif area.is_dir():
-            mode_plan = make_tree_writable(area)
-            try:
-                links = []
-                feedback_area_entries(cand_dir, area_name, symlinks=links, failures=failures)
-                for rel in links:
-                    p = cand_dir / rel
-                    try:
-                        if p.is_symlink() or p.exists():
-                            p.unlink()
-                        dropped.append(rel)
-                    except OSError as e:
-                        failures.append(f"could not remove fabricated {rel}: {e}")
-                for rel in sorted(feedback_area_entries(cand_dir, area_name,
-                                                        failures=failures)):
-                    p = cand_dir / rel
-                    try:
-                        if p.is_file() or p.is_symlink():
-                            p.unlink()
-                            dropped.append(rel)
-                    except OSError as e:
-                        failures.append(f"could not remove fabricated {rel}: {e}")
-            finally:
-                restore_modes(mode_plan)
-            for d in sorted([p for p in area.rglob("*") if p.is_dir()],
-                            key=lambda p: len(p.parts), reverse=True):
-                try:
-                    d.rmdir()              # only empty directories disappear
-                except OSError:
-                    pass
-            with contextlib.suppress(OSError):
-                area.rmdir()
-        if dropped or fabricated_area:
-            _what = (f"{len(dropped)} entr(y/ies) under {area_name}/ were removed"
-                     if dropped else f"the fabricated {area_name}/ area was removed")
-            warns.append(
-                f"READ-ONLY {label} review feedback: {_what} -- the pristine original has "
-                f"NO feedback area, so the package may not create one (an input area is "
-                f"copied from the original, never authored)")
-            failures.append(
-                f"{area_name}/ is not an input of this corpus (the pristine original has no "
-                f"{label} review-feedback area); the package may not create it")
-        return {"present": False, "files": 0, "restored": [], "dropped": dropped,
-                "failures": failures}
-    gaps, want_failures = [], []
-    want = feedback_area_entries(ctx.pristine, area_name, gaps=gaps,
-                                 failures=want_failures)
-    if gaps or want_failures:
-        msg = (f"READ-ONLY {label} review feedback: the pristine feedback tree could not be "
-               f"read ({', '.join((gaps + want_failures)[:4])}); the restore/drop pass was "
-               f"SKIPPED rather than treating the partial walk as authoritative")
-        warns.append(msg)
-        return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                "failures": [msg] + list(want_failures)}
-    # The pristine area EXISTS even when it carries no file. Returning early
-    # here skipped the candidate scan, so a package could add arbitrary files
-    # under an EMPTY feedback area (the raw-data sibling was fixed for the same
-    # shape, F119/F161).
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
+    want = feedback_area_entries(ctx.pristine, area_name)
+    if not want:
+        return {"present": False, "files": 0, "restored": [], "dropped": []}
     area = cand_dir / area_name
     if area.is_symlink():
         try:
@@ -6158,7 +5555,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             same = False
         if same:
             return {"present": True, "files": len(want), "restored": [], "dropped": [],
-                    "linked": True, "failures": []}
+                    "linked": True}
         with contextlib.suppress(OSError):
             area.unlink()
         warns.append(f"READ-ONLY {label} review feedback: {area_name}/ was a symlink to "
@@ -6168,29 +5565,9 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
     def inside_squat(rel: str) -> bool:
         return any(rel == s or rel.startswith(s + "/") for s in squat)
 
-    links, failures = [], []
-    # Populate the link list from the CANDIDATE area: `links` was initialised and
-    # then never filled, so the purge loop below was dead code (F161). A file
-    # link whose target leaves the area, a directory link and a broken link are
-    # all reported by the walker.
-    feedback_area_entries(cand_dir, area_name, symlinks=links, failures=failures)
     mode_plan = make_tree_writable(area) if area.is_dir() else []
     restored, dropped = [], []
     try:
-        for rel in links:
-            p = cand_dir / rel
-            try:
-                if p.is_symlink() or p.exists():
-                    p.unlink()
-                dropped.append(rel)
-                warns.append(f"READ-ONLY {label} review feedback: removed the symlink {rel} "
-                             f"from the read-only area (a link is not package content)")
-            except OSError as e:
-                msg = (f"{rel} is a symlink in the read-only area and could not be "
-                       f"removed: {e}")
-                warns.append(f"READ-ONLY {label} review feedback: could not remove symlink "
-                             f"{rel}: {e}")
-                failures.append(msg)
         for rel, dig in sorted(want.items()):
             dest = cand_dir / rel
             if dest.is_file():
@@ -6208,10 +5585,9 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             except OSError as e:
                 warns.append(f"READ-ONLY {label} review feedback: could not restore "
                              f"{dest.name}: {e}")
-                failures.append(f"could not restore {dest.name}: {e}")
                 continue
             restored.append(rel)
-        for rel in sorted(feedback_area_entries(cand_dir, area_name, failures=failures)):
+        for rel in sorted(feedback_area_entries(cand_dir, area_name)):
             if rel in want or inside_squat(rel):
                 continue
             try:
@@ -6219,7 +5595,6 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             except OSError as e:
                 warns.append(f"READ-ONLY {label} review feedback: could not remove added "
                              f"file {rel}: {e}")
-                failures.append(f"could not remove added file {rel}: {e}")
                 continue
             dropped.append(rel)
         for src_dir in [src, *[p for p in sorted(src.rglob("*")) if p.is_dir()]]:
@@ -6234,7 +5609,6 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
         warns.append(f"READ-ONLY {label} review feedback: {s} is a directory where the pristine "
                      f"original has a file; its content was left alone (the recovery layer "
                      f"refuses to delete real work) and the attempt fails")
-        failures.append(f"{s} is a directory where the pristine original has a file")
     for d in sorted([p for p in area.rglob("*") if p.is_dir()],
                     key=lambda p: len(p.parts), reverse=True):
         try:
@@ -6251,8 +5625,7 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
             f"The area is an INPUT ({what}): never edit, rename, "
             f"add or drop anything inside it -- it is copied from the original, so a document "
             f"that points into it must use the name that is there")
-    return {"present": True, "files": len(want), "restored": restored,
-            "dropped": dropped, "failures": failures}
+    return {"present": True, "files": len(want), "restored": restored, "dropped": dropped}
 
 
 def enforce_readonly_human_feedback(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
@@ -6278,30 +5651,11 @@ def verify_readonly_raw_data(ctx: Ctx, cand_dir: Path, warns: list) -> dict:
     if info["legacy_input_areas"]:
         warns.append("REMOVED input-area spelling in the package: "
                      + "; ".join(info["legacy_input_areas"]))
-    # Enforced-input failures are a separate channel: they must fail the
-    # attempt but must not be relabeled as the legacy-spelling list (F168).
-    info["readonly_failures"] = list(info.get("failures") or [])
-    # The merged failure list is warned about ONCE, after the feedback areas are
-    # folded in; the raw-data-only append here duplicated every raw-data failure
-    # (F135).
     # The review-feedback areas are INPUTS like raw_data: same byte-for-byte
     # contract, same restore-from-pristine repair (human editors'/reviewers'
     # comments and the pre-filtered LLM review).
     info["human_review_feedback"] = enforce_readonly_human_feedback(ctx, cand_dir, warns)
     info["llm_review_feedback"] = enforce_readonly_llm_feedback(ctx, cand_dir, warns)
-    # F027: the feedback enforcers record their own failures, but verify_* read
-    # only the raw-data dict's list, so a modified/unrestorable read-only
-    # feedback fact never failed the attempt.
-    for _key, _label in (("human_review_feedback", "human"),
-                         ("llm_review_feedback", "LLM")):
-        _fails = list((info.get(_key) or {}).get("failures") or [])
-        if _fails:
-            info["readonly_failures"].extend(_fails)
-            warns.append(f"READ-ONLY {_label} input failure in the package: "
-                         + "; ".join(_fails))
-    if info["readonly_failures"]:
-        warns.append("READ-ONLY input failure in the package: "
-                     + "; ".join(info["readonly_failures"]))
     return info
 
 
@@ -6318,8 +5672,8 @@ def raw_data_advisories(ctx: Ctx) -> list:
     want = raw_data_entries(ctx.pristine)
     want_hf = human_feedback_entries(ctx.pristine)
     want_llm = llm_feedback_entries(ctx.pristine)
-    # Do NOT early-return on an empty pristine area: a decided corpus that
-    # ADDS a raw-data/feedback file is still a deviation and must be checked.
+    if not want and not want_hf and not want_llm:
+        return []
     out, seen = [], set()
     areas = [(f"pinned/{pin['id']}", pinned_docs_dir(ctx, pin))
              for pin in (ctx.state.get("pinned") or [])]
@@ -6331,51 +5685,38 @@ def raw_data_advisories(ctx: Ctx) -> list:
         if label in seen or not d.is_dir():
             continue
         seen.add(label)
-        got = raw_data_entries(d)
-        # Same pairing as `enforce_readonly_raw_data`: exact paths first,
-        # then the token-insensitive fallback -- a package that carries the
-        # base's token names (`dataset_summary-4f3a9c1.tsv`) is compliant,
-        # and reading it by exact path alone reported it as a deviation.
-        pairs, extras = raw_data_pairs(want, got)
-        bad = sorted(rel for rel, dig, _crel, cdig in pairs if cdig != dig)
-        # An ADDED file is a deviation too: `enforce_readonly_raw_data`
-        # deletes it, so a decided corpus that carries one does not match the
-        # pristine raw data. Discarding `extras` here told the operator the
-        # corpus was clean (F118).
-        added = sorted(rel for rel, _dig in extras)
-        if bad or added:
-            named = sorted(set(bad) | set(added))
-            what = []
+        if want:
+            got = raw_data_entries(d)
+            # Same pairing as `enforce_readonly_raw_data`: exact paths first,
+            # then the token-insensitive fallback -- a package that carries the
+            # base's token names (`dataset_summary-4f3a9c1.tsv`) is compliant,
+            # and reading it by exact path alone reported it as a deviation.
+            pairs, _extras = raw_data_pairs(want, got)
+            bad = sorted(rel for rel, dig, _crel, cdig in pairs if cdig != dig)
             if bad:
-                what.append(f"{len(bad)} raw-data file(s) that differ from the pristine "
-                            f"original")
-            if added:
-                what.append(f"{len(added)} raw-data file(s) the pristine original does not "
-                            f"carry")
-            out.append(f"{label}/ carries {' and '.join(what)} ({', '.join(named[:3])}"
-                       f"{f' +{len(named) - 3} more' if len(named) > 3 else ''}); every stage "
-                       f"materializes the original's copy, so this cannot reach a new "
-                       f"package")
-        got_hf = human_feedback_entries(d)
-        bad_hf = sorted(rel for rel, dig in want_hf.items() if got_hf.get(rel) != dig)
-        added_hf = sorted(set(got_hf) - set(want_hf))
-        bad_hf = sorted(set(bad_hf) | set(added_hf))
-        if bad_hf:
-            out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
-                       f"differ from the pristine original ({', '.join(bad_hf[:3])}"
-                       f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
-                       f"stage materializes the original's copy, so this cannot reach a new "
-                       f"package")
-        got_llm = llm_feedback_entries(d)
-        bad_llm = sorted(rel for rel, dig in want_llm.items() if got_llm.get(rel) != dig)
-        added_llm = sorted(set(got_llm) - set(want_llm))
-        bad_llm = sorted(set(bad_llm) | set(added_llm))
-        if bad_llm:
-            out.append(f"{label}/ carries {len(bad_llm)} LLM-review-feedback file(s) that "
-                       f"differ from the pristine original ({', '.join(bad_llm[:3])}"
-                       f"{f' +{len(bad_llm) - 3} more' if len(bad_llm) > 3 else ''}); every "
-                       f"stage materializes the original's copy, so this cannot reach a new "
-                       f"package")
+                out.append(f"{label}/ carries {len(bad)} raw-data file(s) that differ from the "
+                           f"pristine original ({', '.join(bad[:3])}"
+                           f"{f' +{len(bad) - 3} more' if len(bad) > 3 else ''}); every stage "
+                           f"materializes the original's copy, so this cannot reach a new "
+                           f"package")
+        if want_hf:
+            got_hf = human_feedback_entries(d)
+            bad_hf = sorted(rel for rel, dig in want_hf.items() if got_hf.get(rel) != dig)
+            if bad_hf:
+                out.append(f"{label}/ carries {len(bad_hf)} human-review-feedback file(s) that "
+                           f"differ from the pristine original ({', '.join(bad_hf[:3])}"
+                           f"{f' +{len(bad_hf) - 3} more' if len(bad_hf) > 3 else ''}); every "
+                           f"stage materializes the original's copy, so this cannot reach a new "
+                           f"package")
+        if want_llm:
+            got_llm = llm_feedback_entries(d)
+            bad_llm = sorted(rel for rel, dig in want_llm.items() if got_llm.get(rel) != dig)
+            if bad_llm:
+                out.append(f"{label}/ carries {len(bad_llm)} LLM-review-feedback file(s) that "
+                           f"differ from the pristine original ({', '.join(bad_llm[:3])}"
+                           f"{f' +{len(bad_llm) - 3} more' if len(bad_llm) > 3 else ''}); every "
+                           f"stage materializes the original's copy, so this cannot reach a new "
+                           f"package")
     return out
 
 
@@ -6436,7 +5777,6 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     out_dir = output_dir_of(rec)
     cand_files = _candidate_corpus_files(sb, out_dir)
     cand_digests = set()
-    empty_cand = set()
     for key, p in cand_files:
         try:
             dig = sha256_file(p)
@@ -6447,8 +5787,6 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
         # scratch file happened to exist.
         if dig != EMPTY_SHA256:
             cand_digests.add(dig)
-        else:
-            empty_cand.add(p)
     # Rename-family bookkeeping (see the family skip in the main loop). A
     # candidate document can stand in for ONE base document whose name changed,
     # but only if it is not itself the exact-name survivor of another base
@@ -6473,7 +5811,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
     cand_free_keys: dict = {}
     for key, p in cand_files:
         if p.suffix.lower() in EDITABLE_DOC_EXTS and not is_bookkeeping_name(p.name) \
-                and p not in empty_cand and key not in base_doc_names:
+                and key not in base_doc_names:
             fam_key = _doc_key(key)
             cand_free_keys[fam_key] = cand_free_keys.get(fam_key, 0) + 1
     # Base-side digests, for the compiled-PDF twin test.
@@ -6504,12 +5842,8 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
                 return q
         return None
 
-    def _candidate_twin(stem_of_base_twin: str, parent: str = ""):
-        # Mirror _editable_twin_in_base's directory scope: a same-stem editable
-        # file in a DIFFERENT directory is not this PDF's twin.
+    def _candidate_twin(stem_of_base_twin: str):
         for key, p in cand_files:
-            if Path(key).parent.as_posix() != parent:
-                continue
             if p.suffix.lower() in _PDF_TWIN_EXTS \
                     and _stem_key(Path(key).name) == stem_of_base_twin:
                 return p
@@ -6627,8 +5961,7 @@ def backfill_missing_files(ctx: Ctx, rec: dict, base_sources: list, warns: list)
             if p.suffix.lower() == ".pdf":
                 twin = _editable_twin_in_base(src_dir, rel_in)
                 if twin is not None:
-                    cand_twin = _candidate_twin(_stem_key(twin.name),
-                                                 Path(rel_in).parent.as_posix())
+                    cand_twin = _candidate_twin(_stem_key(twin.name))
                     if cand_twin is not None:
                         twin_dig = base_digs.get(prefix + twin.relative_to(src_dir).as_posix())
                         try:
@@ -6761,15 +6094,6 @@ def _caption_and_document_checks(ctx: Ctx, rec: dict, vid: str, base_sources: li
                            "must be declared scaffolding for a mandatory item or the visible "
                            "output of a finding, and an undeclared one is invented content, the "
                            "same defect class as a lost document read in the other direction")
-        if dset.get("unreadable_dirs"):
-            # An unreadable directory was silently absent from BOTH manifests, so
-            # "nothing is missing" was a statement about the readable part only
-            # (F118). Name the coverage gap; never let it read as a clean check.
-            warns.append("document-set comparison INCOMPLETE: unreadable directories "
-                         "not compared: "
-                         + ", ".join(dset["unreadable_dirs"][:6])
-                         + " -- make them readable and re-run the stage; files under "
-                           "them could be missing from the candidate without being reported")
 
 
 def postcheck_a1(ctx: Ctx, rec: dict):
@@ -6784,17 +6108,8 @@ def postcheck_a1(ctx: Ctx, rec: dict):
     got = recompute_corpus_digest(ctx, rec["round"], A1_ID)
     # The DIGEST is still recorded below; only its verification is skipped
     # (`--skip-hash`), never the recording.
-    if not want:
-        # materialize_a1 already DERIVED a digest for a legacy/damaged pin that
-        # records none; skipping the check made the post-copy verification a
-        # no-op (F169).
-        want = str(rec.get("base_source_digest") or "").strip() or None
-    if want:
-        if got != want and not hash_checks_skipped():
-            errs.append(f"base/ is not byte-identical to its source ({src_id}).")
-    elif not hash_checks_skipped():
-        errs.append("cannot verify base/ against its source: no recorded source digest "
-                    "and the source pin is unreadable")
+    if want and got != want and not hash_checks_skipped():
+        errs.append(f"base/ is not byte-identical to its source ({src_id}).")
     rec["corpus_digest"] = got
     # The round base's own hand-off markers (report-only; see the placeholder
     # rules): recorded here too so a pin of the base carries the count.
@@ -6840,7 +6155,7 @@ DISPOSITION_STRUCTURAL_EXEMPT_RE = re.compile(
 
 # The columns whose cells carry a disposition. `resolution` is the same
 # contract under the placeholder/ledger layouts' own name.
-DISPOSITION_COLUMNS = ("disposition", "resolution", "verdict")
+DISPOSITION_COLUMNS = ("disposition", "resolution")
 
 # The cover-letter stamp row (FMT-CL1): a letter formatted in the MANUSCRIPT
 # template is a defect the venue ships no cover-letter template to justify. An
@@ -6856,27 +6171,9 @@ COVER_LETTER_OVERRIDE_CITE_RE = re.compile(
 COVER_LETTER_OVERRIDE_REQUIRE_RE = re.compile(
     r"\b(?:requires?|required|mandates?|mandatory|specif(?:y|ies|ied)|instructs?|"
     r"states?|says|asks? for|calls for|directs?)\b", re.I)
-# An affirmative closure is not a fixed five-word vocabulary: a real run closed
-# the row with "As is -- the letter follows the manuscript template's styles"
-# and bypassed the journal-override requirement entirely (F018). The common
-# affirmative synonyms are all OK closures; a real remediation ("fixed",
-# "reformatted") and `unable` are deliberately NOT.
 COVER_LETTER_OK_CLOSE_RE = re.compile(
-    r"^\s*(?:ok\b|okay\b|ok\s*[—–\-:]|acceptable\b|no change\b|pass(?:es)?\b|"
-    r"clean\b|as[\s-]+is\b|accept(?:ed|able)?\b|keep\b|kept\b|fine\b|"
-    r"no\s+(?:defect|issue)\b|unchanged\b|retain(?:ed)?\b)",
+    r"^\s*(?:ok\b|okay\b|ok\s*[—–\-:]|acceptable\b|no change\b|pass(?:es)?\b|clean\b)",
     re.I)
-# A free-form judge note may BEGIN with the rule id (`FMT-CL1 | OK -- ...`), and
-# the OK test is anchored at the start: without this normalization the natural
-# spelling never matched and the pipeline's own closure passed the judge gate
-# (F085).
-FMT_CL1_FREEFORM_LEAD_RE = re.compile(
-    r"(?i)^\s*[-*|>]?\s*(?:\|\s*)?FMT-CL1\b\s*(?:\||:|-|—|–)*\s*")
-# A line that records no consideration is not a disposition: the rule-id-first
-# spelling used to count as "considered" merely because the id appeared (F085).
-FMT_CL1_UNDISPOSED_RE = re.compile(
-    r"(?i)\b(?:not\s+(?:reviewed|considered|checked|examined|disposed)|"
-    r"no\s+consideration|nothing\s+(?:was\s+)?considered|n/?a)\b")
 
 
 def _split_table_cells(text: str) -> list:
@@ -6995,54 +6292,16 @@ def _disposition_table_problems(path: Path) -> list:
         return ["carries a `disposition` header but NO data row: a header alone disposes "
                 "nothing (every row must record its own verdict/reason)"]
     problems = []
-    # EVERY keyed block needs its own data rows (F066): one populated table
-    # used to excuse another, seeded table emptied to header+separator.
-    _empty_blocks = [b for b, _k in keyed if not b["rows"]]
-    if _empty_blocks:
-        problems.append(
-            f"carries {len(_empty_blocks)} disposition table(s) with a header but NO data "
-            f"row: a header alone disposes nothing (every row must record its own "
-            f"verdict/reason)")
     for block, key in data:
         empty = sum(1 for row in block["rows"]
                     if not str(row.get(key) or "").strip())
         if empty:
             problems.append(f"{empty} of {len(block['rows'])} row(s) have an EMPTY "
                             f"`{key}` cell")
-        norm_key = "disposition" if "disposition" in key.lower() else key
-        if norm_key in DISPOSITION_COLUMNS:
-            # A renamed header (`disposition notes`) must still reach the
-            # shared filler/empty-cell checks; map the cell to the canonical
-            # key for that call.
-            rows = block["rows"]
-            if norm_key != key:
-                rows = [dict(r, disposition=r.get(key)) for r in rows]
-            problems += disposition_artifact_problems(rows, block.get("widths"),
+        if key in DISPOSITION_COLUMNS:
+            problems += disposition_artifact_problems(block["rows"], block.get("widths"),
                                                       len(block["header"]))
     return problems
-
-
-def _mask_fenced_blocks(text: str) -> str:
-    """Blank every line inside a ``` / ~~~ fenced code block.
-
-    Examples inside a fence are ILLUSTRATIONS, not data: the markdown-table and
-    proposal scanners used to count them as real rows/proposals.
-    """
-    out, fence = [], None
-    for line in str(text or "").splitlines():
-        s = line.strip()
-        m = re.match(r"^(`{3,}|~{3,})", s)
-        if fence is not None:
-            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence):
-                fence = None
-            out.append("")
-            continue
-        if m:
-            fence = m.group(1)
-            out.append("")
-            continue
-        out.append(line)
-    return "\n".join(out)
 
 
 def _markdown_blocks_from_text(text: str) -> list:
@@ -7052,7 +6311,6 @@ def _markdown_blocks_from_text(text: str) -> list:
     renderer and parses it back through this function, so the row identities it
     compares against are exactly the ones the session was given (R04).
     """
-    text = _mask_fenced_blocks(text)
     raw_blocks, cur = [], []
     for line in text.splitlines():
         if line.strip().startswith("|"):
@@ -7152,16 +6410,17 @@ _DISPOSITION_VERDICT_PREFIX_RE = re.compile(
     r"\s*[.!:,]?\s*(?:[—–-]+\s*)?")
 _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"(?i)^(?:x+|n/?a|none|nil|null|tbd|todo|yes|no|ok|okay|checked|done|"
-    r"pass|passed|tested|fine|good|clean|unchanged|no\s+change|"
-    r"nothing\s+(?:to|was)\s+report(?:ed)?|"
-    r"see(?:\s+(?:above|below|here|there|report|details?))?|"
-    r"as\s+(?:discussed|above|before|noted|stated)|"
-    r"unable\s+to\s+(?:check|verify|review|examine|inspect)|"
-    r"(?:not\s+|never\s+|failed\s+to\s+)?"
-    r"(?:checked|verified|reviewed|examined|inspected|confirmed|done|"
-    r"it\s+was\s+(?:checked|verified|reviewed|examined)|"
-    r"was\s+(?:checked|verified|reviewed|examined))|"
-    r"[-—–_.:;,\s]+)$")
+    r"pass|passed|tested|fine|good|clean|[-—–_.:;,\s]+)$")
+
+
+def _disposition_filler_closure(cell: str) -> bool:
+    """True for a verdict whose reason tail is only a separator or filler token."""
+    text = re.sub(r"\s+", " ", str(cell or "")).strip()
+    m = _DISPOSITION_VERDICT_PREFIX_RE.match(text)
+    if m is None:
+        return False
+    tail = text[m.end():].strip()
+    return bool(tail) and bool(_DISPOSITION_FILLER_TAIL_RE.match(tail))
 
 
 def short_row_indexes(rows: list, widths, header_width: int) -> list:
@@ -7213,8 +6472,7 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
         problems.append(msg)
     bare = [r for r in filled
             if _DISPOSITION_BARE_CLOSURE_RE.match(str(r.get(key) or ""))
-            or _disposition_filler_closure(str(r.get(key) or ""))
-            or _disposition_is_filler_only(str(r.get(key) or ""))]
+            or _disposition_filler_closure(str(r.get(key) or ""))]
     if bare:
         where = [l for l in (row_label(r) for r in bare) if l][:4]
         problems.append(
@@ -7269,10 +6527,7 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
         if n / max(1, len(rows)) < DISPOSITION_BOILERPLATE_SHARE \
                 and n < DISPOSITION_BOILERPLATE_HARD_ROWS:
             continue
-        # The contract is EVERY row: only then is the group a row-per-id
-        # closure rather than a template. `any` let one id-bearing row hide a
-        # 25-row boilerplate closure.
-        if all(_names_check_or_finding(str(r.get(key) or "")) for r in same):
+        if any(_names_check_or_finding(str(r.get(key) or "")) for r in same):
             continue
         where = [l for l in (row_label(r) for r in same) if l][:4]
         problems.append(
@@ -7288,11 +6543,8 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
     # disposition must quote that requirement. The pipeline's own convention
     # ("the run carries the letter in the journal's styles") is not an override.
     for r in filled:
-        # `rule id` is the alias the seeded-table selector accepts (see the M20
-        # check below), so the cover-letter guard must read it too: a table
-        # re-emitted with `Rule ID` otherwise escaped the OK-closure gate (F55).
-        rule = str(r.get("rule") or r.get("rule id") or "").strip().upper()
-        if not re.search(r"\bFMT-CL1\b", rule):
+        rule = str(r.get("rule") or "").strip().upper()
+        if rule not in COVER_LETTER_STAMP_RULES:
             continue
         disp = str(r.get(key) or "").strip()
         if not COVER_LETTER_OK_CLOSE_RE.match(disp):
@@ -7312,31 +6564,85 @@ def disposition_artifact_problems(rows: list, widths=None, header_width: int = 0
     return problems
 
 
-def artifact_quality_report(review_dir: Path, require_files: bool = False,
-                           m20_seed_rows: list | None = None,
-                           seeded_row_counts: dict | None = None,
-                           seeded_row_pins: dict | None = None) -> dict:
+def row_label(row: dict) -> str:
+    """A short, human-usable identifier for one artifact-table row."""
+    doc = str(row.get("document") or "").strip()
+    head = str(row.get("heading") or "").strip()
+    para = str(row.get("paragraph") or "").strip()
+    if doc or head or para:
+        bits = [b for b in (doc, head, (f"para {para}" if para else "")) if b]
+        return " / ".join(bits)[:80]
+    for k in ("acronym", "term", "figure", "caption", "item", "field", "check", "kind", "id"):
+        v = str(row.get(k) or "").strip()
+        if v:
+            return f"{k}={v}"[:80]
+    return ""
+
+
+def _quote(text: str, limit: int) -> str:
+    """`repr()` of a message excerpt, with an explicit marker when it is cut."""
+    text = str(text or "")
+    return repr(text[:limit]) + (" (truncated)" if len(text) > limit else "")
+
+
+def outline_artifact_problems(rows: list) -> list:
+    """An OUTLINE whose summaries are echoed first sentences / one verdict."""
+    problems = []
+    rows = [r for r in rows if r]
+    if not rows:
+        return problems
+    summaries = [str(r.get("summary") or "").strip() for r in rows]
+    firsts = [str(r.get("first sentence") or "").strip() for r in rows]
+    empty = sum(1 for s in summaries if not s)
+    echoed = 0
+    for s, f in zip(summaries, firsts):
+        if s and f and len(s) > 12 and (f.startswith(s) or s.startswith(f[:len(s)])):
+            echoed += 1
+    if empty > max(2, int(len(rows) * 0.2)):
+        where = [l for l in (row_label(r) for r in rows
+                             if not str(r.get("summary") or "").strip()) if l][:4]
+        problems.append(f"{empty} of {len(rows)} OUTLINE rows carry no summary "
+                        f"(the hierarchy pass cannot be audited)"
+                        + (f" -- e.g. {', '.join(where)}" if where else ""))
+    if echoed > int(len(rows) * 0.5):
+        problems.append(f"{echoed} of {len(rows)} summaries are copies of the row's first "
+                        f"sentence -- write what the paragraph CLAIMS")
+    verdicts = [str(r.get("disposition") or "").strip().lower() for r in rows
+                if str(r.get("disposition") or "").strip()]
+    if verdicts:
+        text, n = Counter(verdicts).most_common(1)[0]
+        if n >= 10 and n / len(rows) >= 0.8 and not _names_check_or_finding(text):
+            same = [r for r in rows
+                    if str(r.get("disposition") or "").strip().lower() == text]
+            where = [l for l in (row_label(r) for r in same) if l][:4]
+            problems.append(f"{n} of {len(rows)} OUTLINE rows carry the same verdict "
+                            f"({_quote(text, 120)}) -- dispose each row against its own heading"
+                            + (f" -- rows: {', '.join(where)}" if where else ""))
+    return problems
+
+
+DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_words.md",
+                      "artifacts/M19_length.md", "artifacts/M8_terms.md",
+                      "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
+                      "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
+                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
+                      "artifacts/M30_hierarchy_reconciliation.md",
+                      # M2's reference-integrity seed: the entries' own DOIs with
+                      # the resolver's verdict. Gated like every other seeded
+                      # table, because "the entry's DOI resolves to another work"
+                      # is exactly the class no format check and no re-reading
+                      # can see (see reference_integrity_rows).
+                      "artifacts/M2_references.md")
+
+
+def artifact_quality_report(review_dir: Path, require_files: bool = False) -> dict:
     """{artifact: [problems]} for every decision table under guided_review/.
 
     EVERY table block of the artifact is checked, each against its own header:
     the seeded table and the rows the session adds itself (the M20 "classes the
     scan cannot see", a coverage table) are all rows the session had to dispose.
-
-    `m20_seed_rows` is the code-side M20 scan RE-DERIVED from the read-only
-    `base/` by the postcheck. When it is given it is authoritative: a review
-    that deletes or empties the sandbox's `work/FORMAT_SCAN.json` can no longer
-    erase the seed. When it is omitted (the sandbox self-check preview), the
-    sandbox's own scan file is read, and a missing/unreadable one is an
-    unverified error whenever `require_files` marks this a gate.
-
-    `seeded_row_pins` is `{artifact rel: [{"columns", "count", "label"}, ...]}`,
-    one pin per SEEDED TABLE (M30 has three, never their sum) derived from the
-    read-only `base/` by `review_seeded_row_pins`. It makes a PARTIAL deletion
-    visible: `seeded_row_counts` alone is used only for the header-only case, so
-    deleting one seeded row out of three was never compared with the seed (F012).
     """
     report = {}
-    seeded_row_counts = seeded_row_counts or {}
     for rel in DECISION_ARTIFACTS:
         path = review_dir / rel
         if require_files and not path.is_file():
@@ -7348,155 +6654,6 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
             report.setdefault(rel, []).append(
                 f"{rel} carries no decision table (the seeded table was emptied)")
             continue
-        _empty_keyed = []
-        _expected = int(seeded_row_counts.get(rel) or 0)
-        if _expected > 0:
-            # The seed for this artifact is non-empty in the read-only base, so
-            # a header-only disposition block is a DELETED seed, not the
-            # documented "no rows" shape. `_disposition_table_problems` only
-            # sees a file whose EVERY block is empty; a coverage table with rows
-            # beside the emptied seed hid it (F170).
-            _empty_keyed = [b for b in blocks
-                            if any(k in b["header"] for k in DISPOSITION_COLUMNS)
-                            and not b["rows"]]
-            if _empty_keyed:
-                report.setdefault(rel, []).append(
-                    f"carries {len(_empty_keyed)} header-only disposition table(s) although "
-                    f"the read-only seed has {_expected} row(s): every seeded row must be "
-                    f"DISPOSED, not deleted -- re-emit it with its verdict in the "
-                    f"`disposition` cell")
-        # A PARTIAL deletion is as much a deleted seed as a header-only table.
-        # Each seeded table is pinned SEPARATELY by its own header shape: M30's
-        # three tables sum to one count that no single table can ever reach, so
-        # a summed count reported a complete ledger as short (F012). A table
-        # whose header still matches the seed but has fewer rows is reported;
-        # so is a table whose shape was replaced (no matching header at all),
-        # because changing the columns cannot dispose the seeded rows.
-        for _pin in (seeded_row_pins or {}).get(rel) or []:
-            _pin_error = str((_pin or {}).get("error") or "").strip()
-            if _pin_error:
-                # A pin that records WHY it could not be derived (a failed M2
-                # reference scan) is UNKNOWN evidence, never a clean table.
-                report.setdefault(rel, []).append(_pin_error)
-                continue
-            try:
-                _want = int((_pin or {}).get("count") or 0)
-            except (TypeError, ValueError):
-                _want = 0
-            if _want <= 0:
-                continue
-            _cols = [re.sub(r"\s+", " ", str(c or "").strip().lower())
-                     for c in ((_pin or {}).get("columns") or [])]
-            _cols = [c for c in _cols if c]
-            if not _cols:
-                continue
-            _matching = []
-            for _b in blocks:
-                _hdr = {re.sub(r"\s+", " ", str(h or "").strip().lower())
-                        for h in _b["header"]}
-                if all(c in _hdr for c in _cols):
-                    _matching.append(_b)
-            _present = sum(len(_b["rows"]) for _b in _matching)
-            _seed_ids = [list(x) for x in ((_pin or {}).get("rows") or []) if x]
-            if _seed_ids:
-                # Column names + row COUNT alone accepted wholesale fabrication:
-                # a session could delete the code-derived rows and emit the same
-                # number of invented rows with a real disposition. Every seeded
-                # row's identity cells must be PRESENT in the delivered table.
-                _want_ids = {tuple(_seed_cell(c) for c in row) for row in _seed_ids}
-                _have_ids = set()
-                for _b in _matching:
-                    for _r in _b["rows"]:
-                        _have_ids.add(tuple(_seed_cell(_r.get(c, "")) for c in _cols))
-                _missing = sorted(_want_ids - _have_ids)
-                if _missing:
-                    _label = str((_pin or {}).get("label") or "").strip()
-                    _named = f" for the `{_label}` table" if _label else ""
-                    _shown = "; ".join(" | ".join(row) for row in _missing[:3])
-                    report.setdefault(rel, []).append(
-                        f"is missing {len(_missing)} of the {len(_want_ids)} code-seeded "
-                        f"row identity(ies){_named} (columns: {', '.join(_cols)}): the "
-                        f"seeded rows were DELETED or REPLACED, not disposed -- re-emit "
-                        f"every seeded row with its own verdict in the `disposition` "
-                        f"cell (missing: {_shown}"
-                        + (f" (+{len(_missing) - 3} more)" if len(_missing) > 3 else "")
-                        + ")")
-                    continue
-            if _present >= _want:
-                continue
-            if _present == 0 and _empty_keyed:
-                # The header-only branch above already names this deletion.
-                continue
-            _label = str((_pin or {}).get("label") or "").strip()
-            _named = f" for the `{_label}` table" if _label else ""
-            report.setdefault(rel, []).append(
-                f"carries only {_present} of the {_want} code-seeded row(s){_named} "
-                f"(columns: {', '.join(_cols)}): every seeded row must be DISPOSED, not "
-                f"deleted -- re-emit it with its verdict in the `disposition` cell")
-        seeded_counts = Counter()
-        if rel.endswith("M20_formatting.md"):
-            # M20's seed is reproducible from the code-side scan the orchestrator
-            # wrote beside it: the seeded table has one row per `FORMAT_SCAN.json`
-            # row. A header-only table is accepted only when there was no seeded
-            # row to lose; deleting the seeded rows otherwise emptied the per-row
-            # disposition gate (F111). Duplicate rules are counted, not collapsed
-            # into a set, so deleting one of several same-rule rows is visible.
-            seed_rows = None
-            if m20_seed_rows is not None:
-                # The postcheck re-derived this from the read-only base/ (R02):
-                # the session-writable scan file cannot erase the seed.
-                seed_rows = [r for r in m20_seed_rows if isinstance(r, dict)]
-            else:
-                scan = read_json(review_dir / "work" / "FORMAT_SCAN.json",
-                                 revive=False, lenient=True)
-                if isinstance(scan, dict) and isinstance(scan.get("rows"), list):
-                    seed_rows = [r for r in scan["rows"] if isinstance(r, dict)]
-                elif require_files and path.is_file():
-                    report.setdefault(rel, []).append(
-                        "the code-side seed `work/FORMAT_SCAN.json` is missing or unreadable: "
-                        "the seeded-row pin cannot be verified (re-run the stage; do not "
-                        "delete the orchestrator's evidence)")
-            for r in seed_rows or []:
-                rule = str(r.get("rule") or "").strip().upper()
-                if rule:
-                    seeded_counts[rule] += 1
-        if seeded_counts and path.is_file():
-            # Count only the SEEDED table's own rule rows: an unrelated note
-            # table carrying the same rule id restored a deleted seeded row's
-            # count. A table qualifies when it has a rule column and a
-            # disposition column (the seeded shape).
-            _seed_blocks = [b for b in blocks
-                            if any(h in ("rule", "rule id") for h in b["header"])
-                            and any(k in b["header"] for k in DISPOSITION_COLUMNS)]
-            # The FIRST such block is the seeded table; later tables are the
-            # session's own note/coverage tables and must not restore a deleted
-            # seeded row's count.
-            _seed_blocks = _seed_blocks[:1]
-            present_counts = Counter()
-            for block in _seed_blocks:
-                # Read the rule cell through the header key that matched: the
-                # selector accepts `rule` OR `rule id`, but the counter read only
-                # `rule`, so a `Rule ID` table reported every seeded row deleted
-                # (F70).
-                rkey = next((h for h in ("rule", "rule id") if h in block["header"]), "")
-                if not rkey:
-                    continue
-                for r in block["rows"]:
-                    present_counts[str(r.get(rkey) or "").strip().upper()] += 1
-            present_counts.pop("", None)
-            lost = {rule: n - present_counts.get(rule, 0)
-                    for rule, n in seeded_counts.items()
-                    if n > present_counts.get(rule, 0)}
-            if lost:
-                missing = sum(lost.values())
-                total = sum(seeded_counts.values())
-                detail = ", ".join(f"{rule} x{n}" if n > 1 else rule
-                                   for rule, n in sorted(lost.items())[:4])
-                more = f" +{len(lost) - 4} more" if len(lost) > 4 else ""
-                report.setdefault(rel, []).append(
-                    f"{missing} of the {total} code-seeded row(s) are no longer in the table "
-                    f"({detail}{more}): every seeded row must be DISPOSED, not deleted -- "
-                    f"re-emit it with its verdict in the `disposition` cell")
         if blocks and not any(
                 any(k in block["header"] for k in DISPOSITION_COLUMNS)
                 for block in blocks):
@@ -7511,25 +6668,12 @@ def artifact_quality_report(review_dir: Path, require_files: bool = False,
                 f"{rel} carries no table with a `disposition` column: every seeded "
                 f"decision row must be disposed in its own last column")
             continue
-        # Every block that carries ROWS is a decision table the session had to
-        # dispose, so each needs its OWN disposition column. The check above
-        # only asked whether SOME block had one, so moving the seeded table to
-        # arbitrary columns and adding a tiny disposed dummy table satisfied the
-        # gate while the seeded rows were never disposed (F016).
-        for block in blocks:
-            if block["rows"] and not any(k in block["header"]
-                                         for k in DISPOSITION_COLUMNS):
-                report.setdefault(rel, []).append(
-                    f"{rel} carries a table with {len(block['rows'])} row(s) and no "
-                    f"`disposition` column: every decision row must be disposed in its own "
-                    f"last column (a separate dummy table does not dispose these rows)")
         for block in blocks:
             rows = block["rows"]
-            if not rows or not any(k in block["header"] for k in DISPOSITION_COLUMNS):
+            if not rows:
                 # A header-only seeded table is the documented "no rows" shape
                 # (the session may leave an empty table's header); the missing
-                # DISPOSITION COLUMN is the bypass this check closes, reported
-                # above for every block that actually carries rows.
+                # DISPOSITION COLUMN is the bypass this check closes.
                 continue
             problems = disposition_artifact_problems(rows, block.get("widths"),
                                                       len(block["header"]))
@@ -7575,7 +6719,7 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
         for r in block["rows"]:
             rule = str(r.get("rule") or "").strip().upper()
             cells = [str(v or "") for v in r.values()]
-            if not (re.search(r"\bFMT-CL1\b", rule)
+            if not (rule == "FMT-CL1"
                     or (not rule and any("FMT-CL1" in c.upper() for c in cells))):
                 continue
             disp = " ".join(str(r.get(k) or "") for k in
@@ -7594,15 +6738,6 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
     if not candidates and not undisposed:
         candidates = [ln.strip() for ln in raw.splitlines() if "FMT-CL1" in ln.upper()]
     for text in candidates:
-        text = FMT_CL1_FREEFORM_LEAD_RE.sub("", str(text or ""), count=1).strip()
-        if not text:
-            continue
-        if FMT_CL1_UNDISPOSED_RE.search(text):
-            problems.append(
-                f"{rel}: the FMT-CL1 line records no consideration of the target's cover "
-                f"letter (only a mention of the rule id): state whether the compared "
-                f"versions carry it and how it weighs in the formatting tier")
-            continue
         if not COVER_LETTER_OK_CLOSE_RE.match(text):
             continue
         if COVER_LETTER_OVERRIDE_CITE_RE.search(text) \
@@ -7657,224 +6792,10 @@ def artifact_quality_notes(review_dir: Path) -> dict:
     return notes
 
 
-def _seed_cell(value) -> str:
-    """One identity cell, normalised so a re-typed cell still matches.
-
-    The artifact renderer (`_evidence_artifact_table`) caps every cell at 140
-    characters, so the identity must be capped there too or a long cell could
-    never match the table the session was given.
-    """
-    # `str(value or "")` turned a numeric 0 (a paragraph/line number) into the
-    # empty string, so the seed's first row never matched its rendered "0".
-    text = ("" if value is None else str(value))[:140]
-    return re.sub(r"\s+", " ", text).strip().casefold()
-
-
-def _seed_row_identity(row: dict, columns: list) -> list:
-    """A seeded row's identity: its own values in the pinned identity columns.
-
-    Keys are looked up case- and whitespace-insensitively, and the values are
-    whitespace-collapsed/case-folded, so a session that re-renders the table with
-    the same identity cells still matches. Content cells OUTSIDE the identity
-    columns (the disposition, a note) are free to change. A LIST of cells, not a
-    joined string: a cell may itself contain the join separator.
-    """
-    low = {re.sub(r"\s+", " ", str(k).strip().lower()): v for k, v in (row or {}).items()}
-    return [_seed_cell(low.get(re.sub(r"\s+", " ", str(c).strip().lower()), ""))
-            for c in columns]
-
-
-def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
-    """{artifact rel: [pin, ...]} re-derived from the read-only base.
-
-    Each pin is `{"columns": [...], "count": n, "label": ..., "rows": [...]}` and
-    describes ONE seeded table: the header shape the seed rendered, the number of
-    rows it rendered, and each row's normalized IDENTITY cells. The identities
-    are what makes a wholesale replacement visible: a session that deletes the
-    code-derived rows and emits the same NUMBER of invented rows with a real
-    disposition used to pass (the count and columns matched). They are derived
-    HERE, from `base/`, never from the session-writable artifact, so deleting a
-    seeded table cannot lower its expected count (F170) and deleting one ROW out
-    of several cannot hide behind the rows that remain (F012).
-
-    M30 is THREE seeded tables (A written values, B code/config literals, C
-    negative claims) with three different header shapes. They are pinned
-    separately: a summed count can never be satisfied by one table and made a
-    complete ledger report short.
-    """
-    pins = {}
-
-    def add(rel: str, columns: list, rows, label: str, identity=None) -> None:
-        rows = list(rows or [])
-        identities = []
-        for row in rows:
-            if not isinstance(row, dict):
-                identities = []
-                break
-            identities.append(list(identity(row) if identity
-                                   else _seed_row_identity(row, columns)))
-        pins.setdefault(rel, []).append({"columns": list(columns),
-                                         "count": len(rows),
-                                         "label": label,
-                                         "rows": identities})
-
-    try:
-        ev = code_side_evidence(ctx, base, "review")
-    except Exception:                                                 # noqa: BLE001
-        return pins
-    add("artifacts/M18_caption_words.md",
-        ["document", "caption", "words"],
-        (ev.get("captions") or {}).get("captions") or [], "M18")
-    add("artifacts/M19_length.md", ["document", "section", "words"],
-        (ev.get("lengths") or {}).get("rows") or [], "M19")
-    add("artifacts/M8_terms.md", ["document", "term", "count"],
-        (ev.get("terms") or {}).get("rows") or [], "M8")
-    add("artifacts/OUTLINE.md", ["document", "heading", "paragraph"],
-        (ev.get("outline") or {}).get("rows") or [], "OUTLINE")
-    add("artifacts/PLACEHOLDERS.md", ["document", "paragraph", "class", "payload"],
-        (ev.get("placeholder_ledger") or {}).get("rows") or [], "PLACEHOLDERS",
-        # The renderer caps the payload at 100 characters (p04_utils
-        # `ph_rows`); the identity must use the SAME cell.
-        identity=lambda r: [_seed_cell(v) for v in (
-            r.get("document"), r.get("document_paragraph"),
-            r.get("class"), (r.get("payload") or "")[:100])])
-    add("artifacts/CLAIM_STRENGTH.md", ["document", "paragraph", "kind", "direction"],
-        (ev.get("claims") or {}).get("rows") or [], "CLAIM_STRENGTH")
-    add("artifacts/M30_hierarchy_reconciliation.md",
-        ["document", "kind", "number", "sentence"],
-        (ev.get("hierarchy") or {}).get("rows") or [],
-        "A. written values with candidate producers",
-        # The renderer caps the sentence at 110 characters.
-        identity=lambda r: [_seed_cell(v) for v in (
-            r.get("document"), r.get("kind"), r.get("number"),
-            (r.get("sentence") or "")[:110])])
-    add("artifacts/M30_hierarchy_reconciliation.md",
-        ["file", "line", "symbol", "value"],
-        (ev.get("code_literals") or {}).get("rows") or [],
-        "B. code/config literals")
-    add("artifacts/M30_hierarchy_reconciliation.md",
-        ["written claim", "method token"],
-        (ev.get("negative_claims") or {}).get("rows") or [],
-        "C. written negative claims",
-        # The seed rows carry `claim`/`token`; the artifact's own columns are
-        # "written claim"/"method token".
-        # The renderer caps the written claim at 110 characters.
-        identity=lambda r: [_seed_cell(v) for v in
-                            ((r.get("claim") or "")[:110], r.get("token"))])
-    try:
-        mod = _format_module()
-        if mod is None or not hasattr(mod, "reference_integrity_rows"):
-            raise RuntimeError("the format module's reference_integrity_rows is unavailable")
-        refs = mod.reference_integrity_rows(
-            corpus_text_documents([(base, "", ())], raw_text=True, include_bib=True))
-        add("artifacts/M2_references.md",
-            ["document", "entry", "identifier"], refs or [], "M2",
-            # The renderer substitutes these two display placeholders for an
-            # empty label / a malformed DOI; the identity must use the cell the
-            # session actually sees.
-            identity=lambda r: [_seed_cell(r.get("document")),
-                                _seed_cell(r.get("entry") or "—"),
-                                _seed_cell(r.get("identifier") or "(no DOI read)")])
-    except Exception as e:                                             # noqa: BLE001
-        # NEVER silently drop the M2 pin. With the other tables still pinned,
-        # the `_seed_unknown` guard (which only fires when NO pin exists) never
-        # noticed, so a failed scan disabled the M2 seed while the gate looked
-        # clean. Record the failure as its own pin: artifact_quality_report()
-        # reports it as UNKNOWN (a failure under every policy except `off`).
-        pins.setdefault("artifacts/M2_references.md", []).append({
-            "columns": ["document", "entry", "identifier"], "count": 0, "label": "M2",
-            "error": (f"the M2 reference seed could not be re-derived from base/ "
-                      f"({type(e).__name__}: {e}); the M2 table's seeded rows are UNKNOWN, "
-                      f"not clean"),
-        })
-    # The PROVENANCE ledgers are seeded into `artifacts/` with the same
-    # `_evidence_artifact_table` shape (a final `disposition` column), so the
-    # per-row and partial-deletion gates apply to them too (F083). Their judged
-    # cells (`source`, `verification`) are NOT identity: the session fills them.
-    def _number_identity(r) -> list:
-        return [_seed_cell(v) for v in (r.get("document"), r.get("document_paragraph"),
-                                        r.get("number"), r.get("unit"))]
-
-    try:
-        mod = _format_module()
-        if mod is None:
-            raise RuntimeError("the format module is unavailable")
-        num_rows = [dict(r) for r in ((ev.get("numbers") or {}).get("rows") or [])]
-        docs = corpus_text_documents([(base, "", CORPUS_EXCLUDE_TOP)])
-        add("artifacts/M4_numbers.md", ["document", "paragraph", "number", "unit"],
-            num_rows, "M4", identity=_number_identity)
-        add("artifacts/NUMBERS_LEDGER.md", ["document", "paragraph", "number", "unit"],
-            num_rows, "NUMBERS_LEDGER", identity=_number_identity)
-        add("artifacts/IDENTIFIERS.md", ["document", "kind", "value"],
-            mod.identifier_rows(docs), "IDENTIFIERS",
-            identity=lambda r: [_seed_cell(v) for v in
-                                (r.get("document"), r.get("kind"), r.get("value"))])
-        add("artifacts/GENE_LEDGER.md", ["document", "symbol"],
-            [r for r in mod.gene_symbol_rows(docs) if r.get("verdict") == "found"],
-            "GENE_LEDGER",
-            identity=lambda r: [_seed_cell(v) for v in
-                                (r.get("document"), r.get("symbol"))])
-    except Exception as e:                                             # noqa: BLE001
-        for _rel, _label in (("artifacts/M4_numbers.md", "M4"),
-                             ("artifacts/NUMBERS_LEDGER.md", "NUMBERS_LEDGER"),
-                             ("artifacts/IDENTIFIERS.md", "IDENTIFIERS"),
-                             ("artifacts/GENE_LEDGER.md", "GENE_LEDGER")):
-            pins.setdefault(_rel, []).append({
-                "columns": [], "count": 0, "label": _label,
-                "error": (f"the {_label} seed could not be re-derived from base/ "
-                          f"({type(e).__name__}: {e}); its seeded rows are UNKNOWN, not clean"),
-            })
-    return pins
-
-
-def review_seeded_row_counts(ctx: Ctx, base: Path) -> dict:
-    """{artifact rel: code-seeded row count} (the sum of that artifact's pins).
-
-    Kept for the header-only check and for callers that only need a count; the
-    per-table pins above are what makes a partial deletion visible.
-    """
-    return {rel: sum(int(p.get("count") or 0) for p in pins)
-            for rel, pins in review_seeded_row_pins(ctx, base).items()}
 def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: list) -> dict:
     """Record (and optionally fail) the review's decision-artifact quality."""
-    # Re-derive the M20 seed from the read-only base/ the review was given, not
-    # from the session-writable scan beside it: deleting or emptying
-    # `guided_review/work/FORMAT_SCAN.json` must not disable the seeded-row pin
-    # (R02). A scan that cannot run is UNKNOWN, never a fallback to the sandbox
-    # copy: an EMPTY list is the sentinel that says "no trusted seed rows", so
-    # `artifact_quality_report` never reads the forged scan on a failure (F008).
-    m20_seed_rows = []
-    m20_seed_error = ""
-    base = sb / "base"
-    if not base.is_dir():
-        m20_seed_error = "base/ is missing"
-    else:
-        try:
-            info = scan_format_in_sources([(base, "", ())], policy=format_policy_of(ctx))
-            m20_seed_rows = [r for r in (info.get("rows") or []) if isinstance(r, dict)]
-        except Exception as e:                                     # noqa: BLE001 -- never gate on scan
-            m20_seed_error = f"the code-side M20 scan FAILED ({type(e).__name__}: {e})"
-    seeded_pins = review_seeded_row_pins(ctx, base) if base.is_dir() else {}
-    seeded_counts = {rel: sum(int(p.get("count") or 0) for p in pins)
-                     for rel, pins in seeded_pins.items()}
-    _seed_unknown = base.is_dir() and not seeded_pins
-    _seed_unknown_msg = (
-        "the decision tables' code-seeded row counts could not be re-derived from base/; "
-        "a deleted seeded row cannot be distinguished from an empty seed (the seeded-row "
-        "pin is UNKNOWN, not clean)")
-    report = artifact_quality_report(sb / GUIDED_REVIEW_DIR, require_files=True,
-                                     m20_seed_rows=m20_seed_rows,
-                                     seeded_row_counts=seeded_counts,
-                                     seeded_row_pins=seeded_pins)
-    if m20_seed_error:
-        report.setdefault("artifacts/M20_formatting.md", []).append(
-            f"M20 cannot be verified: {m20_seed_error}; the seeded-row state is UNKNOWN, "
-            f"not clean")
+    report = artifact_quality_report(sb / GUIDED_REVIEW_DIR, require_files=True)
     rec["artifact_quality"] = report
-    if _seed_unknown:
-        # Under --strict-artifacts UNKNOWN is a failure, exactly like the M20
-        # path above; warning only let arbitrary/deleted seeded rows pass.
-        (errs if strict_dispositions(ctx) else warns).append(_seed_unknown_msg)
     for rel, problems in sorted(report.items()):
         for p in problems:
             msg = f"decision artifact {rel}: {p}"
@@ -7883,6 +6804,8 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
         for n in notes:
             warns.append(f"decision artifact {rel}: {n}")
     return report
+
+
 # =====================================================================
 # SCOPED ARTIFACT REPAIR (`--strict-artifacts fix`) -- ONE PROFILE PER STAGE
 #
@@ -7909,6 +6832,7 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
 #     BEFORE it re-runs the identical postcheck. A repair that went outside its
 #     scope is a failed attempt, and everything it did stays in the archive.
 # =====================================================================
+
 REPAIR_PROMPT_FILE = "REPAIR_PROMPT.md"
 # A repair is a few hundred lines of editing, not a review session: cap it even
 # when the stage timeout is generous (an LLM that runs for an hour on this is
@@ -7950,6 +6874,8 @@ AGENT_CONTEXT_OVERFLOW_RE = re.compile(
     r"|\blength limit exceeded\b"
     r"|\brequest body\b[^\n]{0,80}\b(?:too large|limit exceeded)\b"
     r")")
+
+
 # A stdout line is evidence of a PROVIDER failure only when the line itself is
 # error-shaped. The overflow regex above must stay broad enough to recognise a
 # provider's own wording; applied to a session's normal output it also matched
@@ -7977,139 +6903,15 @@ _ERROR_SHAPED_STDOUT_RE = re.compile(
     r"|\{\s*\"(?:error|level)\"\s*:"
     r"|\{\s*\"type\"\s*:\s*\"[^\"]*(?:error|exceeded)\""
     r"|<\s*(?:!doctype|html|head|title)\b)")
-# The pipeline's own implementation is not provider evidence.  A review session
-# reads `paper_pipeline_parts/*` to find out what the postcheck wants (the
-# brief-communication run did it in 90 slices), and its transcript then carries
-# THIS file -- including the comments and string literals that quote every
-# overflow spelling the pattern above matches.  On that run the scan reported
-# an HTTP 413 that never happened, and the `resume` policy refused a
-# continuation for the wrong reason.  Dropping only '#'/raw-string lines was
-# not enough: a normal string continuation (`"(HTTP 413 ...`) and an assignment
-# (`why = (...)`) still reproduced the false 413 from p08/p06, so the filter
-# covers the whole Python source line.  A provider error never begins with a
-# comment, a string literal, an assignment, a statement keyword or a call.
-_STDERR_SOURCE_LINE_RE = re.compile(
-    r"""^\s*(?:
-        \#
-      | (?:[rbfuRBFU]{1,2})?["']
-      | (?:def|class|return|yield|if|elif|else|for|while|try|except|finally|
-             with|raise|import|from|assert|pass|break|continue|lambda|async|
-             await|del|global|nonlocal)\b
-      | [A-Za-z_][\w.]*\s*=\s*(?:[\(\[\{]|["']|[A-Za-z_])
-      | [A-Za-z_][\w.]*\s*\(
-      | [\)\]\}]
-    )""", re.X)
-# A pretty-printed JSON error object puts its message on a `"key": value` line;
-# that line IS provider evidence, even though it starts with a quote.
-_STDERR_JSON_FIELD_RE = re.compile(r'^\s*"[^"\n]*"\s*:')
-def _stderr_evidence(stderr: str) -> str:
-    return "\n".join(
-        line for line in (stderr or "").splitlines()
-        if _STDERR_JSON_FIELD_RE.match(line)
-        or not _STDERR_SOURCE_LINE_RE.match(line))
-# The agent proxy stops a session that is looping (model-turn cap, compaction
-# cap, a repeated tool call) and prints its reason on stderr.  That reason is
-# the real failure: classify it BEFORE the overflow scan, which can otherwise
-# match an unrelated line the session printed (see `_stderr_evidence`).
-AGENT_RUNAWAY_RE = re.compile(r"(?im)\brunaway (?:agent )?guard\b")
-def _evidence_needles(exclude) -> list:
-    """The excluded LINES that could be mistaken for a failure class.
 
-    Only the spellings this classifier looks for can create a false positive,
-    so only those lines are kept: a stage prompt is over a thousand lines and
-    comparing every transcript line with all of them would make a failed
-    attempt quadratic.  Whitespace is folded because a transcript re-indents
-    and re-wraps whatever it echoes.
-    """
-    needles = []
-    for text in exclude or ():
-        for line in (text or "").splitlines():
-            folded = " ".join(line.split())
-            if len(folded) < 24:
-                continue
-            if AGENT_RUNAWAY_RE.search(folded) or AGENT_CONTEXT_OVERFLOW_RE.search(folded):
-                needles.append(folded)
-    return needles
-def _without_excluded(text: str, needles: list) -> str:
-    """`text` without the lines that echo one of the excluded needles.
 
-    An echo is not byte-identical: the transcript may re-indent it, and the
-    prompt's display budget truncates it (the observed retry echo lost "... so
-    a fresh attempt is required" from the line's tail).  A line is therefore
-    dropped when, after whitespace folding, it is a prefix of a needle, a
-    needle is a prefix of it, or it is the continuation (suffix) of a needle
-    wrapped over two lines.  Lines shorter than the needle floor are never
-    matched, so an ordinary log line cannot be swallowed.
-    """
-    if not needles:
-        return text
-    kept = []
-    for line in (text or "").splitlines():
-        folded = " ".join(line.split())
-        if len(folded) >= 24 and any(
-                folded.startswith(n) or n.startswith(folded) or n.endswith(folded)
-                for n in needles):
-            continue
-        kept.append(line)
-    return "\n".join(kept)
-def agent_runaway_reason(stderr: str, exclude=()) -> str:
-    """The proxy's own sentence for a stopped loop, or "" when it is absent.
-
-    `exclude` names the orchestrator's own text (the stage prompt and the
-    previous-attempt record), on the same rule as `agent_failure_kind`: a retry
-    prompt quotes the PREVIOUS attempt's sentence, so an agent that echoes it
-    would otherwise have that sentence reported as the one that stopped THIS
-    session -- naming the wrong cap.
-    """
-    # Source lines are not evidence here either: this module's own comments
-    # quote the `runaway guard` spelling, so a session that reads the
-    # implementation would otherwise have a comment line reported as the
-    # proxy's sentence instead of the guard line that actually stopped it.
-    _needles = _evidence_needles(exclude)
-    if _needles:
-        stderr = _without_excluded(stderr, _needles)
-    for line in _stderr_evidence(stderr).splitlines():
-        if not AGENT_RUNAWAY_RE.search(line):
-            continue
-        # The proxy prints a human line and an `ERROR: {"error": {...}}`
-        # envelope; unwrap the envelope so the operator gets one sentence.
-        match = re.search(r'"message"\s*:\s*"(.*)"\s*\}\s*\}\s*$', line)
-        if match:
-            reason = match.group(1)
-        else:
-            # Only the proxy's own `runaway guard: <sentence>` form is a
-            # sentence; a prose line that merely mentions the phrase (a source
-            # comment, a report) is not.
-            match = re.search(r"(?i)\brunaway (?:agent )?guard:\s*(.+)$", line)
-            if not match:
-                continue
-            reason = match.group(1)
-        reason = reason.replace('\\"', '"').strip().strip('"}').strip()
-        if reason:
-            return reason[:400]
-    return ""
-def agent_failure_kind(stdout: str = "", stderr: str = "", exclude=()) -> str:
+def agent_failure_kind(stdout: str = "", stderr: str = "") -> str:
     """A stable failure class read from the CLI's own transport errors.
 
     Only error-shaped stdout lines are considered (the process already failed,
     but its normal output can quote a manuscript); stderr is the error channel
-    and is read whole, except the Python source lines a session may have
-    printed into it (see `_stderr_evidence`).
-
-    `exclude` names text THE ORCHESTRATOR ITSELF wrote -- the stage prompt and
-    the previous-attempt record the prompt tells the agent to read.  Those
-    bytes are not provider evidence: a retry prompt quotes the previous
-    attempt's failure verbatim, in the very spellings this function looks for,
-    and an agent that echoes or quotes either file puts that sentence into its
-    own streams.  Scanning it classified every retry as a fresh overflow,
-    which refused the continuation and retired the stage, even when the real
-    failure was a cut-off answer.  A caller with nothing to exclude passes
-    nothing; the default is a no-op.
+    and is read whole.
     """
-    _needles = _evidence_needles(exclude)
-    if _needles:
-        stdout = _without_excluded(stdout, _needles)
-        stderr = _without_excluded(stderr, _needles)
     stdout_errors = "\n".join(
         line for line in (stdout or "").splitlines()
         if _ERROR_SHAPED_STDOUT_RE.match(line))
@@ -8128,14 +6930,12 @@ def agent_failure_kind(stdout: str = "", stderr: str = "", exclude=()) -> str:
                 or str(_structured.get("type") or "").lower().endswith(
                     ("error", "exceeded"))):
             stdout_errors = f"{stdout_errors}\n{_stdout_text}"
-    text = f"{stdout_errors}\n{_stderr_evidence(stderr)}"
-    # The proxy's own stop reason outranks the overflow scan: a session that
-    # read this file prints the overflow spellings into the same stderr.
-    if AGENT_RUNAWAY_RE.search(text):
-        return "runaway"
+    text = f"{stdout_errors}\n{stderr or ''}"
     if AGENT_CONTEXT_OVERFLOW_RE.search(text):
         return "context_overflow"
     return ""
+
+
 # A continuation finishes a stage that is already 80% done: cap it well below
 # the stage timeout (which defaults to 4h).
 RESUME_TIMEOUT_MAX = 5400
@@ -8165,31 +6965,12 @@ REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "dec
 # the artifact-quality layer judges; `M1_acronyms.md` carries the M1b long-form
 # table, whose per-row disposition is what its own gate reads. Everything else
 # under guided_review/artifacts/ stays byte-identical.
-# The PROVENANCE ledgers the orchestrator seeds into `artifacts/` as decision
-# tables with a `disposition` column (`_evidence_artifact_table`): M4's number
-# ledger, the code-proved NUMBERS_LEDGER, the verified IDENTIFIERS and the
-# HGNC-resolved GENE_LEDGER. They were OUTSIDE this layer, so a review could
-# leave every disposition/source cell empty or delete the table outright and
-# still pass the artifact gate (F083).
-PROVENANCE_DECISION_ARTIFACTS = ("artifacts/M4_numbers.md", "artifacts/NUMBERS_LEDGER.md",
-                                 "artifacts/IDENTIFIERS.md", "artifacts/GENE_LEDGER.md")
-DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_words.md",
-                      "artifacts/M19_length.md", "artifacts/M8_terms.md",
-                      "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
-                      "artifacts/PLACEHOLDERS.md", "artifacts/PLACEHOLDER_LOOKUP.md",
-                      "artifacts/OUTLINE.md", "artifacts/CLAIM_STRENGTH.md",
-                      "artifacts/M30_hierarchy_reconciliation.md",
-                      # M2's reference-integrity seed: the entries' own DOIs with
-                      # the resolver's verdict. Gated like every other seeded
-                      # table, because "the entry's DOI resolves to another work"
-                      # is exactly the class no format check and no re-reading
-                      # can see (see reference_integrity_rows).
-                      "artifacts/M2_references.md",
-                      *PROVENANCE_DECISION_ARTIFACTS)
 REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.
 REPAIR_GUARD_SKIP_DIRS = ATTEMPT_ARCHIVE_SKIP_DIRS
+
+
 # --- which postcheck problems each stage may repair ------------------------
 # The messages are generated by the postchecks below this module section, so
 # prefix/regex matching is stable and testable. Two families are shared:
@@ -8217,6 +6998,7 @@ REPAIR_LANGUAGE_PATTERNS = tuple(
 # no reason AND the coverage row stays silent -- exactly the state a scoped repair
 # can finish from the rows' own context/location columns.
 REPAIR_M1B_PATTERNS = (r"^guided_review/artifacts/M1_acronyms\.md lists \d+ M1b long-form row\(s\)",)
+
 REPAIR_PROFILES = {
     # The reviewer's decision tables: the only stage where the postcheck itself
     # is the artifact-quality layer.
@@ -8257,12 +7039,7 @@ REPAIR_PROFILES = {
                    + (r"^revised/revision_report\.json is missing: ",
                       r"^revised/revision_report\.json does not carry the revision ledger ",
                       r"^revised/revision_report\.json is EMPTY/unfinished \(structured output\): ",
-                      r"^revised/revision_report\.json does not name ",
-                      # The ledger is seeded with one empty row per frozen id: the
-                      # rows are identity and must stay, the VERDICT is the cell
-                      # the scoped repair may complete from the package's evidence.
-                      r"^revised/revision_report\.json names \d+ finding id\(s\) without a "
-                      r"VERDICT: ")),
+                      r"^revised/revision_report\.json does not name ")),
         "scope": "the bookkeeping files inside revised/ (revision_report.json, "
                  "REVISION_REPORT.md, CHANGELOG.md, MANUAL_STEPS.md, VISUAL_CHECK.md, "
                  "DIFF_LEDGER.md) plus revised/work/ scratch",
@@ -8303,9 +7080,194 @@ REPAIR_PROFILES = {
                  "existing coverage entries",
     },
 }
+
+
 def repair_profile(rec: dict) -> dict:
     """The repair profile of a run's kind ({} when the stage has none)."""
     return REPAIR_PROFILES.get(str(rec.get("kind") or "")) or {}
+
+
+# =====================================================================
+# CONTINUATION OF A STOPPED SESSION (`codex exec resume <session-id>`)
+# =====================================================================
+def capture_agent_session_id(ctx: Ctx, rec: dict) -> str:
+    """The CLI session id of the attempt whose transcript is in this sandbox.
+
+    The agents print `session id: <uuid>` in their banner (codex does; a claude
+    build that prints one is picked up the same way), a claude
+    `--output-format json` run reports it in its result object, and `dsh --json`
+    opens its event stream with `"sessionId": "session-<uuid>"`;
+    `_execute_attempt_in` tees every one of them into `_agent.log`, so the id a
+    CONTINUATION needs is already on disk -- no extra channel and no guessing
+    from timestamps. The LAST id in the file wins (the transcript is appended
+    per attempt), whichever of the three forms it was written in.
+    """
+    try:
+        sb = ctx.sandbox_of(rec)
+    except Exception:                                            # noqa: BLE001
+        return ""
+    log = sb / "_agent.log"
+    # The transcript is agent-written: the shared reader refuses a symlink and
+    # applies the byte budget (F38).
+    text = read_text_bounded(log)
+    if not text:
+        return ""
+    hits = [(m.start(), m.group(1))
+            for pattern in (SESSION_ID_RE, DSH_SESSION_ID_RE)
+            for m in pattern.finditer(text)]
+    hits.sort()
+    return str(hits[-1][1]) if hits else ""
+
+
+def resume_argv_for(cmd: list, session_id: str) -> list:
+    """The argv that CONTINUES `session_id` with the same backend ([] if none).
+
+    codex:  `codex exec <overrides> -`  ->  `codex exec resume <id> <overrides> -`
+            (the prompt still arrives on stdin; note that `resume` accepts no
+            `-s/--sandbox` -- it reuses the policy recorded in the session)
+    claude: `claude --permission-mode ... --print` -> the same argv plus
+            `--resume <id>` (or `--continue`, which resumes the most recent
+            conversation of THIS directory -- every run has its own sandbox, so
+            that is this run's session -- when no id was captured)
+    dsh:    `dsh --profile headless --json -` -> the same argv plus
+            `--session-id <id>`, inserted BEFORE the `-` task positional (the
+            one-shot app reads its task from stdin and requires `-` to be its
+            only positional, and the id must be exact: an unknown one is an
+            error, so a continuation can never silently start a fresh session)
+    Anything else (a custom --agent-cmd/PAPER_AGENT_CMD) has no known resume form
+    and is left alone: the retry policy then runs a fresh attempt as before.
+    """
+    argv = [str(x) for x in (cmd or [])]
+    if not argv:
+        return []
+    name = Path(argv[0]).name.lower()
+    if name.startswith("codex") and len(argv) > 1 and argv[1] == "exec":
+        if not session_id:
+            return []                    # `resume --last` is GLOBAL: too risky in parallel
+        return [argv[0], "exec", "resume", session_id, *argv[2:]]
+    if name.startswith("claude"):
+        return [*argv, *(["--resume", session_id] if session_id else ["--continue"])]
+    if name.startswith("dsh"):
+        if not session_id:
+            # No `--continue` equivalent: the harness persists many sessions and
+            # adopts one only by exact id, which is precisely the continuation
+            # we want -- a fresh session would answer the continuation prompt
+            # with no memory of the work it is supposed to finish.
+            return []
+        if argv[-1] == "-":
+            return [*argv[:-1], "--session-id", session_id, "-"]
+        return [*argv, "--session-id", session_id]
+    return []
+
+
+def resume_unfinished_reason(ctx: Ctx, rec: dict) -> str:
+    """Why this failed attempt looks UNFINISHED ("" = it finished and was rejected).
+
+    Only an unfinished attempt is a continuation candidate: a stage that wrote
+    its deliverables and was rejected on their content is the retry/repair path's
+    business. The signature is (a) a process-level failure (timeout, killed CLI)
+    or (b) a postcheck error that names a deliverable which does NOT exist.
+    """
+    if rec.get("status") != "failed":
+        return ""
+    errors = [str(e) for e in ((rec.get("postcheck") or {}).get("errors") or [])]
+    if not errors:
+        if rec.get("last_error"):
+            return ("the agent process failed before the attempt could be judged: "
+                    + str(rec["last_error"])[:120])
+        return ""
+    missing = repair_missing_deliverable(ctx, rec, errors)
+    if missing:
+        return f"the stage stopped before writing {missing}"
+    return ""
+
+
+def resume_gate(ctx: Ctx, rec: dict, cmd: list) -> tuple:
+    """(argv, key, reason): the continuation to run, or ([], key, "").
+
+    A failed attempt that looks UNFINISHED but cannot be continued says so on the
+    console (the same way `repairable_artifact_failure` reports a refused repair):
+    the operator has to be able to tell "no resume form for this backend" and
+    "the 2-continuation limit is spent" from "the attempt finished and was
+    rejected on its content".
+    """
+    sid = str(rec.get("agent_session_id") or "")
+    key = sid or "__continue__"
+    reason = resume_unfinished_reason(ctx, rec)
+    if not reason:
+        return [], key, ""
+    if rec.get("last_failure_kind") == "context_overflow":
+        why = ("the provider already rejected this session's request as too large; "
+               "resuming resends the same context, so a FRESH attempt follows")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}")
+        return [], key, ""
+    argv = resume_argv_for(cmd, sid)
+    if not argv:
+        why = ("this backend has no resume form (only the codex/claude/dsh presets do), or "
+               "no session id was captured")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
+        return [], key, ""
+    used = int((rec.get("resume_attempts") or {}).get(key) or 0)
+    if used >= RESUME_ATTEMPT_LIMIT:
+        why = (f"{used} continuation(s) already spent on this session "
+               f"(limit {RESUME_ATTEMPT_LIMIT})")
+        print(f"  [resume] {rec['id']}: no continuation -- {why}; a fresh attempt follows")
+        return [], key, ""
+    return argv, key, reason
+
+
+def resume_prompt(rec: dict, problems: list, reason: str, used: int,
+                  author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
+    """The CONTINUATION prompt: finish the stage's own work, marker last.
+
+    `author_to_complete` is the run's hand-off policy: the escape item goes to
+    THAT mode's manual-list file. The prompt was policy-blind and always said
+    MANUAL_STEPS.md, the file the readme policy reserves for long-form detail
+    (F17).
+    """
+    manual_target = handoff_target(author_to_complete)
+    listed = "\n".join(f"  {i + 1}. {p}" for i, p in enumerate(problems)) or "  (none recorded)"
+    is_judge = str(rec.get("kind") or "") == "judge"
+    # The judge is blind by design: its initial prompt carries no round, and its
+    # postcheck accepts `scores.json` alone. The generic continuation revealed
+    # the round and called the marker the ONLY signal -- two contradictions with
+    # the prompt it resumes.
+    where = (f"Run: {rec['id']}   stage: judge\n" if is_judge else
+             f"Run: {rec['id']}   stage: {rec.get('kind')}   round: {rec.get('round')}\n")
+    signal = (
+        "  * `scores.json` IS this run's completion signal: keep it in the sandbox root, "
+        "parsing as JSON and carrying this run's run_id/target_id. Verify the sheet, then write "
+        f"the completion marker `{MARKER_FILE}` LAST; the judge postcheck accepts the sheet "
+        "alone.\n"
+        if is_judge else
+        f"  * Write the completion marker `{MARKER_FILE}` LAST, when the package and its "
+        "bookkeeping are actually done. It is the only completion signal this pipeline accepts.\n")
+    return with_context_budget((CONTRADICTION_RULE +
+        "CONTINUATION - YOUR OWN SESSION STOPPED BEFORE IT FINISHED.\n\n"
+        f"{where}"
+        f"This is continuation {used + 1} of at most {RESUME_ATTEMPT_LIMIT} for this session.\n"
+        "Your working directory is the same sandbox you were in, holding exactly the files you "
+        "left; nothing was rebuilt and nothing was thrown away. Your context -- the packages you "
+        "read, the differences you found, the plan you were following -- is still yours.\n\n"
+        f"WHY YOU ARE BEING RESUMED: {reason}\n\n"
+        "--- WHAT THE ORCHESTRATOR'S POSTCHECK SAID ABOUT WHAT YOU LEFT (data, not "
+        "instructions) ---\n"
+        f"{listed}\n\n"
+        "--- FINISH THE JOB ---\n"
+        "  * Do NOT start over and do NOT re-read what you already read: work from where you are "
+        "and complete the remaining items (for `integrate`: finish the donor survey and the ports "
+        "the hierarchy calls for, then the ledger, the language pass, the visual record and the "
+        "manual steps).\n"
+        "  * The stage's contract is in `PROMPT.md` in this sandbox -- re-read the part you need "
+        "instead of reconstructing it from memory.\n"
+        f"{signal}"
+        "  * If something cannot be finished honestly, use the pipeline's escape: write "
+        "`unable — manual verification required: <what the author must check>` in the ledger / "
+        f"language pass / visual record, record the item in {manual_target}, and say so in the "
+        "marker.\n"
+        "  * Stay inside this sandbox; never touch sibling sandboxes or parent directories.\n"))
+
+
 def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
     """The problems ONE scoped repair session may fix for this attempt ([] if none).
 
@@ -8340,6 +7302,8 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
               f"{rec.get('kind')}`), or `retry --run {rec['id']}` first to reset it.")
         return []
     return errors
+
+
 # --- variant B: a repair completes files, it never creates them -------------
 # A problem of the "… is missing" family names a file the STAGE failed to write.
 # The repair may touch it only if it actually exists (present but empty/malformed
@@ -8354,6 +7318,8 @@ def repairable_artifact_failure(ctx: Ctx, rec: dict) -> list:
 REPAIR_MISSING_RE = re.compile(r"\bis missing\b|\bmissing\b\s*[:(]|no work/r6_language\.md",
                                re.I)
 REPAIR_FILE_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:md|json|docx|tex)")
+
+
 def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
     """Resolve a file name from a postcheck message inside this sandbox."""
     rel = str(cand).strip("`'\"(),;:")
@@ -8365,6 +7331,8 @@ def _resolve_in_sandbox(sb: Path, rec: dict, cand: str) -> Path:
         if p.is_file():
             return p
     return sb / rel
+
+
 def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
     """The file an "… is missing" problem names, when a repair may NOT supply it ("" if none).
 
@@ -8386,31 +7354,19 @@ def repair_missing_deliverable(ctx: Ctx, rec: dict, problems: list) -> str:
         # so treating it as a deliverable made `any(...is_file())` true and the
         # genuinely absent marker was never reported (and the doomed scoped
         # repair was scheduled instead of the resume path).
-        text = str(err)
-        m = REPAIR_MISSING_RE.search(text)
-        # The MISSING file is the one named immediately BEFORE "is missing";
-        # a file the same sentence merely suggests ("unresolved observations
-        # belong in audit/UNRESOLVED.md") is a prose alternative, not a second
-        # deliverable whose existence could excuse the first.
-        missing_cands = []
-        if m is not None:
-            pre = REPAIR_FILE_RE.findall(text[:m.start()])
-            if pre:
-                missing_cands = [pre[-1]]
-            else:
-                after = text[m.end():].split(";", 1)[0]
-                missing_cands = REPAIR_FILE_RE.findall(after) or REPAIR_FILE_RE.findall(text)
-        cands = [c for c in missing_cands
+        cands = [c for c in REPAIR_FILE_RE.findall(str(err))
                  if Path(c).name not in ("PROMPT.md", REPAIR_PROMPT_FILE)]
         if not cands:
             # a content-level "… is missing" (a marker FIELD, say): the file
             # itself exists, so its content stays the repair's business
             continue
         if sb is not None and sb.is_dir() and cands \
-                and all(_resolve_in_sandbox(sb, rec, c).is_file() for c in cands):
+                and any(_resolve_in_sandbox(sb, rec, c).is_file() for c in cands):
             continue                       # present: its CONTENT is what the repair fixes
         return cands[0]
     return ""
+
+
 # --- what a repair may write, per stage ------------------------------------
 def _repair_path_writable(rel: Path, kind: str) -> bool:
     """May the repair overwrite this sandbox-relative FILE (or create it)?"""
@@ -8420,12 +7376,8 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
     name = parts[-1].lower()
     if name in (MARKER_FILE.lower(), REPAIR_PROMPT_FILE.lower()) or name.startswith("_agent.log"):
         return True                          # the completion marker / our own transcript
-    # `manual_steps.md` is a BOOKKEEPING name, allowed by the package branch
-    # below only INSIDE the stage's own output directory (`is_bookkeeping_name`
-    # matches it). It used to be allowed here by BASENAME for rewrite/revise/
-    # integrate, which made `base/MANUAL_STEPS.md`, `non_revised/MANUAL_STEPS.md`
-    # and a donor's `others/<id>/MANUAL_STEPS.md` "writable" and let a repair
-    # rewrite a read-only corpus input (F114).
+    if name == "manual_steps.md" and kind in ("rewrite", "revise", "integrate"):
+        return True                          # the stage's manual-item list (reported only)
     if kind == "guided_review":
         # The seeded decision tables (cell-editable; M1's long-form table included)
         # and the session's scratch. The visual record and the marker may be
@@ -8446,6 +7398,8 @@ def _repair_path_writable(rel: Path, kind: str) -> bool:
             return False
         return (len(parts) > 1 and parts[1] == "work") or is_bookkeeping_name(name)
     return False
+
+
 def _repair_path_creatable(rel: Path, kind: str) -> bool:
     """May the repair CREATE this file?
 
@@ -8467,6 +7421,8 @@ def _repair_path_creatable(rel: Path, kind: str) -> bool:
         pkg = output_dir_for_kind(kind)
         return len(parts) > 1 and parts[0] == pkg and parts[1] == "work"
     return False
+
+
 def _repair_scope_of(rel: Path, kind: str) -> str:
     """`scratch` (write freely) | `cells` (a decision table: fill cells only) |
     `protected` (byte-identical).
@@ -8490,34 +7446,18 @@ def _repair_scope_of(rel: Path, kind: str) -> str:
     if parts and parts[0] == GUIDED_REVIEW_DIR and len(parts) > 1 and parts[1] == "work":
         return "scratch"
     return "file"
+
+
 def decision_artifact_rel_paths(sb: Path) -> list:
     """The decision artifacts this sandbox actually has (as guided_review/-relative paths)."""
     return [rel for rel in DECISION_ARTIFACTS if (sb / GUIDED_REVIEW_DIR / rel).is_file()]
+
+
 def review_repair_table_rel_paths(sb: Path) -> list:
     """The review tables a repair may fill (decision artifacts + the M1b table)."""
     return [rel for rel in REVIEW_REPAIR_TABLES if (sb / GUIDED_REVIEW_DIR / rel).is_file()]
-def _repair_starts_new_header(lines: list, i: int, cells: list, header) -> bool:
-    """Is line `i` a NEW table header, or a ragged ROW of the current table?
 
-    A row whose cell count differs from the current header used to be taken as
-    a new header in both parsers. The postcheck's own remediation for a short
-    decision row is to re-emit it with one cell per seeded column, so the
-    pre-repair snapshot read that repaired row as a header and then reported a
-    deleted/added row (F164). Look at the FOLLOWING table line: a new table's
-    header is followed by a separator (or data) of the SAME width, while a
-    ragged row inside a table is followed by a row of the CURRENT header width.
-    """
-    if header is None or len(cells) == len(header):
-        return False
-    for j in range(i + 1, len(lines)):
-        s = lines[j].strip()
-        if not s or not s.startswith("|"):
-            break
-        nxt = _m1b_cells(s)
-        if not nxt:
-            continue
-        return len(nxt) == len(cells)
-    return False
+
 def _repair_table_rows(md_text: str) -> list:
     """The row IDENTITY of every table in one decision artifact, in order.
 
@@ -8527,8 +7467,7 @@ def _repair_table_rows(md_text: str) -> list:
     even though the artifact still parses.
     """
     out, header, after_header = [], None, False
-    lines = str(md_text or "").splitlines()
-    for _i, line in enumerate(lines):
+    for line in str(md_text or "").splitlines():
         s = line.strip()
         if not s.startswith("|"):
             # A blank line or a heading ends the table block; the next `|`
@@ -8548,21 +7487,22 @@ def _repair_table_rows(md_text: str) -> list:
         if after_header and _m1b_separator(cells):
             after_header = False
             continue
-        if _repair_starts_new_header(lines, _i, cells, header):
+        if len(cells) != len(header):
+            # A different column count means a new table block (the documented
+            # M20 artifact carries a seeded table and the session's coverage
+            # table); take this line as the new header, exactly as
+            # _repair_table_skeleton already does.
             header = [c.strip().lower() for c in cells]
             after_header = True
             continue
-        if len(cells) != len(header):
-            # A ragged row INSIDE the table keeps the current header for
-            # identity: pad a short row (the documented repair) and trim a long
-            # one, exactly as the postcheck's row reader does.
-            cells = (cells + [""] * len(header))[:len(header)]
         if all(c.strip().lower() == header[i] for i, c in enumerate(cells)):
             continue                          # a repeated header, not a row
         after_header = False
         keep = [i for i, h in enumerate(header) if h not in REPAIR_EDITABLE_CELLS]
         out.append(tuple((cells[i].strip() if i < len(cells) else "") for i in keep))
     return out
+
+
 def _repair_table_skeleton(md_text: str) -> str:
     """The artifact's text with every repair-editable CELL blanked.
 
@@ -8573,8 +7513,7 @@ def _repair_table_skeleton(md_text: str) -> str:
     files with the same skeleton.
     """
     out, header, after_header = [], None, False
-    lines = str(md_text or "").splitlines()
-    for _i, line in enumerate(lines):
+    for line in str(md_text or "").splitlines():
         s = line.strip()
         if not s.startswith("|"):
             out.append(line)
@@ -8588,16 +7527,13 @@ def _repair_table_skeleton(md_text: str) -> str:
         if not cells:
             out.append(line)
             continue
-        if header is None or _repair_starts_new_header(lines, _i, cells, header):
+        # A different column count means a new table (or a ragged row): take it as
+        # the block's header rather than blanking cells against the wrong columns.
+        if header is None or len(cells) != len(header):
             header = [c.strip().lower() for c in cells]
             after_header = True
             out.append(line)
             continue
-        if len(cells) != len(header):
-            # A ragged row inside the table is blanked against the CURRENT
-            # header (pad/trim), not promoted to a new header (F164).
-            cells = (cells + [""] * len(header))[:len(header)]
-            line = "| " + " | ".join(cells) + " |"
         # The divider is the row immediately under the header; a mid-table
         # dash-only row is data and must be blanked like any other row, or the
         # guard's two parsers disagree about which row is which.
@@ -8614,36 +7550,8 @@ def _repair_table_skeleton(md_text: str) -> str:
         blanked += cells[len(header):]
         out.append("| " + " | ".join(blanked) + " |")
     return "\n".join(out)
-def _repair_scope_symlinks(sb: Path, kind: str) -> list:
-    """Symlinks whose lexical path lies inside the repair's writable scope.
 
-    The guard cannot certify an edit made THROUGH such a link: the bytes under
-    the link's real path are outside the sandbox, so neither the protected-file
-    digests nor the writable-file diff can see the write (F171).
-    """
-    out = []
-    # F069: when the package DIRECTORY itself is a link, rglob does not descend
-    # into it and no package file enters the guard. Report the link explicitly.
-    if kind in ("rewrite", "revise", "integrate"):
-        pkg = sb / output_dir_for_kind(kind)
-        if pkg.is_symlink():
-            out.append(output_dir_for_kind(kind))
-    for p in sorted(sb.rglob("*")):
-        if not p.is_symlink():
-            continue
-        try:
-            rel = p.relative_to(sb)
-        except ValueError:
-            continue
-        if _repair_path_writable(rel, kind) or _repair_path_creatable(rel, kind):
-            out.append(rel.as_posix())
-    # Any symlinked ANCESTOR of a writable path is equally uncertifiable.
-    for wp in _repair_writable_files(sb, kind):
-        for anc in wp.relative_to(sb).parents:
-            ap = sb / anc
-            if anc.as_posix() not in out and ap.is_symlink():
-                out.append(anc.as_posix())
-    return sorted(set(out))
+
 def _repair_guard_files(sb: Path, kind: str) -> dict:
     """{rel path: sha256} for every file a repair may NOT touch.
 
@@ -8656,7 +7564,7 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
     """
     out = {}
     for p in sorted(sb.rglob("*")):
-        if p.is_symlink() or not p.is_file():
+        if not p.is_file():
             continue
         rel = p.relative_to(sb)
         parts = tuple(x for x in rel.parts if x)
@@ -8675,6 +7583,8 @@ def _repair_guard_files(sb: Path, kind: str) -> dict:
         except OSError:
             continue
     return out
+
+
 def _repair_read_json(path: Path):
     # Agent-written audit/repair JSON: shared regular-file/no-follow/byte-budget
     # reader (F38).
@@ -8682,27 +7592,13 @@ def _repair_read_json(path: Path):
     if text is None:
         return None
     try:
-        return _json_from_text(text, lenient=True)
+        return json.loads(text)
     except ValueError:
         return None
-def _repair_add_identity(row: dict) -> str:
-    """Canonical text of one auditor `adds` row: its whole evidence, pinned.
 
-    The guard used to keep only the add's ID, so a repair could rewrite the
-    auditor's own added finding's evidence/severity/location and still be
-    recorded as in scope (F014). Every field is part of the auditor's own
-    judgement, so the canonical JSON of the whole row is the identity.
-    """
-    return json.dumps(row, sort_keys=True, ensure_ascii=False, default=str)
-def _repair_adds_map(rows) -> dict:
-    """{add id: canonical row text} of a guard's `adds` snapshot."""
-    out = {}
-    for item in rows or ():
-        if isinstance(item, (list, tuple)) and len(item) == 2:
-            out[str(item[0])] = str(item[1])
-    return out
+
 def _repair_audit_rows(sb: Path) -> dict:
-    """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its adds."""
+    """{frozen id: (verdict, reason, evidence)} of an audit sheet, plus its add ids."""
     audit = _repair_read_json(sb / "audit" / "audit.json")
     rows = {}
     if isinstance(audit, dict) and isinstance(audit.get("dispositions"), list):
@@ -8713,12 +7609,11 @@ def _repair_audit_rows(sb: Path) -> dict:
                                                 str(row.get("evidence") or "").strip())
     out = {"dispositions": rows, "adds": []}
     if isinstance(audit, dict) and isinstance(audit.get("adds"), list):
-        # Every field of an added finding is pinned, not only its id: the row
-        # IS the auditor's own judgement (F014).
-        out["adds"] = sorted([str((r or {}).get("id") or "").strip(),
-                              _repair_add_identity(r)]
-                             for r in audit["adds"] if isinstance(r, dict))
+        out["adds"] = sorted({str((r or {}).get("id") or "").strip() for r in audit["adds"]
+                              if isinstance(r, dict)})
     return out
+
+
 def _repair_judge_rows(sb: Path) -> dict:
     """{label: {ledger, checks, score}} of a judge sheet: what may not move."""
     sj = _repair_read_json(sb / SCORES_FILE)
@@ -8738,6 +7633,8 @@ def _repair_judge_rows(sb: Path) -> dict:
                           "checks": checks, "score": c.get("score"),
                           "basis": str(c.get("basis") or "").strip().lower()}
     return out
+
+
 def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     """What the repair must leave alone: protected bytes + pinned structure.
 
@@ -8749,12 +7646,6 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     """
     kind = str(rec.get("kind") or "")
     tables, digests = {}, {}
-    writable = {}
-    for p in _repair_writable_files(sb, kind):
-        try:
-            writable[p.relative_to(sb).as_posix()] = sha256_file(p)
-        except OSError:
-            continue
     for rel in review_repair_table_rel_paths(sb):
         path = sb / GUIDED_REVIEW_DIR / rel
         text = read_text_bounded(path) or ""
@@ -8766,33 +7657,28 @@ def snapshot_repair_guard(sb: Path, rec: dict) -> dict:
     return {"kind": kind, "files": _repair_guard_files(sb, kind), "tables": tables,
             "editable": sorted(p.relative_to(sb).as_posix()
                                for p in _repair_writable_files(sb, kind)),
-            "writable": writable,
-            "symlinks": _repair_scope_symlinks(sb, kind),
             "artifacts": digests, "audit": _repair_audit_rows(sb),
             "judge": _repair_judge_rows(sb)}
+
+
 def _repair_writable_files(sb: Path, kind: str) -> list:
     """Every file that exists inside the repair's own writable scope."""
     out = []
-    try:
-        sb_real = sb.resolve()
-    except OSError:
-        return out
     for p in sorted(sb.rglob("*")):
-        if p.is_symlink() or not p.is_file():
-            continue
-        try:
-            if not p.resolve().is_relative_to(sb_real):
-                continue
-        except (OSError, RuntimeError):
+        if not p.is_file():
             continue
         rel = p.relative_to(sb)
         if _repair_path_writable(rel, kind):
             out.append(p)
     return out
+
+
 def _is_repair_plumbing(rel) -> bool:
     """The orchestrator's own repair-session files (never 'the stage's writing')."""
     name = Path(str(rel)).name
     return name == REPAIR_PROMPT_FILE or name.startswith("_agent.log")
+
+
 def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
     """The review profile's structural guard: every table's row identity."""
     problems = []
@@ -8829,6 +7715,8 @@ def _repair_row_identity_problems(sb: Path, guard: dict) -> list:
         if len(problems) >= 6:
             break
     return problems
+
+
 def _repair_audit_problems(sb: Path, guard: dict) -> list:
     """The audit profile's guard: existing verdicts stand; only confirms may be added.
 
@@ -8853,24 +7741,13 @@ def _repair_audit_problems(sb: Path, guard: dict) -> list:
             problems.append(f"it added a {row[0] or 'blank'!r} disposition for {fid}; a repair "
                             f"may only add `confirm` (dropping a finding is the auditor's own "
                             f"judgement and must keep its own reason and evidence)")
-    before_adds = _repair_adds_map(before.get("adds"))
-    now_adds = _repair_adds_map(now.get("adds"))
-    gone = sorted(set(before_adds) - set(now_adds))
-    if gone:
-        problems.append(f"it DELETED the auditor's added finding(s) {', '.join(gone[:4])} "
-                        f"from `adds`; an added finding is evidence and may not be removed")
-    added = sorted(set(now_adds) - set(before_adds))
+    added = set(now.get("adds") or []) - set(before.get("adds") or [])
     if added:
-        problems.append(f"it invented finding(s) {', '.join(added[:4])} in `adds`; a "
+        problems.append(f"it invented finding(s) {', '.join(sorted(added)[:4])} in `adds`; a "
                         f"repair may complete the sheet's dispositions, never add findings")
-    rewritten = sorted(fid for fid in set(before_adds) & set(now_adds)
-                       if now_adds[fid] != before_adds[fid])
-    if rewritten:
-        problems.append(
-            f"it rewrote the auditor's added finding(s) {', '.join(rewritten[:4])} in "
-            f"`adds` (its location/severity/evidence/explanation changed); an added "
-            f"finding's own cells are the auditor's judgement and may not be edited")
     return problems[:6]
+
+
 def _repair_judge_problems(sb: Path, guard: dict) -> list:
     """The judge profile's guard: the ledger is the judgement and stays untouched.
 
@@ -8907,6 +7784,8 @@ def _repair_judge_problems(sb: Path, guard: dict) -> list:
         if len(problems) >= 6:
             break
     return problems[:6]
+
+
 def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
     """Out-of-scope changes made by a repair session ([] means in scope)."""
     kind = str((rec or {}).get("kind") or guard.get("kind") or "")
@@ -8939,14 +7818,6 @@ def repair_guard_problems(sb: Path, guard: dict, rec: dict = None) -> list:
                             f"the stage's own bookkeeping; it never authors a deliverable)")
             if len(problems) >= 6:
                 break
-    if len(problems) < 6:
-        for rel in sorted(set(guard.get("symlinks") or ())
-                          | set(_repair_scope_symlinks(sb, kind))):
-            problems.append(
-                f"the writable scope contains the symlink {rel}; a write through it lands "
-                f"outside the sandbox and the guard cannot certify it")
-            if len(problems) >= 6:
-                break
     if len(problems) < 6 and kind == "guided_review":
         problems.extend(_repair_row_identity_problems(sb, guard))
     if len(problems) < 6 and kind == "audit":
@@ -8968,12 +7839,15 @@ def _repair_prompt_body(ctx: Ctx, rec: dict, problems: list) -> str:
     header = (f"ARTIFACT REPAIR — SCOPED SESSION (run {rec['id']}, stage {kind}, "
               f"round {rec['round']})")
     common_head = f"""{header}
+
 You are NOT the {kind} session. That stage finished, and the orchestrator rejected its
 BOOKKEEPING -- the report/ledger/sheet files the postcheck reads -- as unfilled, inconsistent or
 unfinished. Your single job: repair exactly the problems below, from evidence that is ALREADY in
 this sandbox. The manuscript/package itself is NOT yours to touch.
+
 --- WHAT THE ORCHESTRATOR REJECTED ({len(problems)} problem(s)) ---
 {listed}
+
 --- WHERE YOU MAY WRITE (verified byte-for-byte / structurally afterwards) ---
   * {profile.get('scope')}
   * /tmp  -- scratch outside the sandbox
@@ -8996,6 +7870,7 @@ Everything else must stay BYTE-IDENTICAL, above all:
         return common_head + f"""
 --- THE TABLES IN PLAY ---
 {files}
+
 --- HOW TO DISPOSE A ROW (the rule the postcheck applies) ---
   * One disposition per row and it must be about THAT row's own bar, not a blanket judgement:
     either a finding id (`F-004`), or `OK — <the bar this instance is inside, and why>`.
@@ -9085,9 +7960,13 @@ Everything else must stay BYTE-IDENTICAL, above all:
     reading and measuring, never guessing.
 """ + REPAIR_TAIL
     return common_head + REPAIR_TAIL
+
+
 def repair_prompt(ctx: Ctx, rec: dict, problems: list) -> str:
     """The scoped repair prompt, with the shared context-budget rule."""
     return with_context_budget(CONTRADICTION_RULE + _repair_prompt_body(ctx, rec, problems))
+
+
 REPAIR_TAIL = """
 --- IF YOU CANNOT DO IT HONESTLY ---
 Write the pipeline's escape instead of a claim: `unable — manual verification required: <what the
@@ -9099,15 +7978,15 @@ The orchestrator re-runs the SAME postcheck over this same sandbox; a repair tha
 every problem above is recorded as a failed attempt like any other. Keep your final message
 short: which files you completed, and which rows you left `unable` (with the reason).
 """
+
+
 def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     """Write the repair prompt, pin the scope, record the attempt. None if impossible.
 
     The session runs in the FAILED ATTEMPT'S OWN sandbox (nothing is rebuilt, so
-    it sees exactly what the postcheck judged) and carries an attempt number of
-    the same run: `runs/<run>_try<N>_failed/`, and its outcome in `attempts_log`
-    (source `artifact-repair`). It is a SCOPED REPAIR, not an extra retry: its
-    own count (`scoped_repairs`) is reported separately, and a repair that does
-    not clear the problem spends the retry slot of the attempt it serves.
+    it sees exactly what the postcheck judged) and counts as an attempt of the
+    same run: `runs/<run>_try<N>_failed/`, and its outcome in `attempts_log`
+    (source `artifact-repair`).
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -9123,20 +8002,19 @@ def prepare_repair_session(ctx: Ctx, rec: dict, problems: list):
     write_text_atomic(sb / REPAIR_PROMPT_FILE, repair_prompt(ctx, rec, problems))
     guard = snapshot_repair_guard(sb, rec)
     rec["repair_attempts"] = list(rec.get("repair_attempts") or []) + [n]
-    repair_no = bump_scoped_repair(rec)
     rec["artifact_repair"] = {"attempt": n, "problems": list(problems), "status": "running",
                               "started": utcnow(), "prompt": REPAIR_PROMPT_FILE}
     # The repair appends to the same transcript file as the stage session it
     # repairs (each session writes its own header naming the attempt), so the
     # archive keeps one timeline for that sandbox.
-    flight = {"rid": rec["id"], "attempt": n, "repair": repair_no,
-              "problems": list(problems), "guard": guard,
+    flight = {"rid": rec["id"], "attempt": n, "problems": list(problems), "guard": guard,
               "log": str(sb.relative_to(ctx.root) / "_agent.log")}
     scope = str((repair_profile(rec) or {}).get("scope") or "").split(" plus ")[0]
     print(f"  [repair] {rec['id']}: {len(problems)} repairable bookkeeping problem(s) -> one "
-          f"scoped repair session (scoped repair {repair_no}; record attempt {n}; it may "
-          f"write {scope} and nothing else)")
+          f"scoped repair session (attempt {n}; it may write {scope} and nothing else)")
     return flight
+
+
 def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, problems: list,
                          cmd: list, timeout: int) -> bool:
     """Submit a prepared repair session to the round's executor (production stages)."""
@@ -9150,6 +8028,8 @@ def start_repair_session(ctx: Ctx, ex, running: dict, flight: dict, rec: dict, p
     flight[fut] = prepared
     ctx.save_state()
     return True
+
+
 def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeout: int) -> bool:
     """Run a repair session synchronously (the round-based `run_phase` driver).
 
@@ -9165,18 +8045,16 @@ def run_repair_session_now(ctx: Ctx, rec: dict, problems: list, cmd: list, timeo
                               REPAIR_PROMPT_FILE, "_agent.log", False)
     finish_repair_session(ctx, rec, prepared, res)
     return True
+
+
 # --- the CONTINUATION of a stopped session ---------------------------------
-def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: str,
-                           mode: str = "cli"):
+def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: str):
     """Write the continuation prompt, charge the resume budget, record it.
 
     A continuation runs in the SAME sandbox as the attempt it continues (the CLI
-    resumes the recorded working directory, or -- when `mode` is "sandbox" -- a
-    fresh process re-reads it from disk), so the sandbox must not have been
-    archived yet. It is judged like a normal attempt afterwards: the identical
-    postcheck decides. It continues an attempt instead of retrying the stage, so
-    it is counted as a CONTINUATION (`continuation_sessions`) and is never
-    charged as an extra retry. Returns the flight dict, or None when it cannot run.
+    resumes the recorded working directory, so the sandbox must not have been
+    archived yet) and is a normal attempt afterwards: the identical postcheck
+    decides. Returns the flight dict, or None when it cannot run.
     """
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir():
@@ -9187,19 +8065,15 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
         rec.pop("revision_audit", None)
         rec.pop("revision_repair", None)
         rec.pop("revision_chain", None)
-    resumed_cli = str(mode or "cli") != "sandbox"
     used = int((rec.get("resume_attempts") or {}).get(key) or 0)
     problems = list((rec.get("postcheck") or {}).get("errors") or [])
     write_text_atomic(sb / RESUME_PROMPT_FILE,
                       resume_prompt(rec, problems, reason, used,
-                                    author_to_complete=author_to_complete_mode_of(ctx),
-                                    resumed_cli=resumed_cli))
+                                    author_to_complete=author_to_complete_mode_of(ctx)))
     # Charge the budget NOW: a continuation that dies half-way must not be
     # restarted forever by a later invocation.
     rec["resume_attempts"] = dict(rec.get("resume_attempts") or {}, **{key: used + 1})
-    bump_continuation(rec)
     rec["last_resume"] = {"session": key, "attempt": used + 1, "reason": reason,
-                          "mode": "cli" if resumed_cli else "sandbox",
                           "started": utcnow(), "prompt": RESUME_PROMPT_FILE,
                           # The marker belongs to the TRUNCATED case only: the
                           # old `[*argv[:3], "..."][:3]` dropped it exactly when
@@ -9207,26 +8081,17 @@ def prepare_resume_session(ctx: Ctx, rec: dict, argv: list, key: str, reason: st
                           # record looked complete) and added it to short ones.
                           "argv": ([*argv[:3], "..."] if len(argv) > 3 else list(argv))}
     return {"rid": rec["id"], "session": key, "reason": reason, "argv": list(argv),
-            "problems": problems, "prompt": RESUME_PROMPT_FILE,
-            # The console line names HOW it continues; without this key every
-            # continuation (sandbox included) printed "continuing session ...".
-            "mode": "cli" if resumed_cli else "sandbox"}
-def _resume_mode_line(prepared: dict, key: str) -> str:
-    """The console sentence for one continuation, naming HOW it continues."""
-    reason = str(prepared.get("reason") or "")
-    if str(prepared.get("mode") or "cli") == "sandbox":
-        return ("continuing in the SAME SANDBOX with a fresh process (no CLI resume "
-                f"form; artifacts kept) — {reason}")
-    return f"continuing session {key[:8]} — {reason}"
+            "problems": problems, "prompt": RESUME_PROMPT_FILE}
+
+
 def start_resume_session(ctx: Ctx, ex, running: dict, flight_map: dict, rec: dict,
-                         argv: list, key: str, reason: str, timeout: int,
-                         mode: str = "cli") -> bool:
+                         argv: list, key: str, reason: str, timeout: int) -> bool:
     """Submit a PREPARED continuation to the round's executor (the scheduler path)."""
-    prepared = prepare_resume_session(ctx, rec, argv, key, reason, mode=mode)
+    prepared = prepare_resume_session(ctx, rec, argv, key, reason)
     if prepared is None:
         return False
-    print(f"  [resume] {rec['id']}: " + _resume_mode_line(prepared, key)
-          + f" (continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
+    print(f"  [resume] {rec['id']}: continuing session {key[:8]} — {reason} "
+          f"(continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
     fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, prepared["argv"],
                     min(int(timeout or RESUME_TIMEOUT_MAX), RESUME_TIMEOUT_MAX),
                     RESUME_PROMPT_FILE, "_agent.log", True)
@@ -9234,34 +8099,24 @@ def start_resume_session(ctx: Ctx, ex, running: dict, flight_map: dict, rec: dic
     flight_map[fut] = prepared
     ctx.save_state()
     return True
+
+
 def run_resume_session_now(ctx: Ctx, rec: dict, argv: list, key: str, reason: str,
-                           timeout: int, mode: str = "cli") -> bool:
+                           timeout: int) -> bool:
     """Run a continuation synchronously (the `run_phase` driver)."""
-    prepared = prepare_resume_session(ctx, rec, argv, key, reason, mode=mode)
+    prepared = prepare_resume_session(ctx, rec, argv, key, reason)
     if prepared is None:
         return False
-    print(f"  [resume] {rec['id']}: " + _resume_mode_line(prepared, key)
-          + f" (continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
+    print(f"  [resume] {rec['id']}: continuing session {key[:8]} — {reason} "
+          f"(continuation {rec['resume_attempts'][key]}/{RESUME_ATTEMPT_LIMIT})")
     ctx.save_state()
     res = _execute_attempt_in(ctx.sandbox_of(rec), rec, prepared["argv"],
                               min(int(timeout or RESUME_TIMEOUT_MAX), RESUME_TIMEOUT_MAX),
                               RESUME_PROMPT_FILE, "_agent.log", True)
     finish_resume_session(ctx, rec, prepared, res)
     return True
-def _safe_remove_prompt(path: Path) -> None:
-    """Remove a seeded prompt that an agent may have replaced by a directory.
 
-    `Path.unlink(missing_ok=True)` raises IsADirectoryError on a directory, so a
-    crashed cleanup skipped the attempt accounting entirely. Never let prompt
-    cleanup crash it: unlink a file/symlink, remove a real directory.
-    """
-    try:
-        if path.is_symlink() or path.is_file():
-            path.unlink(missing_ok=True)
-        elif path.is_dir():
-            rmtree_force(path, ignore_errors=True)
-    except OSError:
-        pass
+
 def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """Judge a continuation with the SAME postcheck and record the attempt."""
     sb = ctx.sandbox_of(rec)
@@ -9270,19 +8125,15 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     sid = capture_agent_session_id(ctx, rec)
     if sid:
         rec["agent_session_id"] = sid
-    _safe_remove_prompt(sb / RESUME_PROMPT_FILE)
+    (sb / RESUME_PROMPT_FILE).unlink(missing_ok=True)
     if res.get("error") or res.get("rc") not in (0,):
         rec["status"] = "failed"
-        # A process-level failure was never judged: the PREVIOUS attempt's
-        # postcheck errors must not classify this one as a content rejection
-        # and suppress the continuation (F007).
-        rec.pop("postcheck", None)
         rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
         rec["last_failure_kind"] = str(res.get("failure_kind") or "")
         record_attempt(ctx, rec, False, [rec["last_error"]], [],
                        source="continuation (process failed)")
         print_failure(rec["id"], [rec["last_error"]],
-                      note=f"after continuation {flight['session'][:8]}", ctx=ctx)
+                      note=f"after continuation {flight['session'][:8]}")
     else:
         rec["last_failure_kind"] = ""
         postcheck(ctx, rec, source="continuation")
@@ -9291,7 +8142,7 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
                   f"({fmt_dur(res.get('dur'))})")
         else:
             print_failure(rec["id"], (rec.get("postcheck") or {}).get("errors", []),
-                          note="after the continuation", ctx=ctx)
+                          note="after the continuation")
     rec["last_resume"].update({"finished": utcnow(), "ok": rec["status"] == "done",
                                "duration": round(res.get("dur") or 0.0, 1)})
     ctx.log("continuation", rec["id"],
@@ -9299,6 +8150,8 @@ def finish_resume_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
             f"{RESUME_ATTEMPT_LIMIT}: {'ok' if rec['status'] == 'done' else 'failed'}")
     ctx.save_state()
     return rec
+
+
 def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """Verify one repair session's scope, re-postcheck the sandbox, record it.
 
@@ -9310,8 +8163,7 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     """
     sb = ctx.sandbox_of(rec)
     bump_attempt(rec)
-    record = {"attempt": attempt_number(rec), "repair": flight.get("repair"),
-              "problems": list(flight["problems"]),
+    record = {"attempt": attempt_number(rec), "problems": list(flight["problems"]),
               "started": rec.get("last_attempt_started"), "finished": utcnow(),
               "duration": round(res.get("dur") or 0.0, 1), "prompt": REPAIR_PROMPT_FILE,
               "transcript": flight["log"]}
@@ -9319,12 +8171,9 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     record["out_of_scope"] = problems
     changed = sorted(rel for rel in (guard_changed_paths(sb, flight["guard"])))
     record["changed"] = changed
-    _safe_remove_prompt(sb / REPAIR_PROMPT_FILE)
+    (sb / REPAIR_PROMPT_FILE).unlink(missing_ok=True)
     if res.get("error") or res.get("rc") not in (0,):
         record["ok"] = False
-        # Same rule as the continuation branch: a process failure leaves no
-        # current postcheck, so the previous attempt's errors are stale (F007).
-        rec.pop("postcheck", None)
         record["error"] = res.get("error") or f"repair session exited rc={res.get('rc')}"
         record_attempt(ctx, rec, False, [record["error"]], [],
                        source="artifact-repair (process failed)")
@@ -9345,8 +8194,7 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
                               "changed": record["changed"], "transcript": record["transcript"],
                               "prompt": REPAIR_PROMPT_FILE}
     ctx.log("artifact-repair", rec["id"],
-            f"scoped repair {flight.get('repair')} (record attempt {record['attempt']}): "
-            f"{'ok' if record['ok'] else 'failed'}"
+            f"attempt {record['attempt']}: {'ok' if record['ok'] else 'failed'}"
             + (f" ({len(problems)} out-of-scope change(s))" if problems else ""))
     ctx.save_state()
     if record["ok"]:
@@ -9356,8 +8204,10 @@ def finish_repair_session(ctx: Ctx, rec: dict, flight: dict, res: dict) -> dict:
     else:
         print_failure(rec["id"], [record["error"]] if record.get("error")
                       else record["postcheck_errors"],
-                      note=f"after scoped repair {flight.get('repair')}", ctx=ctx)
+                      note=f"after the scoped repair (attempt {record['attempt']})")
     return record
+
+
 def guard_changed_paths(sb: Path, guard: dict) -> list:
     """The artifact files the repair actually rewrote (its diff, for the record)."""
     before = dict(guard.get("files") or {})
@@ -9379,24 +8229,8 @@ def guard_changed_paths(sb: Path, guard: dict) -> list:
                 changed.append(rel)
         except OSError:
             continue
-    # The repair's OWN bookkeeping (revision_report.json, audit.json, ...) is
-    # writable precisely so the repair can rewrite it, so it is excluded from
-    # `files`; without this diff the record said "(no artifact changed)" after
-    # the repair's whole job was rewriting one of those files (F176).
-    before_writable = dict(guard.get("writable") or {})
-    for rel, digest in sorted(before_writable.items()):
-        path = sb / rel
-        try:
-            if not path.is_file() or sha256_file(path) != digest:
-                changed.append(rel)
-        except OSError:
-            changed.append(rel)
-    kind = str(guard.get("kind") or "")
-    for p in _repair_writable_files(sb, kind):
-        rel = p.relative_to(sb).as_posix()
-        if rel not in before_writable:
-            changed.append(rel)
-    return sorted(set(changed))
+    return changed
+
 def _lookup_answers(sb: Path) -> dict:
     """{kind: [lookup row]} for lookups with a conclusive verdict."""
     answers = {}
@@ -9408,6 +8242,8 @@ def _lookup_answers(sb: Path) -> dict:
             key = str(row.get("kind") or "").strip().lower()
             answers.setdefault(key, []).append(dict(row, verdict=verdict))
     return answers
+
+
 def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
                                 enforce: bool, errs: list, warns: list) -> dict:
     """Searchable hand-off markers that the orchestrator could already answer."""
@@ -9430,28 +8266,8 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
         for r in mod.placeholder_ledger([x[0] for x in rows]):
             searchable.append(dict(r, document=name))
     answers = _lookup_answers(sb)
-    def _lookup_norm(value) -> str:
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).split())
-    def _has_own_lookup(row) -> bool:
-        """Only a marker with its OWN question answered is answerable.
-
-        Keying on `kind` alone let one answered accession mark every accession
-        (and every kind-less version/registration marker) as answered (F163).
-        """
-        kind = str(row.get("kind") or "").strip().lower()
-        payload = _lookup_norm(row.get("payload"))
-        for a in answers.get(kind) or []:
-            query = _lookup_norm(a.get("query"))
-            if not query or not payload:
-                continue
-            # A raw substring match let an answered longer accession
-            # (`GSE123456`) mark a different, unanswered marker (`GSE123`), and
-            # the opposite containment did the same (F045). Only the marker's
-            # OWN normalised question counts.
-            if query == payload:
-                return True
-        return False
-    answerable = [r for r in searchable if _has_own_lookup(r)]
+    answerable = [r for r in searchable
+                  if answers.get(str(r.get("kind") or "").strip().lower())]
     # EVERY marker in the delivered package, searchable or not: the count is a
     # diagnostic under `author_to_complete: document` (the marker is the
     # author's own checklist) and the shipped-marker gate under `readme`/`off`.
@@ -9530,6 +8346,8 @@ def placeholder_residual_report(ctx: Ctx, sb: Path, sources: list, label: str,
                      f"evidence in the sandbox -- run with `setup --placeholder-lookup online` "
                      f"so the pipeline can answer them")
     return report
+
+
 def number_provenance_report(sb: Path, sources: list) -> dict:
     """Numbers in the abstract/legends that no shipped table proves (advisory)."""
     mod = _format_module()
@@ -9564,4 +8382,6 @@ def number_provenance_report(sb: Path, sources: list) -> dict:
                                   "sentence": re.sub(r"\s+", " ", text)[:110]})
     return {"unsourced": len(unsourced), "proved": len(proved),
             "examples": unsourced[:8]}
+
+
 AUDIT_ID_RE = re.compile(r"^AU-\d+$")

@@ -879,6 +879,11 @@ def test_template_stage_tracking_is_sibling_first():
     # run path BACKFILLS the copies instead of leaving the stage untracked.
     ctx.state["template_stage"] = {"ok": True, "dir": "template_rewrite/out",
                                    "digest": "d", "agent": "manual"}
+    # The legacy template fixture now owes its mandatory independent audit;
+    # tracking itself remains deterministic and never starts an LLM session.
+    nb.write_json_atomic(sb / "CONFORM_CONTEXT.json", nb.conform_context(ctx, ctx.pristine))
+    nb.audit_write_output(sb, {"id": "template_rewrite", "kind": "template-rewrite"},
+                          [sys.executable, str(WS / ".paper_test" / "stub_agent.py")], 60)
     nb._ensure_template_stage_for_run(ctx, types.SimpleNamespace())
     check("an already-recorded stage is backfilled BESIDE its out/ documents",
           (out / "manuscript-a.tracking-original.docx").is_file(),

@@ -219,22 +219,22 @@ def test_pipeline_fixes():
     (src / "ms.md").write_text("Abstract\n\nA short abstract.\n", encoding="utf-8")
     proc = run([WS / "paper_pipeline.py", "setup", "--source", src, "--root", root,
                 "--rounds", "1", "--rewrites", "0", "--revises", "1", "--judges", "1",
-                "--revision-audit", "off"])
+                "--revision-audit", "on"])
     check("F13 the setup root is created", proc.returncode == 0, proc.stderr[-300:])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
-    check("F13 an explicit revision_audit=off is stored", cfg.get("revision_audit") == "off")
+    check("F13 the mandatory revision_audit=on is stored", cfg.get("revision_audit") == "on")
     proc = run([WS / "paper_pipeline.py", "set-revision-mode", "--root", root, "major",
                 "--force"])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("F59 a scoped mode turns the probe off",
           proc.returncode == 0 and cfg.get("cold_start_review") == "off"
-          and cfg.get("revision_audit") == "off",
+          and cfg.get("revision_audit") == "on",
           json.dumps({k: cfg.get(k) for k in ("cold_start_review", "revision_audit")}))
     proc = run([WS / "paper_pipeline.py", "set-revision-mode", "--root", root, "continue",
                 "--force"])
     cfg = json.loads((root / "pipeline_config.json").read_text(encoding="utf-8"))
     check("F13/F59 leaving a scoped mode restores the operator's audit and probe policies",
-          proc.returncode == 0 and cfg.get("revision_audit") == "off"
+          proc.returncode == 0 and cfg.get("revision_audit") == "on"
           and cfg.get("cold_start_review") == "on",
           json.dumps({k: cfg.get(k) for k in ("cold_start_review", "revision_audit")}))
     state = json.loads((root / "state.json").read_text(encoding="utf-8"))

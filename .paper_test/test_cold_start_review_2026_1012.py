@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from write_quality_fixture_lib import audit_fixture
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_probe", str(WS / "paper_pipeline.py"))
@@ -106,11 +107,13 @@ def build_root(tmp: Path, probe: str = "on", audit: str = "off", review_rows=(),
     shutil.copytree(pristine, root / "runs" / a1 / "base")
     rec = ctx.register(a1, "a1", 1, f"runs/{a1}", source_id=nb.ORIGINAL_ID)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, "a1")
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, "a1")
     if review_rows is not None:
         rev = ctx.register(nb.rid_guided_review(1), "review", 1, f"runs/{nb.rid_guided_review(1)}")
         rev["status"] = "done"
+        audit_fixture(nb, ctx, rev)
         rsb = ctx.sandbox_of(rev)
         write(rsb / "guided_review" / "findings.json",
               {"submission_dir": "./base", "findings": [], "coverage": []})
@@ -126,6 +129,7 @@ def build_root(tmp: Path, probe: str = "on", audit: str = "off", review_rows=(),
         r = ctx.register(rid, nb.arm_of_vid(vid), 1, f"runs/{rid}", source_id="a1",
                          produces=vid)
         r["status"] = "done"
+        audit_fixture(nb, ctx, r)
         r["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, vid)
         r["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, vid)
     return ctx

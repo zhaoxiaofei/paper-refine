@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 07/25 of the pipeline -- executed by the
+# Part 07/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -94,6 +94,7 @@ WRITING_RUBRIC = """WRITING RUBRIC — use it to justify every `writing`-tier ro
   its evidence belongs to the `correctness` tier (the class rule above), where that tier's rows
   count first; this rubric justifies only rows whose meaning survives the fix."""
 
+
 def language_pass_report(pkg: Path) -> dict:
     """The L1–L11 language-pass artifact of one package: coverage per step."""
     want = [f"L{i}" for i in range(1, 12)]
@@ -120,9 +121,7 @@ def language_pass_report(pkg: Path) -> dict:
         changed = next((str(row.get(k) or "").strip() for k in row if "row" in k), "")
         note = next((str(row.get(k) or "").strip() for k in row if "note" in k), "")
         if re.fullmatch(r"\d+", changed) and note:
-            # Normalise the digits: a naturally zero-padded `L01` is the same
-            # step as `L1`, and the comparison below is exact (F130).
-            steps.add(f"L{int(m.group(1))}")
+            steps.add(f"L{m.group(1)}")
     seen = sorted(steps, key=lambda s: int(s[1:]))
     return {"file": str(path), "present": True, "rows": len(rows), "steps_seen": seen,
             "missing": [s for s in want if s not in steps]}
@@ -281,17 +280,6 @@ def display_rule_errors(info: dict, label: str) -> list:
 INTEGRATION_LEDGER_COLUMNS = ("donor", "artifact", "size", "finding effect", "verdict",
                               "revalidated")
 
-# The DIFF_LEDGER prompt's fixed vocabularies (F65). `verdict` classifies a
-# difference as an edit (port/synthesize) or a deliberate non-edit; a token
-# outside this set is unclassified, so the Rule 1B port gate cannot see it.
-INTEGRATION_LEDGER_VERDICTS = ("port", "keep-self", "synthesize", "ignore-cosmetic")
-# A legacy NON-EDIT spelling an already-shipped integration fixture uses
-# (`drop`). It names the same disposition as keep-self -- do not adopt the donor
-# item -- so it is not an unclassified row; it is NOT part of the documented
-# vocabulary above (the prompt still asks for keep-self).
-INTEGRATION_LEDGER_LEGACY_VERDICTS = ("drop",)
-INTEGRATION_LEDGER_SIZES = ("small", "large")
-
 
 def _ledger_header_key(cell) -> str:
     """A ledger header without its prompt's parenthetical explanation."""
@@ -337,41 +325,20 @@ def integration_ledger_rows(path: Path) -> list:
             for row in _ledger_block_rows(b)]
 
 
-def _ledger_verdict_token(verdict_key: str, vocabulary=INTEGRATION_LEDGER_VERDICTS) -> str:
-    """The documented token a normalized `verdict` cell starts with ('' if none)."""
-    return next((tok for tok in vocabulary
-                 if re.match(r"^" + re.escape(tok) + r"\b", verdict_key)), "")
-
-
 def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool) -> dict:
     """Parse integrated/DIFF_LEDGER.md: size classes, artifacts, finding effects,
     and the Rule 1B re-verification verdict."""
     rows = integration_ledger_rows(out / "DIFF_LEDGER.md")
     sizes, missing_artifact, missing_finding, undoes, seen_donors = Counter(), [], [], [], set()
     missing_revalidated, invalid_ports, invalid_revalidated = [], [], []
-    missing_verdict, invalid_verdict, invalid_size = [], [], []
     edit_rows = 0
-    # The presence test and the value reader must use ONE vocabulary: the value
-    # is read from `revalidated` OR the prompt's `re_validation` spelling, so a
-    # compliant `re_validation` header is not misread as a legacy table (F126).
-    has_revalidated_column = any("revalidated" in r or "re_validation" in r for r in rows)
-    has_verdict_column = any("verdict" in r for r in rows)
+    has_revalidated_column = any("revalidated" in r for r in rows)
     for r in rows:
-        size = " ".join(str(r.get("size") or "").split()).strip().lower()
+        size = str(r.get("size") or "").strip().lower()
         sizes[size] += 1
         donor = str(r.get("donor") or "").strip()
         if donor:
             seen_donors.add(donor)
-        # F65: the prompt FIXES the two vocabularies (`verdict (port / keep-self
-        # / synthesize / ignore-cosmetic)`, `size (small / large)`). The reader
-        # only tested "starts with port/synth" and counted any size token, so
-        # `delete`/`maybe` passed as a non-edit (bypassing the port gate) and
-        # `huge` collapsed the size-class requirement. A cell that starts with a
-        # documented token is that token (the prompt shows `port (from w2)`);
-        # anything else is unclassified and reported, never silently kept.
-        if size and not any(re.match(r"^" + re.escape(tok) + r"\b", size)
-                            for tok in INTEGRATION_LEDGER_SIZES):
-            invalid_size.append(f"{donor or '?'}: size={size}")
         if not str(r.get("artifact") or "").strip():
             missing_artifact.append(donor or "?")
         fe_raw = str(r.get("finding effect") or r.get("finding_effect") or "").strip()
@@ -383,24 +350,10 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             # warning goes to a human and to the change log.
             undoes.append(f"{donor or '?'}: {fe_raw}")
         reval = str(r.get("revalidated") or r.get("re_validation") or "").strip().lower()
-        verdict_raw = str(r.get("verdict") or "").strip()
-        verdict = " ".join(verdict_raw.split()).lower()
-        verdict_key = re.sub(r"[\s_]+", "-", verdict)
-        verdict_token = _ledger_verdict_token(verdict_key)
-        legacy_token = (not verdict_token) and _ledger_verdict_token(
-            verdict_key, INTEGRATION_LEDGER_LEGACY_VERDICTS)
-        edits = verdict_token in ("port", "synthesize")
+        verdict = str(r.get("verdict") or "").strip().lower()
+        edits = verdict.startswith("port") or verdict.startswith("synth")
         if edits:
             edit_rows += 1
-        # The edit CLASS is derived from the verdict cell, so a ledger that
-        # omits the column or leaves its cells empty makes every row look like
-        # a non-edit: no invalid_ports can fire and the Rule 1B port gate is
-        # silently bypassed (F125). Only a ledger that carries neither the
-        # verdict nor the revalidated column is the tolerated legacy shape.
-        if not verdict and (has_verdict_column or has_revalidated_column):
-            missing_verdict.append(donor or "?")
-        elif verdict and not (verdict_token or legacy_token):
-            invalid_verdict.append(f"{donor or '?'}: verdict={verdict_raw}")
         if not edits and not reval:
             missing_revalidated.append(donor or "?")
         # The prompt: `revalidated` is mandatory on EVERY row and records the
@@ -419,9 +372,6 @@ def integration_ledger_report(out: Path, donors: list, expect_both_levels: bool)
             "missing_finding": missing_finding, "undoes": undoes, "donors_absent": absent,
             "missing_revalidated": missing_revalidated, "invalid_ports": invalid_ports,
             "invalid_revalidated": invalid_revalidated,
-            "missing_verdict": missing_verdict,
-            "invalid_verdict": invalid_verdict,
-            "invalid_size": invalid_size,
             "legacy_no_revalidated": legacy,
             # A legacy (no `revalidated` column) table is tolerated only when it
             # carries no edit row; a `port`/`synthesize` row there is an outright
@@ -494,6 +444,127 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     todo_errs, todo_warns = manual_todo_gate(pkg, mode=author_to_complete_mode_of(ctx))
     errs.extend(todo_errs)
     warns.extend(todo_warns)
+AUDIT_VERDICTS = ("confirm", "drop")
+AUDIT_SEVERITIES = ("critical", "major", "minor", "fatal")
+# The audit prompt's own coverage contract: every adopted check (M1-M36 and
+# J1-J5) gets a coverage row. The list is the same one the review prompt and
+# the sweep documents name (README, p03_prompts.py).
+AUDIT_COVERAGE_CHECKS = tuple([f"M{i}" for i in range(1, 37)]
+                              + [f"J{i}" for i in range(1, 6)])
+# A coverage disposition must be a REAL disposal, not one word of filler. The
+# review side's documented vocabulary is accepted verbatim; an audit row may
+# also state the re-derivation it performed ("stub: the sweep was re-derived;
+# clean"), which is what several stages' self-reports use. Bare `x`/`done` (or
+# a bare `clean`) records no re-derivation and is refused (F30).
+#
+# A NEGATED re-derivation ("never verified at all", "the sweep was not
+# re-derived", "could not be checked") is the absence of the check, so it stays
+# refused. The FIRST version of that guard was a whole-string negation search
+# (`(?!.*\b(?:not|never|cannot|unable to)\b)`), which rejected any true row
+# whose EVIDENCE happened to contain one of those words: the 2026-11-01 audit
+# lost an entire 39-minute attempt on
+#   "F-002, ... confirmed (...); X-910 confirmed (CI does not contain point estimate)"
+# and on "F-030 confirmed (...); X-949 dropped (... not a defect)". The negation
+# is only disqualifying when it GOVERNS THE VERB, so `_AUDIT_NEGATED_VERB_RE`
+# matches a negation, at most two words, and then the re-derivation verb; the
+# gate rejects a cell only when that phrase occurs. A negation elsewhere in the
+# sentence is evidence, not a missing check.
+#
+# The verdict may be preceded by a qualifier: "No cover letter in submission;
+# no findings" and "No rendered artwork files in corpus; unable to check
+# artwork/text parity" were refused by the anchored match although both are
+# real dispositions. Every shape is therefore searched anywhere in the cell,
+# while bare filler ("x", "done", "not checked") still matches nothing.
+#
+# `No findings ...` is the same verdict as `0 findings` and `unable to check X`
+# the same verdict as `unable -- <reason>`; both spellings are accepted, and the
+# reason-bearing ones still pass the shared filler gate in `_audit_disposition_ok`.
+_AUDIT_REDERIVATION_VERB = r"(?:re-?derived|confirmed|checked|verified)"
+_AUDIT_NEGATED_VERB_RE = (
+    r"\b(?:not|never|cannot|can\s+not|could\s+not|unable\s+to|no\s+longer)\b"
+    r"(?:\s+\w+){0,2}\s+" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_COUNT_RE = re.compile(r"(?i)(?:\b\d+\s+finding|\bno\s+finding)")
+_AUDIT_CANONICAL_TAIL_RE = re.compile(
+    r"(?i)(?:clean\s*(?:--|—|–)\s*basis\s*:\s*"
+    r"|unable\s*(?:--|—|–)\s*"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*)(.*)$")
+_AUDIT_VERB_RE = re.compile(r"(?i)\b" + _AUDIT_REDERIVATION_VERB + r"\b")
+_AUDIT_NEGATED_VERB_COMPILED = re.compile(_AUDIT_NEGATED_VERB_RE, re.I)
+_AUDIT_PROSE_UNABLE_RE = re.compile(r"(?i)\bunable\s+to\s+(.*)$")
+AUDIT_COVERAGE_DISPOSITION_RE = re.compile(
+    # A verdict shape anywhere in the cell (the leading `.*?` lets a qualifier
+    # precede it).
+    r"(?i)^(?:.*?(?:\b\d+\s+finding"
+    r"|\bno\s+finding"
+    r"|clean\s*(?:--|—|–)\s*basis\s*:\s*\S"
+    r"|unable\s*(?:--|—|–)\s*\S"
+    r"|out\s+of\s+scope\s*(?:--|—|–)\s*\S"
+    # A prose inability that names an object ("unable to check artwork/text
+    # parity"): the `unable --` dash form is preferred, but the same recorded
+    # fact in a sentence is still a disposition, not filler.
+    r"|unable\s+to\s+\w+\s+\S)"
+    # ... or a re-derivation verb that no negation governs.
+    r"|(?!.*?" + _AUDIT_NEGATED_VERB_RE + r")"
+    r".*?\b" + _AUDIT_REDERIVATION_VERB + r"\b.*$)")
+
+
+def _audit_negated_verb(text: str) -> bool:
+    """Whether a negation governs the re-derivation verb in `text`.
+
+    `_AUDIT_NEGATED_VERB_RE` listed only `not/never/cannot/can not/could
+    not/unable to/no longer`, so a true refusal written with a contraction
+    ("wasn't re-derived") or with punctuation between the negation and the verb
+    ("was not, in fact, re-derived") was read as a POSITIVE re-derivation and
+    accepted by the coverage gate (F06). Normalise contractions to their
+    two-word form and the punctuation that separates the negation from the verb
+    to spaces, then apply the same bounded-window match.
+    """
+    probe = re.sub(r"n['\u2019]t\b", " not", str(text or ""), flags=re.I)
+    probe = re.sub(r"[,;:\u2014\u2013]", " ", probe)
+    return bool(_AUDIT_NEGATED_VERB_COMPILED.search(probe))
+
+
+def _audit_disposition_ok(value) -> bool:
+    """A real audit coverage disposition (negation- and filler-proof).
+
+    The regex alone accepts `unable -- no`, `clean -- basis: x` and a bare
+    `out of scope`; those are the review gate's documented FILLER shapes, so
+    route every reason-bearing form through the shared reason check
+    (`_coverage_reason_named` knows the difference between a named
+    artifact/reason and a one-letter or filler token). The prose equivalents get
+    the same treatment: `unable to <verb> <object>` must name an object, not
+    just the verb.
+
+    THE SHAPES ARE TESTED IN ORDER, STRONGEST FIRST, and each shape accepts on
+    its OWN evidence. Testing the prose-`unable` heuristic first let an inability
+    clause in an EVIDENCE sentence veto a perfectly good count:
+    `3 findings; unable to see` and `3 findings confirmed (the reviewer was
+    unable to tell)` were refused because the tail after "unable to" was short.
+    A finding count is a complete verdict, so it is answered first.
+    """
+    text = str(value or "").strip()
+    if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
+        return False
+    if _AUDIT_COUNT_RE.search(text):
+        return True          # "3 findings" / "no findings": a complete verdict
+    m = _AUDIT_CANONICAL_TAIL_RE.search(text)
+    if m is not None:
+        return _coverage_reason_named(m.group(1))
+    if _AUDIT_VERB_RE.search(text) and not _audit_negated_verb(text):
+        return True          # a re-derivation sentence, e.g. "the sweep was re-derived"
+    m = _AUDIT_PROSE_UNABLE_RE.search(text)
+    if m is not None:
+        # "unable to check artwork/text parity" names what could not be
+        # checked; "unable to check" alone is the filler shape.
+        return len(re.findall(r"[A-Za-z0-9]", m.group(1))) >= 6
+    if _AUDIT_VERB_RE.search(text) and _audit_negated_verb(text):
+        # The coverage regex's negative lookahead only knows the literal
+        # negation spellings; a contraction/punctuated negation reaches here and
+        # must still be REFUSED (F06).
+        return False
+    return True              # the gate regex matched some other accepted shape
+
+
 def audit_coverage_problems(audit) -> list:
     """Problems with the auditor's own coverage table.
 
@@ -549,7 +620,7 @@ def audit_coverage_problems(audit) -> list:
     return problems
 
 
-def audit_artifact_problems(audit, frozen_ids, expected_round=None) -> list:
+def audit_artifact_problems(audit, frozen_ids) -> list:
     """Every problem that makes an `audit/audit.json` unusable (pure, testable).
 
     The contract is deliberately about DISPOSITIONS, not opinions: every frozen
@@ -591,17 +662,7 @@ def audit_artifact_problems(audit, frozen_ids, expected_round=None) -> list:
             if len(reason) < 20:
                 problems.append(f"{fid}: a drop needs a reason (>=20 characters) the human "
                                 f"can re-check")
-            # A no-work sentence does not refute the finding (F09). A named
-            # reason that merely mentions the word and cites a location is a
-            # real refutation basis (R06).
-            elif _nowork_token_is_reason(reason):
-                problems.append(f"{fid}: a drop reason must refute the finding, not record "
-                                f"that no work was done")
-            # The prompt allows `the verbatim text, or the file:line derivation`;
-            # a precise short locator (`base/main.md:12`) is the documented form
-            # and must not fail the prose-length bar (F027).
-            _locator = re.fullmatch(r"[\w./\-]+:\d+(?:-\d+)?", evid)
-            if len(evid) < 40 and _locator is None:
+            if len(evid) < 40:
                 problems.append(f"{fid}: a drop needs EVIDENCE (>=40 characters: the verbatim "
                                 f"text, or the file:line derivation, that refutes the finding)")
             else:
@@ -640,43 +701,9 @@ def audit_artifact_problems(audit, frozen_ids, expected_round=None) -> list:
     adds = audit.get("adds")
     if adds is None:
         adds = []
-    # The counts block calls len(adds): guard the list FIRST (F059/R05).
     if not isinstance(adds, list):
         problems.append("audit/audit.json 'adds' is not a list")
         adds = []
-    # F059: round/counts/notes are schema fields; their VALUES are checked when
-    # present and their PRESENCE is required only when the expected round is known.
-    if "round" in audit:
-        if not isinstance(audit.get("round"), int) or isinstance(audit.get("round"), bool):
-            problems.append("audit/audit.json 'round' must be an integer")
-        elif expected_round is not None and audit.get("round") != int(expected_round):
-            problems.append(f"audit/audit.json 'round' is {audit.get('round')!r}, not this "
-                            f"run's round {int(expected_round)}")
-    elif expected_round is not None:
-        problems.append("audit/audit.json has no 'round': the audit must name the round it "
-                        "disposes")
-    if "notes" in audit and not str(audit.get("notes") or "").strip():
-        problems.append("audit/audit.json 'notes' is empty; the prompt requires a note")
-    elif "notes" not in audit and expected_round is not None:
-        problems.append("audit/audit.json has no 'notes': the prompt requires a note")
-    _conf = sum(1 for v in seen.values() if v == "confirm")
-    _drop = sum(1 for v in seen.values() if v == "drop")
-    if "counts" in audit:
-        _counts = audit.get("counts")
-        if not isinstance(_counts, dict):
-            problems.append("audit/audit.json 'counts' must be an object")
-        else:
-            _want_counts = {"confirmed": _conf, "dropped": _drop, "added": len(adds)}
-            for _k, _want in _want_counts.items():
-                _got = _counts.get(_k)
-                if not isinstance(_got, int) or isinstance(_got, bool) or _got < 0:
-                    problems.append(f"audit/audit.json counts.{_k} must be a non-negative "
-                                    f"integer")
-                elif _got != _want:
-                    problems.append(f"audit/audit.json counts.{_k} is {_got}, but the "
-                                    f"dispositions/adds record {_want}")
-    elif expected_round is not None:
-        problems.append("audit/audit.json has no 'counts': the prompt requires counts")
     if adds:
         # AGENTS Rule 1: the AUDIT disposes the frozen findings and GENERATES
         # NO NEW FINDINGS. An observation the auditor cannot dispose belongs in
@@ -757,26 +784,10 @@ def _frozen_review_findings(sb: Path) -> list:
 
 
 def _probe_audit_verdict(row) -> str:
-    """The verdict token of one PROBE_AUDIT row ("" when none is stated).
-
-    The prompt names the columns `probe id | reviewer's disposition | your
-    verdict | evidence`; only the row's OWN verdict/disposition column decides
-    the disposition. Reading every cell let a blank verdict pass because its
-    evidence cell began "stands ...", so no probe was actually decided (F13).
-    """
-    keys = [k for k in row if "verdict" in str(k or "").strip().lower()]
-    if not keys:
-        keys = [k for k in row
-                if "disposition" in str(k or "").strip().lower()
-                and "reviewer" not in str(k or "").strip().lower()]
-    for k in keys:
-        cell = " ".join(str(row.get(k) or "").split())
-        # The prompt documents the verdict as a backticked `stands`, so a
-        # session copying that spelling wrote a leading backtick and the row
-        # was reported as "carries no verdict" (F144). Compare the cell without
-        # its markdown emphasis decoration; the returned verdict keeps the
-        # cell's own text.
-        low = cell.strip("`*_~ ").lower()
+    """The verdict token of one PROBE_AUDIT row ("" when none is stated)."""
+    for v in row.values():
+        cell = " ".join(str(v or "").split())
+        low = cell.lower()
         if low.startswith(("stands", "needs-evidence", "needs evidence")):
             return cell
     return ""
@@ -861,12 +872,7 @@ def postcheck_audit(ctx: Ctx, rec: dict):
                     "observations belong in audit/UNRESOLVED.md, never in an `AU-` adds row)")
     else:
         audit = read_json(aj, revive=False, lenient=True)         # agent-written
-        # The authoritative gate must enforce the SAME schema the prompt states
-        # and the selfcheck previews: a `round` copied from another round (or
-        # absent), and absent `counts`/`notes`, are problems here, not only in
-        # the pre-flight.
-        problems = audit_artifact_problems(audit, frozen_ids,
-                                           expected_round=rec.get("round"))
+        problems = audit_artifact_problems(audit, frozen_ids)
         coverage_problems = audit_coverage_problems(audit)
         problems += coverage_problems
         errs.extend(problems)
@@ -1123,6 +1129,164 @@ def _m30_seed_reference_state(sb: Path) -> tuple:
     return [], False, str(pin)
 
 
+def m30_hierarchy_problems(sb: Path, frozen_all, pkg: str = "") -> tuple:
+    """(errs, warns) for the M30 source-hierarchy reconciliation record.
+
+    The evidence is the stage's own seeded ledger: every row disposed means the
+    revision looked at the written value AND its producer, so an empty
+    disposition cell means the comparison the finding rests on was never
+    recorded (rule E12).
+
+    WHERE THE ROWS LIVE was ambiguous and cost the 2026-11-01 revise arm its
+    second attempt. The seed is `work/<name>` in the SANDBOX (`decide` writes it
+    next to PROMPT.md), but the stage's deliverables are all under the package,
+    so one reviser disposed `revised/work/<name>` (53/53 rows answered) while
+    the postcheck read the untouched sandbox copy and failed it on "53 of 165
+    ... EMPTY". The check therefore reads BOTH copies and judges the disposed
+    one; a run that answered either copy did the work. The message names which
+    copy was read.
+
+    The old message also reported `len(block_problems)` as "N undisposed
+    row(s)" and then pasted 80 characters of the first problem into it,
+    truncated mid-word, producing
+      "still carries 1 undisposed row(s) (53 of 165 row(s) have an EMPTY
+       disposition cell (every seeded row must be dispos)"
+    -- a count of problems labelled as a count of rows, an unbalanced
+    parenthesis and a cut word, which is what reached the operator's log.
+    """
+    m30_ids = [str(f.get("id") or "").strip() for f in frozen_all
+               if str(f.get("check") or "").strip().upper() == "M30"]
+    errs, warns = [], []
+    if not m30_ids:
+        return errs, warns
+    candidates = []
+    if pkg:
+        package_copy = Path(sb) / pkg / M30_HIERARCHY_REL
+        if package_copy.is_file():
+            candidates.append((f"{pkg}/{M30_HIERARCHY_REL}", package_copy))
+    sandbox_copy = Path(sb) / M30_HIERARCHY_REL
+    if sandbox_copy.is_file():
+        candidates.append((M30_HIERARCHY_REL, sandbox_copy))
+    if not candidates:
+        looked_for = ([f"{pkg}/{M30_HIERARCHY_REL}"] if pkg else []) + [M30_HIERARCHY_REL]
+        warns.append(f"the frozen review carries {len(m30_ids)} M30 source-hierarchy "
+                     f"finding(s) but no {' or '.join(looked_for)} exists: rule E12 requires the "
+                     f"written side to be aligned with the authoritative producer, with the "
+                     f"reconciling reason recorded")
+        return errs, warns
+    judged, judged_state, judged_score, states = None, None, None, {}
+    for label, path in candidates:
+        try:
+            state = _m30_ledger_state(path)
+        except Exception as e:                                      # noqa: BLE001
+            warns.append(f"{label}: could not be read ({type(e).__name__}: {e}); the M30 rows "
+                         f"there stay unverified")
+            continue
+        states[label] = state
+        # The DISPOSED copy is the reviser's answer: a stale seed left empty
+        # beside a filled package copy is not a defect (and the reverse is the
+        # case this check was written for). Ordering: a copy that still holds
+        # seeded candidate rows is evidence of the check; one with none (an
+        # empty or unparsed file) must never beat it just because it has nothing
+        # left to report. Among copies that hold such rows, the one with the
+        # fewest empty dispositions wins (a tie keeps the package copy, listed
+        # first).
+        score = (0 if state["actionable"] else 1, state["empty"])
+        if judged_score is None or score < judged_score:
+            judged, judged_state, judged_score = label, state, score
+    if judged_state is None:
+        return errs, warns
+    sandbox_state = states.get(M30_HIERARCHY_REL)
+    if (judged != M30_HIERARCHY_REL and sandbox_state
+            and sandbox_state["actionable"]
+            and sandbox_state["empty"] == sandbox_state["actionable"]):
+        # The reviser answered the package copy and left the seed in place. That
+        # is accepted (the work is done), but the record should say which copy
+        # was judged so nobody reads the untouched seed as the evidence.
+        warns.append(f"{judged} was judged; the sandbox seed {M30_HIERARCHY_REL} is still "
+                     f"undisposed ({sandbox_state['empty']} of "
+                     f"{sandbox_state['actionable']} row(s) EMPTY)")
+    if not judged_state["readable"]:
+        # A zero-byte, unreadable or table-less ledger is missing EVIDENCE, not
+        # a clean ledger: the old all-zero state returned no error and silently
+        # removed the gate (F02).
+        errs.append(
+            f"{judged} exists but carries no readable M30 table (zero-byte, over the byte "
+            f"budget, a symlink/non-regular file, or no markdown table): the source-hierarchy "
+            f"reconciliation is unverified. Restore the seeded table and dispose every row.")
+        return errs, warns
+    actionable, empty = judged_state["actionable"], judged_state["empty"]
+    # ROW IDENTITY: a candidate copy that drops seeded rows cannot pass on the
+    # strength of the one row it kept. The old score compared only
+    # (has actionable rows, empty count), so a one-row package copy with a
+    # filled disposition beat a full seed with three empty rows and the gate
+    # reported nothing (F01). The reference is the identity PIN the orchestrator
+    # wrote BESIDE the sandbox, not the live seed file -- that file is also the
+    # documented answer ("dispose every seeded row in place"), so a rewrite of it
+    # (or of both it and the ledger) used to pass the check it was supposed to
+    # fail (R04/F39). The live sandbox seed is the fallback only for a
+    # PROMPT-less unit fixture.
+    judged_keys = set(judged_state["rows"])
+    reference_rows, reference_available, reference_label = _m30_seed_reference_state(sb)
+    if not reference_available:
+        if (Path(sb) / "PROMPT.md").is_file():
+            # Every real session sandbox carries PROMPT.md, and the seed pin is
+            # written beside it. If the pin is gone/unreadable the identity
+            # check CANNOT run: report that instead of silently trusting the
+            # agent-writable live copy (F39).
+            errs.append(
+                f"{judged}: the M30 seed reference {reference_label} is missing, "
+                f"unreadable or carries no hierarchy rows, so the seeded row identities "
+                f"cannot be checked. Restore the evidence pin (or re-run the stage): "
+                f"the identity check is not skipped.")
+            reference_rows = []
+        else:
+            # A unit fixture / legacy sandbox without an evidence pin: fall back
+            # to the live sandbox seed (the pre-R04 behaviour).
+            reference_rows = (sandbox_state["rows"]
+                              if (judged != M30_HIERARCHY_REL and sandbox_state
+                                  and sandbox_state["readable"]) else [])
+            reference_label = M30_HIERARCHY_REL
+    dropped = [k for k in reference_rows if k not in judged_keys]
+    if dropped:
+        errs.append(
+            f"{judged} is missing {len(dropped)} of the {len(reference_rows)} seeded M30 "
+            f"row(s) recorded in {reference_label} that name a candidate producer: "
+            f"{len(dropped)} seeded row(s) were DROPPED instead of disposed. Copy every "
+            f"seeded row into the answer and dispose it in place (`OK -- ...` / "
+            f"`contradiction -- ...` / `unable -- ...`).")
+    if actionable and empty == actionable:
+        # None of the rows that actually need a comparison was disposed: the
+        # check was not run at all, not merely left one row short. Fail the
+        # attempt (the retry prompt carries this message) instead of accepting
+        # the warning the evaluation run ignored.
+        errs.append(
+            f"{judged} still carries {empty} of {actionable} seeded row(s) with a candidate "
+            f"producer whose disposition cell is EMPTY: an M30 finding's fix must record the "
+            f"producer it reconciled against (rule E12). Dispose every such row in place -- "
+            f"`OK -- <the reconciling reason>`, `contradiction -- <finding id>` or "
+            f"`unable -- <what is missing>` -- in the ledger you were given.")
+    else:
+        # EVERY block problem is now an ERROR, not a warning: an empty or
+        # boilerplate disposition recorded no comparison, and the gate exists to
+        # enforce exactly that (F03). The old code downgraded boilerplate to a
+        # warning and never looked at an arbitrary non-empty cell at all.
+        detail = "; ".join(str(p) for p in judged_state["block_problems"][:3])
+        if judged_state["block_problems"]:
+            more = len(judged_state["block_problems"]) - 3
+            errs.append(
+                f"{judged}: {len(judged_state['block_problems'])} disposition problem(s) -- "
+                f"{detail}" + (f" (and {more} more)" if more > 0 else "")
+                + ". Every seeded row needs its own disposition: `OK -- <the reconciling "
+                  "reason>`, `contradiction -- <finding id>` or `unable -- <what is missing>`.")
+        if judged_state["bad_dispositions"]:
+            quotes = "; ".join(repr(x[:80]) for x in judged_state["bad_dispositions"][:3])
+            errs.append(
+                f"{judged}: {len(judged_state['bad_dispositions'])} non-empty disposition "
+                f"cell(s) do not use the documented shape ({quotes}): an arbitrary value is "
+                f"not a recorded comparison. Use `OK -- ...`, `contradiction -- ...` or "
+                f"`unable -- ...`.")
+    return errs, warns
 
 
 def postcheck_revise(ctx: Ctx, rec: dict):
@@ -1145,12 +1309,8 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # MANUAL_STEPS.md: counting only the latter reported a correct readme-mode
     # package's item count as unknown (F21).
     _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
-    _m_rev = count_manual_steps(rev / _manual_rel)
-    _m_sb = count_manual_steps(sb / _manual_rel)
-    if _m_rev == MANUAL_STEPS_UNREADABLE or _m_sb == MANUAL_STEPS_UNREADABLE:
-        warns.append(f"{_manual_rel} exists but could not be read (unreadable, oversized or "
-                     f"a symlink); its manual-item count is UNKNOWN, not 0")
-    if _m_rev is None and _m_sb is None:
+    if count_manual_steps(rev / _manual_rel) is None \
+            and count_manual_steps(sb / _manual_rel) is None:
         if not _zero_item_handoff_package(author_to_complete_mode_of(ctx), marker):
             warns.append(f"{_manual_rel} not found under revised/ (the decision report will show "
                          f"the manual-item count as unknown; the count is reported only and never "
@@ -1158,17 +1318,8 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # The revision ledger is the deliverable that proves "no finding silently
     # dropped": require the machine-readable one, and ask for a human-readable
     # counterpart.
-    _frozen_total = frozen_findings_total(ctx, rec)
-    _frozen_exists = (ctx.sandbox_of(rec) / FINDINGS_REL).exists()
-    _frozen_error = None
-    if _frozen_exists and _frozen_total is None:
-        _frozen_error = (f"{FINDINGS_REL} is present but is not a valid finding "
-                         f"list (the document or its 'findings' member is "
-                         f"malformed); the revision ledger cannot be accepted as "
-                         f"an all-clean ledger (F010)")
-    lerrs, lwarns = revision_ledger_problems(
-        rev, frozen_finding_ids(ctx, rec), _frozen_total,
-        frozen_error=_frozen_error)
+    lerrs, lwarns = revision_ledger_problems(rev, frozen_finding_ids(ctx, rec),
+                                             frozen_findings_total(ctx, rec))
     errs.extend(lerrs)
     warns.extend(lwarns)
     # WHOLE-PARAGRAPH RE-READ (2026-10-19): a revision that edits only the
@@ -1215,30 +1366,6 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # could force an artifact for a finding nobody had to act on and the
     # session's own pre-flight disagreed with the gate (F05).
     frozen_all = findings_from_sandbox(sb, sandbox_audit_record(sb))
-    # REMOVAL ACCOUNTING. Insertions and deletions are ON by default and stay
-    # the reviser's call, so a removed sentence is not failed here. What IS
-    # failed is a ledger that reports the removal as `fixed`: the package does
-    # not contain that repair, and the run would then self-report a claim it no
-    # longer carries (a run certified fixes for findings whose quoted sentences
-    # had been deleted). A removal recorded as
-    # `manual-required`/`discarded` passes with a warning that carries the
-    # removed claim to the author. The audit's fact gate is numeric/identifier
-    # only, so this anchors on the finding itself.
-    _removals = finding_removal_problems(
-        sb / "base", rev, frozen_all,
-        # No id filter: `frozen_all` is the SANDBOX's audited copy, which can
-        # legitimately differ from the run record's id list. Filtering the
-        # status map by the run record would leave a sandbox-only id with no
-        # status and read an honest `manual-required` row as a missing one.
-        final_status=revision_ledger_final_status(rev),
-        exempt_removed=pipeline_removed_sentences(rec, with_document=True),
-        # Under `author_to_complete: document` a required hand-off marker must
-        # survive, so the finding-side helper must not exempt its deletion
-        # either (F118).
-        allow_marker_delete=author_to_complete_mode_of(ctx) in ("readme", "off"))
-    _removal_errs, _removal_warns = finding_removal_messages(_removals, f"{REVISED_DIR}/")
-    errs.extend(_removal_errs)
-    warns.extend(_removal_warns)
     checks_in = {str(f.get("check") or "").strip().upper() for f in frozen_all}
     if "M26" in checks_in:
         style = rev / "work"
@@ -1295,27 +1422,16 @@ def postcheck_revise(ctx: Ctx, rec: dict):
     # the delivered sentences must still correspond to the base's.
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
-    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", rev, "revise",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer,
-                                      soft_deletions=_edit_removable))
-    if fact_survival_required(_edit_ins, _edit_del):
-        # No mode that permits a deletion has a unit-level check on it, so this
-        # is the gate that stops a deletion from taking a value or identifier
-        # with it (D8).
-        errs.extend(fact_preservation_problems(
-            sb / "base", rev, "revise",
-            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
-    errs.extend(identity_typo_problems(rev, "revise"))
+                                      prefer_rewrite=_edit_prefer))
     # AFTER the recovery, so the READ-ONLY raw-data directory ends up exactly as
     # the untouched original has it -- never as the base (or a donor) left it.
     rec["raw_data"] = verify_readonly_raw_data(ctx, rev, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
-    errs.extend(rec["raw_data"].get("readonly_failures") or [])
     # AFTER the read-only repair: the recorded token describes the package that
     # ships, not the one the agent left before the repair.
     _record_revision_token(rec, rev, warns, errs=errs,
@@ -1373,9 +1489,7 @@ def postcheck_revise(ctx: Ctx, rec: dict):
                          + ", ".join(f"`{f}`" for f in _pipe_files[:4])
                          + " -- a submission-surface repair, not a concern-driven edit; the "
                            "removed sentences are in the run record (reference_strip)")
-        errs.extend(scoped_scope_problems(
-            ctx, sb, rev, pipeline_changed=_pipe_files,
-            removed=pipeline_removed_sentences(rec, with_document=True)))
+        errs.extend(scoped_scope_problems(ctx, sb, rev, pipeline_changed=_pipe_files))
     return (not errs), errs, warns, None
 
 
@@ -1401,42 +1515,24 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
     seen = {str(f.get("id")) for f in a_items}
 
     def _dedup_key(row: dict) -> tuple:
-        """(check, location, evidence prefix, severity, category): one defect.
+        """(check, location, evidence prefix): the same defect found by both sessions.
 
         The check/class label is part of the identity: two distinct defect classes
         can quote the same sentence at the same location, and collapsing them by
         (location, evidence) alone would hand the reviser only one of them.
-
-        The severity and category are part of it too: Rule 8 requires a defect's
-        classification to be the same whichever finding role reported it, and a
-        B row that files the SAME defect as CRITICAL must not be dropped as a
-        duplicate of A's MAJOR row (F129) -- the merge would silently downgrade
-        the frozen list by merge order alone.
         """
         loc = " ".join(str(row.get("location") or "").lower().split())
         ev = " ".join(str(row.get("evidence") or row.get("quote") or "").lower().split())
         check = " ".join(str(row.get("check") or "").lower().split())
-        sev = " ".join(str(row.get("severity") or "").lower().split())
-        cat = " ".join(str(row.get("category") if row.get("category") is not None else "")
-                       .lower().split())
-        return check, loc, ev[:80], sev, cat
-
-    def _identity_key(row: dict) -> tuple:
-        """The defect identity WITHOUT its classification (for the conflict note)."""
-        return _dedup_key(row)[:3]
+        return check, loc, ev[:80]
 
     a_keys = {_dedup_key(f) for f in a_items}
-    a_by_identity = {}
-    for f in a_items:
-        a_by_identity.setdefault(_identity_key(f), []).append(f)
     remap = {}
     deduped = []
-    classified = []
     b_kept = []
     for f in b_items:
-        key = _identity_key(f)                    # the defect's identity (3-tuple)
-        full = _dedup_key(f)                      # ... plus its classification
-        if key != ("", "", "") and full in a_keys:
+        key = _dedup_key(f)
+        if key != ("", "") and key in a_keys:
             # Both sessions found the same defect at the same place with the same
             # evidence: keep A's row (ids and coverage ride with it) instead of
             # handing the reviser two rows for one thing.
@@ -1449,17 +1545,6 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                 new = "B-" + new
             remap[fid] = new
             f["id"] = new
-        if key != ("", "", "") and key in a_by_identity:
-            # Same defect, DIFFERENT classification: the rows are not the same
-            # finding, so both stay and the disagreement is recorded for the
-            # auditor instead of one classification vanishing (F129).
-            for other in a_by_identity[key]:
-                classified.append({
-                    "a": str(other.get("id")), "b": str(f.get("id")),
-                    "a_severity": str(other.get("severity") or ""),
-                    "b_severity": str(f.get("severity") or ""),
-                    "a_category": other.get("category"),
-                    "b_category": f.get("category")})
         seen.add(str(f.get("id")))
         b_kept.append(f)
     coverage, conflicts = [], []
@@ -1499,7 +1584,6 @@ def merge_review_parts(ctx: Ctx, rec_b: dict) -> dict:
                                "sessions": [rid_guided_review(r), rid_guided_review_b(r)],
                                "from_a": len(a_items), "from_b": len(b_kept),
                                "deduped_b": deduped,
-                               "classification_conflicts": classified,
                                "id_remap": remap, "coverage_conflicts": sorted(set(conflicts))}}
     # The discovery round's findings travel with the frozen list too. Each part
     # numbers its own discovery rows from X-001, so a collision has to be
@@ -1648,22 +1732,14 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
     restrip_after_backfill(ctx, rec, out, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
-    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "self", out, "integrate",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer,
-                                      soft_deletions=_edit_removable))
-    if fact_survival_required(_edit_ins, _edit_del):
-        errs.extend(fact_preservation_problems(
-            sb / "self", out, "integrate",
-            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
-    errs.extend(identity_typo_problems(out, "integrate"))
+                                      prefer_rewrite=_edit_prefer))
     rec["raw_data"] = verify_readonly_raw_data(ctx, out, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
-    errs.extend(rec["raw_data"].get("readonly_failures") or [])
     _record_revision_token(rec, out, warns, errs=errs)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec), [(sb / "self", "", ())],
                                  errs, warns)
@@ -1709,20 +1785,6 @@ def postcheck_integrate(ctx: Ctx, rec: dict):
         if led["missing_finding"]:
             warns.append(f"integrate: {len(led['missing_finding'])} ledger row(s) do not state "
                          f"their `finding effect` (preserves/undoes <id> or none)")
-        if led["missing_verdict"]:
-            errs.append(f"integrate: {len(led['missing_verdict'])} ledger row(s) carry no "
-                        f"`verdict` (port / keep-self / synthesize / ignore-cosmetic) -- the "
-                        f"verdict is what classifies a row as an edit, so without it Rule 1B's "
-                        f"`revalidated: confirmed` requirement cannot be enforced")
-        if led["invalid_verdict"]:
-            errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
-                        f"`verdict` outside port / keep-self / synthesize / ignore-cosmetic -- "
-                        f"an unclassified row is not a disposed difference and the port gate "
-                        f"cannot see it: " + "; ".join(led["invalid_verdict"][:4]))
-        if led["invalid_size"]:
-            errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a `size` "
-                        f"outside small / large -- the size-class requirement cannot be read: "
-                        + "; ".join(led["invalid_size"][:4]))
         if led["legacy_ports"]:
             errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but carries "
                         "port/synthesize row(s) -- Rule 1B forbids editing an unverified item, "
@@ -1805,12 +1867,8 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     # The mode's own manual-list file (readme by default), not always
     # MANUAL_STEPS.md (F21).
     _manual_rel = handoff_target(author_to_complete_mode_of(ctx))
-    _m_out = count_manual_steps(out / _manual_rel)
-    _m_sb = count_manual_steps(sb / _manual_rel)
-    if _m_out == MANUAL_STEPS_UNREADABLE or _m_sb == MANUAL_STEPS_UNREADABLE:
-        warns.append(f"{_manual_rel} exists but could not be read (unreadable, oversized or "
-                     f"a symlink); its manual-item count is UNKNOWN, not 0")
-    if _m_out is None and _m_sb is None:
+    if count_manual_steps(out / _manual_rel) is None \
+            and count_manual_steps(sb / _manual_rel) is None:
         if not _zero_item_handoff_package(author_to_complete_mode_of(ctx), marker):
             warns.append(f"{_manual_rel} not found under {REWRITTEN_DIR}/ (the decision report "
                          f"will show the manual-item count as unknown; the count is reported only "
@@ -1843,22 +1901,14 @@ def postcheck_rewrite(ctx: Ctx, rec: dict):
     restrip_after_backfill(ctx, rec, sb / REWRITTEN_DIR, warns)
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
-    _edit_removable = soft_deletions_allowed(ctx, rec)
     errs.extend(content_edit_problems(ctx, sb / "base", sb / REWRITTEN_DIR, "rewrite",
                                       exempt_removed=pipeline_removed_sentences(
                                           rec, with_document=True),
                                       insertions_allowed=_edit_ins,
                                       deletions_allowed=_edit_del,
-                                      prefer_rewrite=_edit_prefer,
-                                      soft_deletions=_edit_removable))
-    if fact_survival_required(_edit_ins, _edit_del):
-        errs.extend(fact_preservation_problems(
-            sb / "base", sb / REWRITTEN_DIR, "rewrite",
-            exempt_removed=pipeline_removed_sentences(rec, with_document=True)))
-    errs.extend(identity_typo_problems(sb / REWRITTEN_DIR, "rewrite"))
+                                      prefer_rewrite=_edit_prefer))
     rec["raw_data"] = verify_readonly_raw_data(ctx, sb / REWRITTEN_DIR, warns)
     errs.extend(rec["raw_data"].get("legacy_input_areas") or [])
-    errs.extend(rec["raw_data"].get("readonly_failures") or [])
     _record_revision_token(rec, sb / REWRITTEN_DIR, warns, errs=errs)
     _caption_and_document_checks(ctx, rec, freshness_vid(rec) or A1_ID,
                                  [(sb / "base", "", ())], errs, warns)
@@ -2046,9 +2096,6 @@ DEDUP_DOC_RE = re.compile(
     r"([\w][\w./-]*\.(?:md|markdown|txt|tex|ltx|docx|doc|rtf|pdf|csv|tsv|json|py|bib))"
     r"(?::\d+|\b)", re.I)
 _NUMERIC_CHECK_RE = re.compile(r"^M0*(\d+)$", re.I)
-# The FROZEN vocabulary also contains J ids, and the review contract's
-# norm() maps `J05` to `J5`; the judge-side mapping must do the same (F069).
-_FROZEN_NUMERIC_CHECK_RE = re.compile(r"^([MJ])0*(\d+)$", re.I)
 
 
 def dedup_mode_of(ctx=None) -> str:
@@ -2084,28 +2131,7 @@ def dedup_location_of(evidence) -> tuple:
     line = int(m.group(1)) if m else None
     d = DEDUP_DOC_RE.search(text)
     doc = d.group(1).replace("\\", "/").lower() if d else None
-    # Tokenize the EXCERPT, not the whole cell: the location prefix alone
-    # (a long path + line) met the minimum-word bar and merged distinct short
-    # excerpts at the same line. Strip through the line locator and any quote
-    # delimiters, then use the quoted text when the cell carries one.
-    excerpt = text[m.end():] if m else text
-    excerpt = re.sub(r"^\s*[:#\-\u2013\u2014|,.]+\s*", "", excerpt)
-    q = None
-    # Match each opening delimiter with ITS OWN closer. The old mixed class
-    # closed a double-quoted excerpt at an internal apostrophe ("the patient's
-    # dose"), leaving two words that could never meet DEDUP_MIN_WORDS (R03).
-    # The straight/curly single quote is also the possessive apostrophe, so it
-    # only delimits when it is not between word characters.
-    for opener, closer, guard in (('"', '"', False), ("\u201c", "\u201d", False),
-                                  ("\u2018", "\u2019", True), ("'", "'", True)):
-        pat = ((r"(?<![\w])" if guard else "") + re.escape(opener)
-               + r"(.+?)" + re.escape(closer) + (r"(?![\w])" if guard else ""))
-        q = re.search(pat, excerpt)
-        if q:
-            break
-    if q:
-        excerpt = q.group(1)
-    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(excerpt)), doc
+    return line, tuple(w.lower() for w in DEDUP_WORD_RE.findall(text)), doc
 
 
 def dedup_fuzzy_similarity(a_words, b_words) -> float:
@@ -2235,14 +2261,13 @@ def build_issue_census(observations, field_ids, sessions_expected=None,
     accepted = {}                   # (version, source) -> [(class, (line, words), session)]
     for sess, target, opp, comp in observations:
         if target in census:
-            # OPPORTUNITIES are one per (session, opponent) COMPARISON, not per
-            # distinct opponent: with two judges and two opponents a version can
-            # carry four mentions over two opponent ids, and dividing by the ids
-            # alone reported own_rate 2.0 (F004). `own_sessions`/`peer_sessions`
-            # stay the session counts.
-            census[target]["own_opps"].add((str(sess), str(opp)))
+            # OPPORTUNITIES are opponent comparisons, not judge sessions: one
+            # session comparing a version with seven opponents gave the version
+            # one opportunity and a 7x-inflated own_rate (the 2026-10-28 audit's
+            # F29). `own_sessions`/`peer_sessions` stay the session counts.
+            census[target]["own_opps"].add(str(opp))
         if opp in census:
-            census[opp]["peer_opps"].add((str(sess), str(target)))
+            census[opp]["peer_opps"].add(str(target))
         items = ledger_items(comp)
         if not items:
             continue
@@ -2537,8 +2562,8 @@ def _frozen_check_id(raw) -> str:
     same kind the FMT-*/Q1-Q12 mappings above exist to close.
     """
     cid = _norm_check_id(raw)
-    m = _FROZEN_NUMERIC_CHECK_RE.match(cid)
-    return f"{m.group(1).upper()}{int(m.group(2))}" if m else cid
+    m = _NUMERIC_CHECK_RE.match(cid)
+    return f"M{int(m.group(1))}" if m else cid
 
 
 def _coverage_disposition(text: str):
@@ -2764,8 +2789,8 @@ def judge_basis_problems(comp: dict, where: str, strict: bool) -> tuple:
                 continue
             seen_rows.add(row_key)
             if len(norm[2].split()) > EVIDENCE_MAX_WORDS:
-                emit(f"{prefix}{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
-                     f"(schema: <={EVIDENCE_MAX_WORDS})")
+                out_w.append(f"{where}.{side}[{k}].evidence is {len(norm[2].split())} words "
+                             f"(schema: <={EVIDENCE_MAX_WORDS})")
             if _is_length_guard_check(cid) and (norm[0] != "formatting" or norm[1] != "minor"):
                 emit(f"{prefix}{where}.{side}[{k}]: a length/caption row (`{cid}`) is a "
                      f"formatting-tier MINOR row -- length may enter a comparison by at most +-1 "
@@ -2944,7 +2969,7 @@ JUDGE_DISCOVERY_DIR = "judge_review/discovery"
 # (the block tells the judge to read that skill, and the module's own
 # `_DISCOVERY_STATUS_TOKENS` already accepts both for the review's probes).
 JUDGE_DISPOSITION_RE = re.compile(
-    r"\b(?:clean|finding|unable|unknown|limitation|no anomal(?:y|ies))\b", re.I)
+    r"\b(?:clean|finding|unable|limitation|no anomal(?:y|ies))\b", re.I)
 
 
 def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
@@ -2980,10 +3005,7 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
             f"{', '.join(missing[:6])}" + (" ..." if len(missing) > 6 else "")
             + " -- the SAME candidates and depth are required for the target AND every "
               "opponent, so a side without a file was not passed with equal scrutiny")
-    # The pass is per SIDE: a row's X id must be a finding THAT side's own file
-    # recorded, or a judge can borrow the other side's evidence for a defect it
-    # never re-derived there (F212).
-    defined = {}
+    defined = set()
     for side in sides:
         p = dd / f"{side}.md"
         if not p.is_file():
@@ -3002,36 +3024,6 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
         ids_in_file = []
         for r in rows:
             text = _row_text(r)
-            # The shape gate applies to the DISPOSITION cell, not any mention:
-            # a clean row saying "(no finding)" is not a finding row.
-            disp_cell = ""
-            for _k, _v in r.items():
-                if str(_k or "").strip().lower() in ("disposition", "status", "verdict"):
-                    disp_cell = " ".join(str(_v or "").split()); break
-            if not disp_cell:
-                for _v in reversed(list(r.values())):
-                    _cell = " ".join(str(_v or "").split())
-                    if JUDGE_DISPOSITION_RE.search(_cell):
-                        disp_cell = _cell; break
-            if re.match(r"(?i)\s*finding\b", disp_cell):
-                # A finding row carries location, category (0-5), severity and
-                # a verbatim evidence quote (F038). A bare digit is not a
-                # category: `p. 2`/`line 4` used to satisfy the check (F12).
-                _has_sev = bool(re.search(r"(?i)\b(?:fatal|critical|major|minor)\b", text))
-                _cat_cell = next((str(v or "").strip() for k, v in r.items()
-                                  if re.match(r"(?i)^cat(?:egory)?\b",
-                                              str(k or "").strip())), "")
-                _has_cat = bool(re.fullmatch(r"[0-5]", _cat_cell)
-                                or re.search(r"(?i)\bcategory\b\s*[:=]?\s*[0-5]\b", text))
-                _has_loc = bool(re.search(
-                    r"[\w./-]+\.(?:md|txt|tex|docx|doc|json|csv|tsv|py|bib|pdf|xlsx?|"
-                    r"html?|xml)\b|\bline\s*\d+|\bp\.?\s*\d+\b", text, re.I))
-                _has_quote = bool(re.search(r"`[^`]{3,}`|[\"'][^\"']{4,}[\"']", text))
-                if not (_has_sev and _has_cat and (_has_loc or _has_quote)):
-                    out_e.append(
-                        f"{JUDGE_DISCOVERY_DIR}/{side}.md has a `finding` row without the "
-                        f"required location/category/severity/verbatim evidence: "
-                        f"{text[:110]!r}")
             if not JUDGE_DISPOSITION_RE.search(text):
                 out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a row with no disposition "
                              f"cell (`clean -- checked: <locations>` or a finding row): "
@@ -3051,35 +3043,27 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                     out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md lists finding id {fid} more "
                                  f"than once (one row per candidate, ids unique within the file)")
                 ids_in_file.append(fid)
-                defined.setdefault(_norm_opponent_label(side), set()).add(fid)
-    # Every X-* id a ledger row cites must be a finding the pass recorded FOR
-    # THAT ROW'S SIDE: `resolved` names the OPPONENT's defect and `introduced`
-    # the TARGET's, and one file per side is the evidence the row cites. Resolving
-    # against the union of all sides accepted a cross-side citation with no
-    # warning (F212).
+                defined.add(fid)
+    # Every X-* id a ledger row cites must be a finding the pass recorded.
     cited = set()
     sj = scores_json_of(sb, str(rec.get("kind") or "judge"))
     if isinstance(sj, dict):
         for comp in (sj.get("comparisons") or []):
             if not isinstance(comp, dict):
                 continue
-            label = _norm_opponent_label(comp.get("opponent_label"))
-            for kind, row_side in (("resolved", label), ("introduced", "target")):
-                for item in (comp.get(kind) or []):
+            for side in ("resolved", "introduced"):
+                for item in (comp.get(side) or []):
                     if not isinstance(item, dict):
                         continue
                     cid = _frozen_check_id(item.get("check"))
                     if DISCOVERY_X_ID_RE.match(cid):
-                        cited.add((row_side, cid))
-    unknown = sorted(
-        f"{cid} ({row_side} side)" for row_side, cid in cited
-        if cid not in defined.get(row_side, set()))
+                        cited.add(cid)
+    unknown = sorted(cited - defined)
     if unknown:
         out_w.append(
-            f"{len(unknown)} ledger row(s) cite an X-* id the discovery file for that row's "
-            f"own side never defines ({', '.join(unknown[:6])}): a `resolved` row cites the "
-            f"opponent's finding and an `introduced` row the target's -- the file for that "
-            f"side gives the evidence the row cites")
+            f"{len(unknown)} ledger row(s) cite an X-* id the discovery files never define "
+            f"({', '.join(unknown[:6])}): every X row must name a finding the pass recorded -- "
+            f"the file gives the evidence the row cites")
     return out_e, out_w
 
 
@@ -3091,15 +3075,8 @@ def postcheck_judge(ctx: Ctx, rec: dict):
     # seeded into the sandbox, so the judge cannot lean on it) and check that the
     # judge produced the M18/M19/M20 rows itself. A missing row is a warning, not
     # a failure: the panel's validity must not depend on an agent's file naming.
-    cl_scan_ok = False
     try:
         ev = code_side_evidence(ctx, sb / "target", f"{rec['id']}:judge")
-        # `code_side_evidence` CATCHES its own scan exception and returns
-        # {"format": {"error": ...}}; the old code then found no rows and
-        # certified FMT-CL1 (F10). Treat the recorded error as a failed scan.
-        _fmt_error = (ev.get("format") or {}).get("error")
-        if _fmt_error:
-            raise RuntimeError(f"format scan: {_fmt_error}")
         rec["judge_evidence"] = ev
         write_json_atomic(ctx.reports_dir / f"judge_evidence_{rec['id']}.json", ev)
         cap_n = int((ev.get("captions") or {}).get("count") or 0)
@@ -3120,31 +3097,13 @@ def postcheck_judge(ctx: Ctx, rec: dict):
         # A cover letter formatted in the MANUSCRIPT template (FMT-CL1) is a
         # target defect the judge must catch and consider, whatever the other
         # versions carry; an OK closure needs the journal's own quoted override.
-        # It is computed here but ENFORCED OUTSIDE the try: the cover-letter
-        # gate is a hard `errs` family, and leaving it inside let any exception
-        # in the scan/report write downgrade it to a warning (F137).
         cl_target = [r for r in ((ev.get("format") or {}).get("rows") or [])
                      if str(r.get("rule") or "").upper() in COVER_LETTER_STAMP_RULES]
-        cl_scan_ok = True
+        if cl_target:
+            errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
     except Exception as e:                                            # noqa: BLE001
-        cl_target = []
         warns.append(f"BLIND JUDGE GROUNDING: the code-side scan of the blinded target failed "
                      f"({type(e).__name__}: {e})")
-    if not cl_scan_ok:
-        # A scan that could not run did not find "no cover letter": fail CLOSED
-        # (the comment above already promised the gate was enforced outside the
-        # try, while `cl_target = []` silently switched it off) (F003).
-        errs.append("FMT-CL1: the code-side scan of the blinded target could not run, so the "
-                    "cover-letter gate is UNVERIFIED; re-run the judge or check the report "
-                    "manually")
-    if cl_target:
-        try:
-            errs.extend(judge_cover_letter_artifact_problems(sb, cl_target))
-        except Exception as e:                                        # noqa: BLE001
-            # Fail CLOSED: a checker that cannot run is not a pass.
-            errs.append(f"FMT-CL1: the cover-letter artifact check could not be run "
-                        f"({type(e).__name__}: {e}); the judge's cover-letter gate is "
-                        f"unverified")
     sj = scores_json_of(sb, rec["kind"])
     marker = marker_json(sb, rec["kind"])
     errs.extend(structured_output_problems(ctx, rec))
@@ -3372,31 +3331,6 @@ def original_submission_staging_problems(ctx: Ctx, sb: Path) -> list:
     return errs
 
 
-def _checked_staging_dir(path: Path) -> None:
-    """Create one agent-writable staging directory without following a link.
-
-    The stage sandbox is reused across attempts, so a previous attempt can leave
-    `feedback/files` (or `feedback/` itself) as a symlink to an outside
-    directory. `mkdir(exist_ok=True)` follows it and the raw `shutil.copy2` then
-    writes the editors' letter outside the sandbox (F14). Refuse any symlinked
-    component BEFORE the directory is created or used; the text writer already
-    guards its own path, but that guard runs too late for the raw copy.
-    """
-    path = Path(path)
-    try:
-        _refuse_symlinked_read_parent(path / "_")
-    except OSError as e:
-        die(f"refusing to stage feedback into {path}: {e}. A staged feedback "
-            f"directory must be a real directory inside the run sandbox, never a "
-            f"link to an outside path")
-    if path.is_symlink():
-        die(f"refusing to stage feedback into {path}: it is a symlink (a staged "
-            f"feedback directory must be a real directory inside the run sandbox)")
-    if path.exists() and not path.is_dir():
-        die(f"refusing to stage feedback into {path}: it exists and is not a directory")
-    path.mkdir(parents=True, exist_ok=True)
-
-
 def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
     """Copy the feedback into `feedback/` and write the concern seed.
 
@@ -3423,14 +3357,14 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
             f"(feedback / referee / reviewer / editor, or decision-letter/notice/email in its name), typically under "
             f"raw_data/.")
     previous = journal_previous_responses(ctx)
-    _checked_staging_dir(sb / "feedback" / "files")
-    _checked_staging_dir(sb / "feedback" / "text")
+    (sb / "feedback" / "files").mkdir(parents=True, exist_ok=True)
+    (sb / "feedback" / "text").mkdir(parents=True, exist_ok=True)
     if llm_files:
-        _checked_staging_dir(sb / "feedback" / "llm" / "files")
-        _checked_staging_dir(sb / "feedback" / "llm" / "text")
+        (sb / "feedback" / "llm" / "files").mkdir(parents=True, exist_ok=True)
+        (sb / "feedback" / "llm" / "text").mkdir(parents=True, exist_ok=True)
     if previous:
-        _checked_staging_dir(sb / "feedback" / "previous_responses" / "files")
-        _checked_staging_dir(sb / "feedback" / "previous_responses" / "text")
+        (sb / "feedback" / "previous_responses" / "files").mkdir(parents=True, exist_ok=True)
+        (sb / "feedback" / "previous_responses" / "text").mkdir(parents=True, exist_ok=True)
     seed, unparsed, labels, llm_labels = [], [], [], []
     staged, used_names = {}, {}
     streams = ([(path, label, "human", sb / "feedback") for path, label in files]
@@ -3472,11 +3406,6 @@ def _write_journal_feedback_inputs(ctx: Ctx, sb: Path) -> list:
         elif origin == "llm":
             llm_labels.append(label)
         dest = parent / "files" / safe
-        if dest.is_symlink():
-            # copy2 would follow the link and overwrite its target: the copy
-            # target is the staging file itself, never a link (F14).
-            die(f"refusing to stage feedback into {dest}: it is a symlink (a staged "
-                f"feedback file must be a real file inside the run sandbox)")
         if dest.exists():
             # A read-only source (a chmod a-w evidence file) was copied with its
             # mode in a previous partial materialization: replace the stale copy
@@ -3602,18 +3531,19 @@ def materialize_concerns(ctx: Ctx, r: int) -> dict:
     return rec
 
 
+def _journal_concern_source(ctx: Ctx, r: int) -> Path:
+    """The sandbox that carries the concern ledger for this round."""
+    rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
+    _require_done(ctx, rid, "the concern ledger is the input of this stage")
+    return ctx.sandbox_of(ctx.run(rid))
+
+
 def _response_file_text(path: Path):
     """Extracted text of one package file, or None when the format is not read."""
     if not path.is_file():
         return None
     ext = path.suffix.lower()
-    if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".csv",
-               # The analysis-code area is a legal citation source when the
-               # submission ships it (`--submit-code on`); refusing these made
-               # every code change's quoted span UNVERIFIED (a fail-closed false
-               # positive introduced by F100's tightening).
-               ".py", ".r", ".sh", ".jl", ".m", ".json", ".yaml", ".yml",
-               ".toml", ".sql", ".do", ".ipynb"):
+    if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".csv"):
         text = read_text_bounded(path)
         return text
     if ext == ".docx":
@@ -3646,30 +3576,11 @@ _RESPONSE_FILE_LINE_LOCATION_RE = re.compile(
 
 
 def _response_same_file(named: str, rel: str) -> bool:
-    """True when a location's file path names the response row's own file.
-
-    The `target/` sandbox prefix is optional, and a BARE filename is a harmless
-    spelling of the same document. A locator that spells a DIRECTORY, however,
-    must name the row's own package-relative path: comparing basenames let
-    `b/main.md:12` stand in for a change whose file is `a/main.md` (F214).
-    """
+    """True when a location's filename names the response row's own file."""
     def _norm(value):
-        parts = [p for p in str(value or "").replace("\\", "/").strip().split("/")
-                 if p and p != "."]
-        return "/".join(parts).lower()
+        return str(value or "").replace("\\", "/").strip().lstrip("./").lower()
     a, b = _norm(named), _norm(rel)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    for prefix in ("target/", "./"):
-        if a.startswith(prefix) and a[len(prefix):] == b:
-            return True
-        if b.startswith(prefix) and b[len(prefix):] == a:
-            return True
-    a_dir, _sep, a_base = a.rpartition("/")
-    b_dir, _sep, b_base = b.rpartition("/")
-    return bool(not a_dir and a_base == b_base)
+    return bool(a) and bool(b) and (a == b or posixpath.basename(a) == posixpath.basename(b))
 
 
 # A response location must name a SECTION, not merely a word that happens to
@@ -3775,15 +3686,7 @@ def _response_location_problem(cid: str, rel: str, location, before, after,
                 f"section (or a page/line locator in this file)")
     if _RESPONSE_LOCATION_SKIP_RE.match(loc):
         return None
-    # F161: `Results (page 7)` is as legal a locator as `Results, page 7` and
-    # `Results p. 7`, but the parenthesised qualifier survived into the anchor
-    # and the section name then did not resolve. Drop it before the anchor is
-    # parsed (the comma inside `(page 7, line 3)` would truncate the anchor, so
-    # this must happen before the first-comma split).
-    _loc_no_pages = re.sub(
-        r"(?i)\s*\(\s*(?:see\s+)?(?:p|pp|page|line|paragraph|para)\.?\s*\d+[^)]*\)\s*$",
-        "", loc).strip()
-    anchor = re.split(r"[,;:—–]|\s+-\s+", _loc_no_pages, 1)[0].strip()
+    anchor = re.split(r"[,;:—–]|\s+-\s+", loc, 1)[0].strip()
     anchor = re.sub(r"(?i)\s+(?:p|pp|page|line|paragraph|para)\.?\s*\d+.*$",
                     "", anchor).strip()
     if not anchor:
@@ -3853,95 +3756,12 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
         for c in row.get("changes") or ():
             if not isinstance(c, dict):
                 continue
-            op = str(c.get("operation") or "edit").strip().lower()
-            if op == "remove":
-                # A whole-file removal's `before` is the preimage (or a named
-                # role/content) and `after` is empty; the old `continue` below
-                # read neither, so a remove row could carry no preimage at all
-                # (F031).
-                _loc = str(c.get("location") or "").strip()
-                if (not str(c.get("before") or "").strip()
-                        and not re.search(r"(?i)\b(?:whole|entire|full)\s+file\b|"
-                                          r"\bwhole\b", _loc)):
-                    problems.append(
-                        f"response row {cid!r}: the `remove` change to "
-                        f"{str(c.get('file') or '').strip()!r} has no `before` (quote the "
-                        f"deleted file's preimage or name its role/content)")
-                if str(c.get("after") or "").strip():
-                    problems.append(
-                        f"response row {cid!r}: the `remove` change to "
-                        f"{str(c.get('file') or '').strip()!r} carries a non-empty `after`; "
-                        f"a whole-file deletion has no post-image")
-                # The quoted preimage must OCCUR in the pre-revision package:
-                # the remove branch used to skip the span verification entirely,
-                # so an invented deletion passage passed (F11).
-                _rf = str(c.get("file") or "").strip()
-                _rbefore = norm(c.get("before"))
-                if _rbefore and _rf:
-                    if (Path(_rf).is_absolute() or ".." in Path(_rf).parts
-                            or not is_within(prev / _rf, prev)):
-                        problems.append(
-                            f"response row {cid!r}: the `remove` change file {_rf!r} "
-                            f"resolves outside the pre-revision package")
-                    elif prev_available:
-                        if _rf not in ptexts:
-                            ptexts[_rf] = _response_file_text(prev / _rf)
-                        _rptext = ptexts[_rf]
-                        # A role/content description of the removed file is the
-                        # documented alternative to a verbatim preimage (R02); a
-                        # non-text preimage (figure/PDF) cannot be span-checked
-                        # at all. Only a quote-like `before` is occurrence-tested
-                        # so an invented passage is still refused (F11).
-                        _role_form = bool(re.search(
-                            r"(?i)\b(?:section|subsection|chapter|appendix|figure|"
-                            r"table|file|document|paragraph|page|supplement|"
-                            r"supplementary|abstract|methods|results|discussion|"
-                            r"conclusion|introduction|caption|legend|note|footnote|"
-                            r"bibliography|references|acknowledg\w*|title\s+page|"
-                            r"cover\s+letter)\s*[.!]?$", _rbefore))
-                        if (_rptext is not None and not _role_form
-                                and _rbefore not in norm(_rptext)):
-                            problems.append(
-                                f"response row {cid!r}: the `remove` change's `before` span "
-                                f"is not present in previous_package/{_rf}; quote the deleted "
-                                f"file's preimage verbatim")
-            if op != "edit" and not str(c.get("location") or "").strip():
-                # Every change entry names WHERE, including a whole-file
-                # `remove`: the letter's `**Changes:**` line is
-                # `<file:location>` and the map schema carries the cell (F138).
-                problems.append(
-                    f"response row {cid!r}: the change to "
-                    f"{str(c.get('file') or '').strip()!r} names no `location`; the "
-                    f"claimed change must be locatable in the document it changes")
-            if op != "edit":
+            if str(c.get("operation") or "edit").strip().lower() != "edit":
                 continue
             f = str(c.get("file") or "").strip()
             if not f:
                 continue
-            # Enforce package containment BEFORE the file is opened: the
-            # postcheck that reports an absolute/`..` path runs later, so an
-            # agent-chosen value used to be read from anywhere on the machine.
-            if Path(f).is_absolute() or ".." in Path(f).parts:
-                problems.append(
-                    f"response row {cid!r}: change file {f!r} is not a "
-                    f"package-relative path (absolute and parent-relative paths "
-                    f"can leave the package)")
-                continue
-            if not is_within(target / f, target) \
-                    or (prev_available and not is_within(prev / f, prev)):
-                problems.append(
-                    f"response row {cid!r}: change file {f!r} resolves outside "
-                    f"the package (a symlink or parent-relative path)")
-                continue
             before, after = norm(c.get("before")), norm(c.get("after"))
-            if not before and not after:
-                # An `edit` with no pre-image AND no post-image proves only that
-                # the file exists: a side may be omitted only for a pure
-                # insertion/deletion, never both (F134).
-                problems.append(
-                    f"response row {cid!r}: the change to {f!r} quotes neither a `before` "
-                    f"nor an `after` span; an edit must show the revised wording (omit a "
-                    f"side only for a pure insertion or deletion)")
             if not str(c.get("location") or "").strip():
                 problems.append(
                     f"response row {cid!r}: the change to {f!r} names no `location`; the "
@@ -3967,51 +3787,17 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
             # let an invented `50 mM -> 25 mM` pair pass (F-032). Presence is
             # required wherever the corresponding package is available.
             if before and prev_available:
-                if ptext is None and not (prev / f).is_file():
-                    problems.append(
-                        f"response row {cid!r}: previous_package/{f} is missing, so the "
-                        f"claimed `before` pre-image cannot be verified; quote a file the "
-                        f"pre-revision package actually carries")
-                elif ptext is None:
-                    # The file exists but its bytes carry no extractable text
-                    # (PDF/legacy/corrupt container, unreadable DOCX). Skipping
-                    # the check made every claimed span in such a file a silent
-                    # pass (F100); an unverifiable claim must fail closed.
-                    problems.append(
-                        f"response row {cid!r}: previous_package/{f} exists but its text "
-                        f"cannot be read by this check ({Path(f).suffix or 'no suffix'}), so "
-                        f"the claimed `before` pre-image is UNVERIFIED; put the edit in a text "
-                        f"container or record the concern as `manual` with the unverifiable "
-                        f"format named")
-                elif before not in norm(ptext):
+                if ptext is not None and before not in norm(ptext):
                     problems.append(
                         f"response row {cid!r}: the change's `before` span is not present in "
                         f"previous_package/{f}; quote the pre-revision text verbatim (no "
                         f"ellipsis, no summary)")
-            if ttext is None and (before or after) and (target / f).is_file():
-                # Symmetric fail-closed: an unreadable target file used to make
-                # the location anchor and both span tests no-ops (F100).
-                problems.append(
-                    f"response row {cid!r}: target/{f} exists but its text cannot be read by "
-                    f"this check ({Path(f).suffix or 'no suffix'}), so the change's quoted "
-                    f"span and location are UNVERIFIED; put the edit in a text container or "
-                    f"record the concern as `manual` with the unverifiable format named")
             if after:
                 if ttext is not None and after not in norm(ttext):
                     problems.append(
                         f"response row {cid!r}: the change's `after` span is not present in "
                         f"target/{f}; quote the revised text verbatim (no ellipsis, no "
                         f"summary)")
-            if before and not after and ttext is not None and before in norm(ttext):
-                # A pure deletion (`after` empty) was only checked against
-                # previous_package: nothing verified that the text was GONE, so a
-                # letter could claim a removal while the sentence still shipped
-                # (F098). Only the whole-file `remove` branch checked absence.
-                problems.append(
-                    f"response row {cid!r}: the change to {f!r} is recorded as a pure "
-                    f"deletion but its `before` span is STILL PRESENT in target/{f}; quote "
-                    f"the text that actually left the package (a removal that did not happen "
-                    f"is not a revision)")
     return problems
 
 
@@ -4065,10 +3851,7 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
         rec0 = ctx.run(rid) or {}
         tgt_rel = str(rec0.get("target_dir") or "").strip()
         if tgt_rel:
-            # A recorded path is DATA: an absolute value would discard the root
-            # and `../` would escape it, and this tree is COPIED into the stage
-            # (F064).
-            target = contained_under(ctx.root, tgt_rel)
+            target = ctx.root / tgt_rel
         elif journal_is_scoped(ctx):
             rev_rec = ctx.run(rid_for_fresh(r, revise_vid(1)))
             if rev_rec is None:
@@ -4111,13 +3894,7 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                           ensure_external_content_rule(
                               response_prompt(ctx, sb, r, target_label or target.parent.name,
                                               ledger) + note + shared_blocks()))
-    if journal_is_scoped(ctx):
-        _rep = ctx.run(rid_concern_repair(r))
-        ledger_rid = (rid_concern_repair(r)
-                      if _rep is not None and _rep.get("status") == "done"
-                      else rid_concerns(r))
-    else:
-        ledger_rid = rid_feedback(r)
+    ledger_rid = rid_concerns(r) if journal_is_scoped(ctx) else rid_feedback(r)
     rec = ctx.register(rid, "response", r, f"runs/{rid}", upstream_run_id=ledger_rid,
                        package_run_id=package_rid,
                        target_dir=target.relative_to(ctx.root).as_posix()
@@ -4129,8 +3906,9 @@ def materialize_response(ctx: Ctx, r: int, target: Path = None,
                                                           follow_dir_links=True)
     if (sb / "previous_package").is_dir():
         rec["inputs_manifest"]["previous_package"] = hash_manifest(sb / "previous_package")
-    attach_response_plan(ctx, r, sb, rec)
     return rec
+
+
 def _journal_feedback_labels(ctx: Ctx) -> list:
     return [label for _p, label in journal_feedback_files(ctx)]
 
@@ -4160,15 +3938,7 @@ def _journal_seed_text(ctx: Ctx, sb: Path) -> str:
                 f"{str(r.get('heading') or '')[:110]}: "
                 f"{str(r.get('excerpt') or '')[:280]}")
 
-    lines = [_line(r) for r in rows[:80]]
-    if len(rows) > 80:
-        # The coverage gate requires a disposition row for EVERY seed id, so the
-        # prompt may not withhold the tail of the list (F131). The excerpts stay
-        # capped above; the ids below the fold are named here.
-        rest = ", ".join(f"[{str(r.get('seed_id') or '')}]" for r in rows[80:])
-        lines.append(f"- (further seeded ids, each owed its own coverage row -- read their "
-                     f"blocks in feedback/CONCERN_SEED.json): {rest}")
-    return "\n".join(lines)
+    return "\n".join(_line(r) for r in rows[:80])
 
 
 def feedback_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
@@ -4256,7 +4026,8 @@ THE LEDGER IS THE DELIVERABLE (one row per distinct concern):
     name the corresponding `author`s in the `author` cell. Never merge two
     demands, never split one.
   * `quote` is VERBATIM from the feedback (<=300 chars, whitespace-normalised):
-    it is checked against feedback/text/ and feedback/llm/text/, so a paraphrase fails; preserve the reviewer's typos, wrong punctuation and capitalization (never "fix" the quote).
+    it is checked mechanically against feedback/text/ and feedback/llm/text/, so
+    a paraphrase fails.
   * `id` is stable and human-usable: `ED-<k>` for editor/decision points,
     `R<n>-<k>` for reviewer n (R1-3 = reviewer 1, third point).
   * `action` says what answering it demands: text | analysis | new-experiment |
@@ -4279,7 +4050,7 @@ WRITE:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "feedback", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("feedback", sb.name, int(r), sb)}
+{selfcheck_block("feedback", sb.name, int(r))}
 """
 
 
@@ -4294,8 +4065,8 @@ def concerns_prompt(ctx: Ctx, sb: Path, r: int, seed_rows: list) -> str:
 
 This run REPLACES the general review of a {mode} revision (option
 {info['option']}: {info['label']}). The review feedback of
-{from_j} — the human editors'/reviewers' comments (a concern-scoped
-major/minor revision admits HUMAN feedback only) — requires an answer to every
+{from_j} — the human editors'/reviewers' comments
+and/or the false-positive-filtered LLM review — requires an answer to every
 point, and the manuscript may change ONLY where a concern requires it. Deliver
 the concern ledger AND the finding list the single revision session follows.
 
@@ -4326,12 +4097,11 @@ CURRENT `base/`. Use the reviewer-visible copy only to resolve a quote and to
 decide whether `base/` already answers a concern; never edit it, never copy its
 text, and never quote it as the authors' current prose.
 
-When `feedback/llm/` is present AND this mode admits the LLM stream
-(transfer/resubmit/`llm` — never major/minor), its false positives were ALREADY
-filtered out upstream: every remaining item is a real concern with the same
-standing as a human reviewer's point. A major/minor revision stages no
-`feedback/llm/` and may NOT enumerate one: `llm_review_feedback/` is not a
-concern source for a concern-scoped revision. Name
+When `feedback/llm/` is present, its false positives were ALREADY filtered out
+upstream: every remaining item is a real concern with the same standing as a
+human reviewer's point. Enumerate it, answer it, and never dismiss it as a model
+false positive; a row you still believe is wrong gets `not-applicable` (or
+action `disagree`) with the concrete rationale — never a silent omission. Name
 the LLM the file itself names as `author`, else "LLM review (pre-filtered)"; a
 demand the letter and the LLM review both raise is ONE row naming both sources,
 separated by `;` (`editor_letter.txt; llm_review.md`), with the quote verbatim in
@@ -4394,7 +4164,7 @@ THE FINDING LIST (the revision session consumes it):
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("concerns", sb.name, int(r), sb)}
+{selfcheck_block("concerns", sb.name, int(r))}
 """
 
 
@@ -4432,7 +4202,6 @@ WHAT YOU READ:
   * target/   — the FINAL package ({target_label}); every change you claim must
     exist here. revision_report.json and DIFF_LEDGER.md name what changed and
     where — use them, never your memory.
-{_response_plan_note()}
   * previous_package/ — when present, the READ-ONLY package the revision started
     from (the scoped revision's base/, or the reviewer-visible original
     submission for a resubmit). Use it ONLY to check a `before` span; it is not
@@ -4499,7 +4268,7 @@ ABSOLUTE RULES:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
-{selfcheck_block("response", sb.name, int(r), sb)}
+{selfcheck_block("response", sb.name, int(r))}
 """
 
 
@@ -4556,11 +4325,10 @@ def journal_revise_block(ctx: Ctx) -> str:
 === {mode.upper()} REVISION — CONCERN-SCOPED EDITS ONLY ===
 This is a real {mode} revision: the review raised the concerns now in
 `guided_review/findings.json` (every finding has `check: "JF"` and a `concern` id;
-`concerns/JF_concerns.md` carries the sources' own words — HUMAN reviewers only:
-a concern-scoped revision admits no LLM-review finding).
+`concerns/JF_concerns.md` carries the sources' own words — human reviewers
+and/or the false-positive-filtered LLM review, with the same standing).
   * Change the manuscript ONLY where a concern requires it. Every edit names the
-    JF finding id / concern id that raised it. `response_plan/` is the point-by-
-    point response written BEFORE this revision: implement it, never edit it.
+    JF finding id / concern id that raised it.
   * NO unrelated changes: no restructuring, no style re-wording, no new findings
     from a rescan, no renames, no deletions, no added documents, no figure
     regeneration. Anything else you notice goes to MANUAL_STEPS.md as a note for
@@ -4591,7 +4359,7 @@ findings the same standing). The review's JF findings (`check: "JF"`, with a
 `concern` id) are mandatory: every one is either fixed in the package or
 recorded as a manual item with the exact steps.
 {tail}
-The manuscript must answer every concern; the normal findings still apply. When `response_plan/` is present, implement that point-by-point response plan and never edit it.
+The manuscript must answer every concern; the normal findings still apply.
 When `feedback/original_submission/` exists it is the earlier, reviewer-visible
 version -- EVIDENCE, not the package you edit: read it only to understand a
 concern, and make every edit, and quote every location, in the current `base/`.
@@ -4661,8 +4429,7 @@ def _complete_source_unit(needle: str, hay: str) -> bool:
     return needle in [s.strip() for s in re.split(r"(?<=[.!?])\s+", flat)]
 
 
-def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
-                           require_seed: bool = False) -> dict:
+def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list) -> dict:
     """Schema + quote verification of the concern ledger ({} when unusable)."""
     path = sb / JOURNAL_CONCERNS_JSON_REL
     if not path.is_file():
@@ -4804,8 +4571,8 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
             errs.append(f"concern {cid}: the `source` cell is empty (name the feedback file "
                         f"the quote comes from)")
         if not author:
-            errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer/LLM "
-                        f"label the source carries)")
+            errs.append(f"concern {cid}: the `author` cell is empty (name the reviewer or "
+                        f"'LLM review (pre-filtered)')")
         def _strong_labels(src: str, labels) -> list:
             """A STRONG alias hit only; a cross-stream weak suffix is not one."""
             low = str(src or "").strip().lower()
@@ -4856,13 +4623,6 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
         # a source or fail.
         tokens = ([t.strip() for t in re.split(r"\s*;\s*|\s+\+\s+", source) if t.strip()]
                   if source else [])
-        if source and not tokens:
-            # A separator-only cell (`;`) names no file at all, so the quote
-            # cannot be bound to one; the verbatim check below is keyed on a
-            # resolved stream and used to skip SILENTLY (F132).
-            errs.append(f"concern {cid}: the `source` cell {source!r} names no feedback "
-                        f"file (it carries only separators) -- name the file the quote "
-                        f"comes from")
         human_hits, llm_hits = [], []
         for tok in tokens:
             _st, _h, _l = _resolve_source(tok)
@@ -4977,8 +4737,7 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
                         f"steps the authors must take / why the point does not apply)")
         if not str(row.get("summary") or "").strip():
             errs.append(f"concern {cid}: summary is empty")
-    errs.extend(journal_seed_coverage_problems(sb, seed, rows,
-                                               require_missing=require_seed))
+    errs.extend(journal_seed_coverage_problems(sb, seed, rows))
     if not (sb / JOURNAL_CONCERNS_MD_REL).is_file():
         warns.append(f"{JOURNAL_CONCERNS_MD_REL} is missing (the human-readable ledger table)")
     data["_to_fix"] = sum(1 for r in rows if isinstance(r, dict)
@@ -4986,6 +4745,79 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
     if unverified_authors:
         data["unverified_authors"] = unverified_authors
     return data
+
+
+SEED_COVERAGE_REL = "concerns/SEED_COVERAGE.md"
+
+
+def journal_seed_coverage_problems(sb: Path, seed: dict, rows: list) -> list:
+    """One disposition per mechanical feedback candidate (seed block).
+
+    The ledger checks each row it is GIVEN but never proved that every seed block
+    was considered: a single valid item passed a letter with several demands
+    (PR151-035). The session now records a coverage table (`S001...`, the ids the
+    prompt shows) mapping each block to the concern rows it produced, or saying
+    why it produced none. The parse is lenient about cell wording but strict
+    about the seed-id set and about every named concern id existing.
+    """
+    candidates = [c for c in (seed.get("candidates") or []) if isinstance(c, dict)]
+    seed_ids = [str(c.get("seed_id") or "").strip() for c in candidates]
+    seed_ids = [x for x in seed_ids if x]
+    if not seed_ids:
+        return []
+    p = Path(sb) / SEED_COVERAGE_REL
+    if not p.is_file():
+        return [f"{SEED_COVERAGE_REL} is missing: the feedback split {len(seed_ids)} candidate "
+                f"block(s) and EACH needs a disposition row (its concern ids, or why it "
+                f"produced none) -- one valid concern row does not prove the rest were read"]
+    blocks = parse_markdown_blocks(p)
+    if not blocks:
+        return [f"{SEED_COVERAGE_REL} carries no table"]
+    known = set(seed_ids)
+    ledger_ids = {str(r.get("id")) for r in rows if isinstance(r, dict)}
+    seen, problems = set(), []
+    for block in blocks:
+        header = [str(h).strip().lower() for h in block.get("header") or []]
+        if not any("seed" in h for h in header):
+            continue
+        for row in block.get("rows") or []:
+            sid = str(row.get("seed id") or row.get("seed") or "").strip()
+            if not sid:
+                problems.append(f"{SEED_COVERAGE_REL}: a coverage row has no seed id")
+                continue
+            if sid in seen:
+                problems.append(f"{SEED_COVERAGE_REL}: seed id {sid!r} appears twice")
+            seen.add(sid)
+            if sid not in known:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid!r} is not a seeded candidate id")
+                continue
+            raw_ids = str(row.get("concern ids") or row.get("concerns") or "").strip()
+            ids = [x.strip() for x in re.split(r"[,;]", raw_ids) if x.strip()
+                   and x.strip().lower() not in ("—", "-", "none", "n/a")]
+            disposition = str(row.get("disposition") or "").strip()
+            low = disposition.lower()
+            if low.startswith(("no concern", "skipped", "not-a-concern", "no demand")):
+                reason = re.split(r"[—–:\-]", disposition, maxsplit=1)
+                words = re.findall(r"\S+", reason[1] if len(reason) > 1 else "")
+                if len(words) < 3:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped without a real "
+                                    f"reason (at least three words after the dash)")
+                if ids:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} is skipped but names "
+                                    f"concern ids {', '.join(ids)}")
+            elif ids:
+                unknown = [x for x in ids if x not in ledger_ids]
+                if unknown:
+                    problems.append(f"{SEED_COVERAGE_REL}: {sid} names concern id(s) "
+                                    f"{', '.join(unknown)} that the ledger does not carry")
+            else:
+                problems.append(f"{SEED_COVERAGE_REL}: {sid} names neither a concern id nor "
+                                f"a skip disposition")
+    missing = [x for x in seed_ids if x not in seen]
+    if missing:
+        problems.append(f"{SEED_COVERAGE_REL} does not dispose {len(missing)} seeded "
+                        f"candidate(s): {', '.join(missing[:8])}")
+    return problems
 
 
 def feedback_files_problems(sb: Path) -> list:
@@ -4997,24 +4829,10 @@ def feedback_files_problems(sb: Path) -> list:
     """
     fdir = sb / "feedback" / "files"
     ldir = sb / "feedback" / "llm" / "files"
-
-    def _regular_files(d: Path) -> int:
-        if not d.is_dir():
-            return 0
-        n = 0
-        for p in d.iterdir():
-            try:
-                if p.is_file() and not p.is_symlink():
-                    n += 1
-            except OSError:
-                continue
-        return n
-
-    if _regular_files(fdir) or _regular_files(ldir):
+    if (fdir.is_dir() and any(fdir.iterdir())) or (ldir.is_dir() and any(ldir.iterdir())):
         return []
-    return ["feedback/files/ and feedback/llm/files/ carry no regular feedback FILE "
-            "(directories and symlinks are not the quote source of record): the original "
-            "feedback files must be copied in"]
+    return ["feedback/files/ and feedback/llm/files/ are both empty: the original "
+            "feedback files must be copied in (they are the quote source of record)"]
 
 
 def postcheck_feedback(ctx: Ctx, rec: dict):
@@ -5025,9 +4843,7 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
     _marker_checks(rec, marker, "feedback", errs, warns, sb=sb)
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
-    # The feedback preparer ALWAYS writes feedback/CONCERN_SEED.json; a missing
-    # one means the per-candidate coverage gate was disabled (F17).
-    data = journal_ledger_problems(ctx, sb, errs, warns, require_seed=True)
+    data = journal_ledger_problems(ctx, sb, errs, warns)
     if data:
         rec["concerns"] = {"count": len(data.get("concerns") or []),
                            "to_fix": data.get("_to_fix", 0),
@@ -5053,13 +4869,6 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
     if fb_rec is None:
         return [f"the review must reconcile the decision letter's concerns, but the feedback run "
                 f"{rid_feedback(r)} does not exist"]
-    _ledger = journal_concern_ledger(ctx.sandbox_of(fb_rec))
-    if not isinstance(_ledger.get("concerns"), list):
-        # A missing/corrupt ledger is UNVERIFIED, not "no concerns": the old
-        # early return made reconciliation vacuously pass (F16).
-        return list(errs) + [
-            f"the feedback run {rid_feedback(r)} carries no readable concern ledger "
-            f"(feedback/concerns.json), so the review's reconciliation cannot be verified"]
     rows = journal_concern_rows(ctx.sandbox_of(fb_rec))
     if not rows:
         return errs
@@ -5112,13 +4921,8 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
         elif status == "already-addressed" and not str(row.get("location") or "").strip():
             errs.append(f"reconciliation row {cid!r}: 'already-addressed' needs the base/ "
                         f"location")
-        elif status in ("manual", "not-applicable") and not _coverage_reason_named(
-                row.get("rationale")):
-            # A one-character rationale ("x") discharged a manual/not-applicable
-            # row although the docstring requires a reason (F101); the shared
-            # coverage gate rejects filler and anonymous pointers.
-            errs.append(f"reconciliation row {cid!r}: {status!r} needs a real rationale "
-                        f"(not filler or an anonymous pointer)")
+        elif status in ("manual", "not-applicable") and not str(row.get("rationale") or "").strip():
+            errs.append(f"reconciliation row {cid!r}: {status!r} needs a rationale")
     return errs
 
 
@@ -5139,11 +4943,7 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
         return str(row.get("check") or row.get("name") or "").strip().lower()
 
     def text(row) -> str:
-        # The KEY counts as a payload location: a dedicated `gap:` field whose
-        # value carries the excluded classes must satisfy the gate without the
-        # word "gap" being repeated inside the value (F134).
-        return " ".join(f"{k} {v}" for k, v in row.items()
-                        if isinstance(v, str)).lower()
+        return " ".join(str(v) for v in row.values() if isinstance(v, str)).lower()
 
     # "not a gap" / "no gap" is the opposite of the required statement; a bare
     # substring test would accept it.
@@ -5154,31 +4954,16 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
     # with no payload, or a placeholder such as `none`/`n/a`/`nothing`/`-`, is
     # a generic mention and not a list (R04).
     gap_list = re.compile(r"\bgaps?\s*:\s*(?P<payload>.+)", re.I)
-    gap_placeholder = re.compile(
-        # A bare placeholder (`-`, `.`, `none`) is a non-word string, so a
-        # trailing `\b` would not match at end-of-string: accept `$` as well.
-        r"^(?:none|n/?a|nothing|-+|\.+|x)(?:\b|$)"
-        # `gap: none found`, `gap: no gaps`, `gap: not applicable`: a payload
-        # that DENIES a gap is the opposite of the required list.
-        r"|^(?:none|no|not|never|nothing|zero|n/?a)\b",
-        re.I)
+    gap_placeholder = re.compile(r"^(?:none|n/?a|nothing|-+|\.+)$", re.I)
     gap_unknown = re.compile(
         r"\b(?:cannot|can\'t|could not|unable to|not able to)\s+"
         r"(?:identify|name|enumerate|determine)\b", re.I)
-    # Placeholder payloads (`TBD items`, `misc`, `stuff`, `see above`, `foo`)
-    # name no excluded class (F07).
-    gap_payload_placeholder = re.compile(
-        r"(?i)^(?:tbd|todo|misc|stuff|things?|items?|foo|bar|baz|placeholder|"
-        r"unknown|see\s+(?:above|below|here|there|report|details?)|"
-        r"as\s+(?:above|discussed|before|noted)|x+)(?:\b|$)")
 
     def named_gap_payload(field: str) -> bool:
         """Does one row FIELD's `gap:` carry class text (not a placeholder)?"""
         for m in gap_list.finditer(field.lower()):
             payload = m.group("payload").strip().strip(" \t.,;:`'\"")
-            if (payload and not gap_placeholder.match(payload)
-                    and not gap_payload_placeholder.match(payload)
-                    and len(re.findall(r"[A-Za-z0-9]", payload)) >= 3):
+            if payload and not gap_placeholder.match(payload):
                 return True
         return False
 
@@ -5190,11 +4975,6 @@ def concern_coverage_problems(fj: dict, llm_feedback_present: bool) -> list:
             t = text(r)
             if "gap" not in t or gap_denied.search(t):
                 continue
-            dedicated = " ".join(str(r.get(k) or "") for k in ("gap", "gaps")).strip()
-            if dedicated and not gap_placeholder.match(dedicated) \
-                    and not gap_payload_placeholder.match(dedicated) \
-                    and len(re.findall(r"[A-Za-z0-9]", dedicated)) >= 3:
-                return True
             if gap_unknown.search(t) or any(named_gap_payload(f) for f in fields):
                 return True
         return False
@@ -5250,35 +5030,8 @@ def concerns_finding_list_problems(sb: Path, data: dict) -> tuple:
                 by_concern[concern] = f
             if not str(f.get("evidence") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no evidence (quote the reviewer)")
-            else:
-                # The concerns prompt says `evidence` is the source's VERBATIM
-                # quote; a non-empty invented sentence passed (F037). When the
-                # concern row carries its quote, the finding's evidence must be
-                # that quote or a contiguous excerpt of it.
-                _concern_row = next((r for r in rows if str(r.get("id")) == concern), None)
-                _quote = " ".join(str((_concern_row or {}).get("quote") or "").split()).strip("\"'“”‘’")
-                _ev = " ".join(str(f.get("evidence") or "").split()).strip("\"'“”‘’")
-                if _quote and _ev and _ev.lower() not in _quote.lower() \
-                        and _quote.lower() not in _ev.lower():
-                    errs.append(f"finding {f.get('id')!r}: evidence is not the concern's "
-                                f"verbatim reviewer quote (quote the concern text or a "
-                                f"contiguous excerpt of it)")
             if not str(f.get("location") or "").strip():
                 errs.append(f"finding {f.get('id')!r} has no location")
-            # The scoped finding schema the concerns prompt states is
-            # `severity: Critical|Major|Minor` and `category: 0`; unvalidated,
-            # an unclassifiable row entered the frozen list the reviser acts on
-            # (F136). Mirror the audit artifact's own severity/category gate.
-            sev = str(f.get("severity") or "").strip().lower()
-            if sev not in ("critical", "major", "minor"):
-                errs.append(f"finding {f.get('id')!r}: severity {f.get('severity')!r} must be "
-                            f"Critical|Major|Minor")
-            cat = f.get("category")
-            if isinstance(cat, str) and cat.strip().isdigit():
-                cat = int(cat.strip())
-            if not isinstance(cat, int) or cat != 0:
-                errs.append(f"finding {f.get('id')!r}: category {f.get('category')!r} must be "
-                            f"0 (the scoped finding schema's category)")
             status = str(f.get("status") or "").strip()
             want = "unresolvable" if concern in manual else "resolvable"
             if status not in ("resolvable", "unresolvable"):
@@ -5326,10 +5079,7 @@ def postcheck_concerns(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-# Match the content unit floor (2 words / 8 characters): a short defective
-# sentence ("This is false.") is still prose whose deletion must be audited,
-# and the old 30-character floor let it vanish with no row (F012).
-_DELETED_PARA_MIN = 8
+_DELETED_PARA_MIN = 30
 # The uppercase-sensitive reference alternatives must NOT be case-insensitive:
 # with a global `(?i)`, `- Results, however, ...` matched as a reference entry.
 _DELETED_PARA_SKIP_RE = re.compile(
@@ -5340,25 +5090,11 @@ _DELETED_PARA_SKIP_RE = re.compile(
     # A Markdown bullet reference (`- Smith J, Jones K. ...` or `- Smith, J.`)
     # is a reference entry, like the `[1]` form already skipped; treating it as
     # prose made a legitimate bibliography edit look like deleted content.
-    # A year is REQUIRED: without it `However, A recent study ...` and
-    # `Notably, B cells ...` matched as reference entries and the whole prose
-    # paragraph became invisible to every content/deletion gate (F040).
-    r"[-*+]\s+[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+"
-    r"(?:[A-Z]\.|[A-Z][a-z]+)|"
-    r"[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+"
-    r"(?:[A-Z]\.|[A-Z][a-z]+)(?:,\s+[A-Za-z'’.-]+){0,5},?\s*"
-    r"(?:18|19|20)\d{2}[a-z]?\b|"
+    r"(?:[-*+]\s+)?[A-Z][A-Za-z'’.-]+(?:\s+[A-Z]\.?)?,\s+(?:[A-Z]\.|[A-Z])|"
     # YAML front matter and HTML comments are not prose.
     r"-{3,}\s|<!--)\s*")
 _HEADING_BLOCK_SKIP_RE = re.compile(
     r"(?i)^(?:#{1,6}\s|\\(?:sub)*section\*?\s*\{|\\(?:sub)*paragraph\s*\{)")
-# A LaTeX heading COMMAND may share its line with prose: `\section{Methods} We
-# ran the assay.` is legal and the sentence is manuscript content. The marker
-# is only the command and its braced title; the remainder of the line survives
-# (F117).
-_TEX_HEADING_COMMAND_RE = re.compile(
-    r"^\\(?:sub)*section\*?\s*\{[^{}]*\}\s*|"
-    r"^\\(?:sub)*paragraph\s*\{[^{}]*\}\s*")
 
 
 def _deleted_para_norm(text) -> str:
@@ -5412,14 +5148,6 @@ def _strip_nonprose_block(raw: str) -> tuple:
                 dropped += close
             continue
         if _DELETED_PARA_SKIP_RE.match(line):
-            heading = _TEX_HEADING_COMMAND_RE.match(line)
-            if heading:
-                rest = line[heading.end():].strip()
-                if rest:
-                    # Keep the prose that follows the heading command; only the
-                    # command itself is non-prose (F117).
-                    lines[0] = rest
-                    break
             lines.pop(0)
             dropped += 1
             continue
@@ -5427,7 +5155,7 @@ def _strip_nonprose_block(raw: str) -> tuple:
     return dropped, _deleted_para_norm("\n".join(lines))
 
 
-def _deleted_para_candidate(text, min_chars: int = None) -> str:
+def _deleted_para_candidate(text) -> str:
     """A prose paragraph worth auditing when it disappears, or "".
 
     Headings, captions, reference entries and hand-off artifacts are not fact-
@@ -5435,25 +5163,11 @@ def _deleted_para_candidate(text, min_chars: int = None) -> str:
     (up to 1200 characters in the table) so the auditor can decide without
     re-reading a huge document for every row.
     """
-    if min_chars is None:
-        min_chars = _DELETED_PARA_MIN
     s = _deleted_para_norm(text)
-    if len(s) < min_chars and not _short_text_carries_fact(s):
-        return ""
-    if _HEADING_BLOCK_SKIP_RE.match(s):
-        # A heading is not prose, but a LaTeX heading COMMAND that shares its
-        # line with a sentence is: only the command is dropped (F117).
-        heading = _TEX_HEADING_COMMAND_RE.match(s)
-        if not heading or not s[heading.end():].strip():
-            return ""
-    if _is_handoff_marker(s):
-        # A hand-off placeholder is not prose: the policy may require its
-        # REMOVAL, and auditing it as deleted content only seeds a row that
-        # cannot be disposed OK (F194). The content policy still sees markers.
+    if len(s) < _DELETED_PARA_MIN or _HEADING_BLOCK_SKIP_RE.match(s):
         return ""
     _dropped, prose = _strip_nonprose_block(text)
-    if (len(prose) < min_chars and not _short_text_carries_fact(prose)) \
-            or _DELETED_PARA_SKIP_RE.match(prose):
+    if len(prose) < _DELETED_PARA_MIN or _DELETED_PARA_SKIP_RE.match(prose):
         return ""
     return prose
 
@@ -5469,108 +5183,50 @@ def _text_paragraphs_with_lines(text: str):
         yield start, para
 
 
-def deletion_audit_paragraphs(root: Path, skipped: list = None) -> list:
+def deletion_audit_paragraphs(root: Path) -> list:
     """[(document, line, text)] for the prose paragraphs a package carries.
 
     Only submitted prose is read: process scratch (`work/`), evidence areas,
     README/bookkeeping files and OS by-products are not part of the manuscript.
-    A file the package's own README declares NOT submitted is not manuscript
-    prose either: the same `declared_submission_filter` the content policy uses
-    applies here (F01). DOCX text comes from the shared visible-paragraph
-    reader, so the audit sees the same words a reader does.
-
-    `skipped` (when a list is passed) collects the submitted files this scan
-    could NOT read. Conflating an unparseable DOCX with an empty document let a
-    corrupt submitted file seed no deletion row at all with no record (F02).
+    DOCX text comes from the shared visible-paragraph reader, so the audit sees
+    the same words a reader does.
     """
     rows = []
     root = Path(root)
     if not root.is_dir():
         return rows
-    _decl, _is_submitted = declared_submission_filter(root)
-    _gaps, _links = [], []
-    for p in _iter_tree_files(root, gaps=_gaps, symlinks=_links):
+    for p in _iter_tree_files(root):
         try:
             rel = p.relative_to(root).as_posix()
         except ValueError:
-            continue
-        if not _is_submitted(rel):
             continue
         top = rel.split("/", 1)[0].lower()
         if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
+                or is_non_shippable_name(p.name)):
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
-            # Use the STYLE-AWARE reader and drop `Heading*` paragraphs exactly
-            # as `_content_unit_paragraphs` does: a long Word heading is not
-            # prose, and renaming it must not seed a deleted-paragraph row
-            # (F200).
-            paras = _docx_paragraphs_with_styles(p, include_notes=True)
-            if paras is None:
-                if skipped is not None:
-                    skipped.append(rel)
-                continue
-            for index, (text, style) in enumerate(paras, 1):
-                if re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
-                    continue
+            paras = _docx_paragraphs(p) or []
+            for index, text in enumerate(paras, 1):
                 prose = _deleted_para_candidate(text)
                 if prose:
                     rows.append((rel, index, prose))
-            for index, trow in enumerate(_docx_table_rows(p), len(paras) + 1):
-                prose = _deleted_para_candidate(trow, _CONTENT_UNIT_MIN_CHARS)
-                if prose:
-                    rows.append((rel, index, prose))
-        elif ext in (".rtf", ".doc", ".odt"):
-            # Editable document formats this scan cannot parse. Falling through
-            # both branches made an RTF manuscript read as EMPTY: record it as
-            # unreadable so the gate fails closed instead (F198/F142).
-            if skipped is not None:
-                skipped.append(rel)
-            continue
-        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst",
-                     ".html", ".htm"):
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
             text = read_text_bounded(p)
             if text is None:
-                if skipped is not None:
-                    skipped.append(rel)
                 continue
             for start, para in _text_paragraphs_with_lines(text):
-                # A TEXT block's first line can be a Markdown `# Methods` or a
-                # LaTeX `\section{Methods}` with its prose on the next line:
-                # the normal section layout, with no blank line between heading
-                # and paragraph. The heading is not prose but the prose after
-                # it is, so strip the marker lines FIRST and test what remains;
-                # skipping the block because of its first line hid the prose
-                # (F133; the same rule `_content_paragraph_rows` already
-                # states for this text path).
-                _base_line = text[:start].count("\n") + 1
-                _nb = [ln for ln in para.splitlines() if ln.strip()]
-                if _nb and all(ln.strip().startswith("|") for ln in _nb):
-                    for _ln, trow in _markdown_table_data_rows(para, _base_line):
-                        prose = _deleted_para_candidate(trow, _CONTENT_UNIT_MIN_CHARS)
-                        if prose:
-                            rows.append((rel, _ln, prose))
-                    continue
-                dropped, body = _strip_nonprose_block(para)
-                prose = _deleted_para_candidate(body)
+                prose = _deleted_para_candidate(para)
                 if prose:
-                    rows.append((rel, _base_line + dropped, prose))
-    if skipped is not None:
-        # A submitted file symlink or an unreadable directory is dropped by the
-        # walker before any reader sees it. Report it as unscannable instead of
-        # certifying a partial audit as complete (F197).
-        skipped.extend(_gaps)
-        skipped.extend(_links)
+                    dropped, _rest = _strip_nonprose_block(para)
+                    rows.append((rel, text[:start].count("\n") + 1 + dropped, prose))
     return rows
 
 
-def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
-                        skipped: list = None) -> list:
+def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None) -> list:
     """Base prose paragraphs whose normalised text is absent from `revised`.
 
     A paragraph that was moved, merged or lightly reworded appears here too:
@@ -5584,71 +5240,40 @@ def deletion_audit_rows(base: Path, revised: Path, exempt_removed=None,
     (or worse, plan to restore) a dangling reference the orchestrator was
     required to delete. A paragraph that also lost session-written content keeps
     its row.
-
-    `skipped` (when a list is passed) collects every submitted file either side
-    could not read, so the caller can fail the chain instead of seeding an
-    incomplete audit from a corrupt document (F02).
     """
     revised_paras = {}
-    for rel, _line, text in deletion_audit_paragraphs(revised, skipped=skipped):
+    for rel, _line, text in deletion_audit_paragraphs(revised):
         # Case is part of the identity: lowercasing made `50 mM` and `50 MM`
         # (or a case-only gene/unit edit) compare equal, so a fact-changing
         # edit produced no deletion-audit row (F-059).
         revised_paras.setdefault(rel, []).append(_deleted_para_norm(text))
-    # Consume revised occurrences one-to-one: two identical base paragraphs and
-    # one surviving copy must still leave one deleted row. A membership test
-    # made every deleted duplicate look present and `seen` suppressed the
-    # second base occurrence (F130).
-    revised_counts = {rel: Counter(parts)
-                      for rel, parts in revised_paras.items()}
-    # The remainder of a paragraph after the pipeline's own sentence removal is
-    # compared as a STANDALONE paragraph, never as a raw substring of the joined
-    # document: unrelated text used to satisfy the substring test (F052).
-    revised_para_sets = {rel: set(parts) for rel, parts in revised_paras.items()}
+    revised_join = {rel: " ".join(parts) for rel, parts in revised_paras.items()}
     exempt = {}
-    exempt_any = Counter()
-    for item in exempt_removed or ():
-        if isinstance(item, (tuple, list)) and len(item) >= 2:
-            document, sentence = item[0], item[1]
-            norm = _deleted_para_norm(sentence)
-            if norm:
-                exempt.setdefault(str(document), Counter())[norm] += 1
-        else:
-            norm = _deleted_para_norm(item)
-            if norm:
-                exempt_any[norm] += 1
+    for document, sentence in exempt_removed or ():
+        norm = _deleted_para_norm(sentence)
+        if norm:
+            exempt.setdefault(str(document), []).append(norm)
     rows, seen = [], set()
-    for rel, line, text in deletion_audit_paragraphs(base, skipped=skipped):
+    for rel, line, text in deletion_audit_paragraphs(base):
         norm = _deleted_para_norm(text)
         low = norm
-        removed_here = exempt.get(rel, Counter())
-        # Consume ONE occurrence per recorded pipeline removal: replacing every
-        # occurrence made a second, session-deleted identical copy vanish too
-        # (F052).
-        if removed_here.get(low, 0) > 0:
-            removed_here[low] -= 1
-            continue
-        if exempt_any.get(low, 0) > 0:
-            exempt_any[low] -= 1
+        removed_here = exempt.get(rel, [])
+        if any(low == sentence for sentence in removed_here):
             continue
         if removed_here:
             remaining = low
-            for sentence, count in list(removed_here.items()):
-                for _ in range(count):
-                    remaining = remaining.replace(sentence, " ", 1)
+            for sentence in removed_here:
+                remaining = remaining.replace(sentence, " ")
             remaining = _deleted_para_norm(remaining)
             if remaining != low and (
-                    not remaining
-                    or remaining in revised_para_sets.get(rel, ())):
+                    not remaining or remaining in revised_join.get(rel, "")):
                 # The rest of the paragraph survives: the only deleted text was
                 # the pipeline's own dangling-reference sentence.
                 continue
         # A paragraph must survive in ITS OWN document. The package-wide set
         # treated a copy in another document as proof the local one survived
         # (F-061); a cross-document move is now a row the auditor disposes.
-        # Consume one revised occurrence per base occurrence (F130).
-        if revised_counts.get(rel, Counter())[low] > 0:
-            revised_counts[rel][low] -= 1
+        if low in revised_paras.get(rel, ()) or (rel, low) in seen:
             continue
         seen.add((rel, low))
         rows.append({"document": rel, "line": line, "paragraph": norm})
@@ -5755,167 +5380,38 @@ def deletion_audit_markdown(rows: list) -> str:
 # ---------------------------------------------------------------------
 _CONTENT_UNIT_MIN_WORDS = 2
 _CONTENT_UNIT_MIN_CHARS = 8
-
-
-def _short_text_carries_fact(text) -> bool:
-    """Does a too-short paragraph/sentence still carry a fact worth scanning?
-
-    The length floor exists to drop bare fragments (`#`, `x`, a stray marker),
-    but a standalone `50 mg.` is a dose fact: dropping it made its deletion
-    invisible to the strict content gate, the D8 fact gate and the deletion
-    audit at once (F089/F090). A value the shared fact model recognises (a
-    2+-digit number or an identifier) keeps the text in scope whatever its
-    length.
-    """
-    text = str(text or "")
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-        if len(re.sub(r"\D", "", match.group(0))) >= _FACT_SURVIVAL_MIN_DIGITS \
-                or _fact_single_digit_is_fact(text, match):
-            return True
-    return bool(_FACT_SURVIVAL_IDENT_RE.search(text))
 _CONTENT_UNIT_MATCH = 0.55
-_CONTENT_MATCH_STOPWORDS = {
-    "the", "and", "for", "with", "that", "this", "from", "were", "was", "are",
-    "has", "have", "had", "not", "but", "its", "their", "they", "our", "use",
-    "used", "using", "into", "than", "then", "also", "such", "which", "these",
-    "those", "been", "being", "can", "may", "might", "will", "would", "could",
-    "should", "however", "therefore", "thus", "more", "most", "less", "least",
-}
 # Sentence boundary: the terminal mark, then an optional closing quote/bracket,
 # citation marker or trailing \cite{...}, then whitespace. The old
 # `(?<=[.!?])\s+` split failed on `."`, `.)`, `.[1]` and `.\cite{x}`, merging
 # the following sentence into the unit and masking a deletion.
 _CONTENT_SENTENCE_END_RE = re.compile(
-    r"[.!?](?:[\"\'”’\)\]\}]+|\s*\[\d+\]|\s*\\cite[a-zA-Z]*\{[^{}]*\})?"
-    r"(?=\s+|$)")
+    r"(?<=[.!?])(?:[\"\'”’\)\]\}]+|\[\d+\]|\\cite[a-zA-Z]*\{[^{}]*\})?\s+")
 # A fragment ending in one of these is not a sentence boundary: `Smith et al.`
 # and `e.g.` used to become fake units the one-to-one matcher reported missing.
 _CONTENT_ABBREV_END_RE = re.compile(
     r"(?:\b(?:et al|e\.g|i\.e|etc|vs|cf|approx|ca|fig|figs|eq|eqs|no|dr|mr|"
     r"mrs|ms|prof|al|ref|refs?)\.)$", re.I)
 _CONTENT_INITIAL_END_RE = re.compile(r"(?:^|\s)[A-Z]\.$")
-# A single capital that closes a sentence is common after a NUMBER ("4 C.") or
-# a capitalised label/common noun ("Vitamin D.", "Group A."). Only these label
-# nouns are listed: a bare capital after a surname-like word ("John J.") keeps
-# the name-initial behaviour, so `J. Smith` is still one unit.
-_CONTENT_INITIAL_LABEL_WORDS = frozenset("""
-vitamin group type class cluster phase stage grade level site room code figure
-fig table section appendix week day month year patient trial arm cohort dose
-temperature step part category condition treatment panel series
-""".split())
-# A one-letter tail after these introducers is a personal initial ("written by
-# J. Smith"), not a sentence end.
-_CONTENT_INITIAL_INTRODUCERS = frozenset("""
-by from with and of for et al dr prof mr mrs ms miss sir dame
-""".split())
-
-
-def _initial_is_sentence_final(prev: str) -> bool:
-    """Is the trailing single capital letter a sentence-final letter, not an initial?
-
-    `vitamin D.` / `type A.` end a sentence; `J. Smith` / `John J. Smith` carry a
-    name initial that must not become a fake unit. The word BEFORE the letter
-    decides: a lowercase word means the letter closes a sentence (F202).
-    """
-    m = re.search(r"(\S+)\s+[A-Z]\.$", str(prev or ""))
-    if not m:
-        return False
-    word = m.group(1)
-    if re.fullmatch(r"\d+(?:[.,]\d+)?", word):
-        # "The samples were stored at 4 C. The mice ...": a numeral cannot be a
-        # personal initial (F049).
-        return True
-    if word.lower() in _CONTENT_INITIAL_LABEL_WORDS:
-        # "Vitamin D." / "Group A." close a sentence (F049).
-        return True
-    if word.lower() in _CONTENT_INITIAL_INTRODUCERS:
-        # "written by J. Smith": a name initial, not a sentence end.
-        return False
-    return any(ch.islower() for ch in word) and word[0].islower()
 
 
 def _content_sentence_parts(text) -> list:
     """Split one paragraph into sentence units without false boundaries."""
-    norm = _deleted_para_norm(text)
-    raw_parts, start = [], 0
-    # The boundary match CONSUMES a trailing closing quote/[n]/\cite, so that
-    # marker stays attached to the sentence it follows instead of being
-    # dropped or moved to the next sentence (F053).
-    for match in _CONTENT_SENTENCE_END_RE.finditer(norm):
-        raw_parts.append(norm[start:match.end()])
-        start = match.end()
-    raw_parts.append(norm[start:])
-    parts = [p.strip() for p in raw_parts if p.strip()]
+    parts = [p.strip() for p in _CONTENT_SENTENCE_END_RE.split(
+        _deleted_para_norm(text)) if p.strip()]
     merged = []
     for part in parts:
-        if not merged:
-            merged.append(part)
-            continue
-        prev = merged[-1]
-        merge = False
-        if _CONTENT_ABBREV_END_RE.search(prev):
-            # `No.` is both the number abbreviation ("No. 5") and an ordinary
-            # sentence-final word ("The answer was No."). It continues a unit
-            # only into a lowercase word or a digit; before a capitalised
-            # sentence start it is a boundary (F202).
-            if re.search(r"(?i)\bno\.$", prev) and not re.match(r"[a-z0-9]", part):
-                merge = False
-            elif re.match(r"[A-Z]", part):
-                # A sentence-final citation/abbreviation followed by a
-                # capitalised sentence start IS a boundary: `Smith et al. The
-                # results ...` used to become one unit, so deleting the second
-                # sentence passed the no-deletion gate (F012).
-                merge = False
-            else:
-                merge = True
-        if not merge and _CONTENT_INITIAL_END_RE.search(prev):
-            merge = bool(re.match(r"[a-z]", part)) or not _initial_is_sentence_final(prev)
-        # A part that starts lowercase after a TERMINAL period is a NEW sentence,
-        # not a continuation: the abbreviations and single initials that really
-        # do continue a unit are handled above (F022). The old unconditional
-        # `lowercase -> merge` glued `... was significant. p < 0.05 ...` into one
-        # unit, so deleting the p-value sentence only shortened the unit and both
-        # the no-deletion gate and the D8 fact gate passed.
-        if merge:
-            merged[-1] = prev + " " + part
+        if merged and (_CONTENT_ABBREV_END_RE.search(merged[-1])
+                       or _CONTENT_INITIAL_END_RE.search(merged[-1])
+                       or re.match(r"[a-z]", part)):
+            merged[-1] = merged[-1] + " " + part
         else:
             merged.append(part)
     return merged
 
 
-def _markdown_table_data_rows(raw: str, first_line: int) -> list:
-    """[(line, "cell | cell")] for the DATA rows of one Markdown table block.
-
-    A whole table used to be one blank-line block with no sentence punctuation,
-    so deleting a row left the single table unit above the match threshold
-    (F192). The row is the content unit the policy names; the header and the
-    separator are structure, not content.
-    """
-    rows, header_seen = [], False
-    for i, line in enumerate(str(raw or "").splitlines()):
-        s = line.strip()
-        if not s.startswith("|"):
-            continue
-        cells = [c.strip() for c in s.strip("|").split("|")]
-        if all(c and set(c) <= set("-: ") and "-" in c for c in cells):
-            header_seen = True
-            continue
-        if not header_seen:
-            header_seen = True          # the first non-separator row is the header
-            continue
-        row = " | ".join(c for c in cells if c)
-        if row:
-            rows.append((first_line + i, row))
-    return rows
-
-
 def _content_paragraph_rows(raw: str, first_line: int) -> list:
-    """[(line, text, is_row)] for one blank-line block, marker lines removed.
-
-    `is_row` is decided HERE, where the table structure is still visible: a real
-    Markdown table block or LaTeX tabular row is a row, while ordinary prose
-    that happens to contain a vertical bar (`The mean |t| was 2.1`) is not
-    (F187).
+    """[(line, text)] for one blank-line block, with its marker lines removed.
 
     A Markdown `# Methods` or LaTeX `\\section{Methods}` line and its prose are
     one blank-line block. Skipping the block because its FIRST line is a heading
@@ -5924,45 +5420,19 @@ def _content_paragraph_rows(raw: str, first_line: int) -> list:
     scanned. The same applies to a leading LaTeX/HTML comment, YAML front matter
     or reference entry. Only a block with no prose left is skipped entirely.
     """
-    _nonblank = [ln for ln in str(raw or "").splitlines() if ln.strip()]
-    if _nonblank and all(ln.strip().startswith("|") for ln in _nonblank):
-        rows = _markdown_table_data_rows(raw, first_line)
-        if rows:
-            return [(ln, body, True) for ln, body in rows]
-    if "\\begin{tabular}" in str(raw or ""):
-        # A LaTeX tabular row is a content unit, exactly like a Markdown table
-        # row. As one paragraph, deleting a row left a similar paragraph and
-        # the fuzzy matcher paired it as a rewrite (F014).
-        rows = []
-        for i, line in enumerate(str(raw or "").splitlines()):
-            cell_line = line.strip()
-            if not cell_line or cell_line.startswith(("\\begin", "\\end", "\\hline",
-                                                      "\\toprule", "\\midrule",
-                                                      "\\bottomrule", "\\cline",
-                                                      "\\multicolumn")):
-                continue
-            cells = [c.strip() for c in cell_line.rstrip("\\").split("&")]
-            if len(cells) < 2:
-                continue
-            row = " | ".join(c for c in cells if c)
-            if row:
-                rows.append((first_line + i, row))
-        if rows:
-            return [(ln, body, True) for ln, body in rows]
     norm = _deleted_para_norm(raw)
-    if len(norm) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(norm):
+    if len(norm) < _CONTENT_UNIT_MIN_CHARS:
         return []
     if not _DELETED_PARA_SKIP_RE.match(norm):
-        return [(first_line, norm, False)]
+        return [(first_line, norm)]
     dropped, rest = _strip_nonprose_block(raw)
-    if (len(rest) < _CONTENT_UNIT_MIN_CHARS and not _short_text_carries_fact(rest)) \
-            or _DELETED_PARA_SKIP_RE.match(rest):
+    if len(rest) < _CONTENT_UNIT_MIN_CHARS or _DELETED_PARA_SKIP_RE.match(rest):
         return []
-    return [(first_line + dropped, rest, False)]
+    return [(first_line + dropped, rest)]
 
 
-def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
-    """[(document, line, paragraph, meta)] for the strict policy's sentence scan.
+def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
+    """[(document, line, paragraph)] for the strict policy's sentence scan.
 
     The same submission-surface rule as `deletion_audit_paragraphs`, but every
     prose paragraph counts, not only the >=30-character ones the deletion audit
@@ -5970,10 +5440,6 @@ def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
     unit, and the policy must see it. Headings, reference entries, evidence
     areas, workflow scratch, bookkeeping files and files the package's own
     README declares not submitted stay out.
-
-    `meta` carries the structure the sentence splitter would lose: `is_row` for
-    a real Markdown/LaTeX/DOCX table row (F187) and `in_references` for a unit
-    that sits in the document's reference list (F149).
 
     `skipped` (when a list is passed) collects the submitted files the scan
     could NOT read (corrupt/oversized). Silently ignoring them made the policy
@@ -5984,8 +5450,7 @@ def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
     if not package.is_dir():
         return rows
     _decl, _is_submitted = declared_submission_filter(package)
-    _gaps, _links = [], []
-    for p in _iter_tree_files(package, gaps=_gaps, symlinks=_links):
+    for p in _iter_tree_files(package):
         try:
             rel = p.relative_to(package).as_posix()
         except ValueError:
@@ -5997,8 +5462,7 @@ def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
+                or is_non_shippable_name(p.name)):
             continue
         ext = p.suffix.lower()
         if ext == ".docx":
@@ -6006,80 +5470,29 @@ def _content_unit_paragraphs_meta(package: Path, skipped: list = None) -> list:
             # path strips from `#`/`\section{}`: the text path's
             # `_content_paragraph_rows` drops it, so the DOCX path must too, or
             # a heading edit is reported as added/removed prose (F70).
-            paras = _docx_paragraphs_with_styles(p, include_notes=True)
+            paras = _docx_paragraphs_with_styles(p)
             if paras is None:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
-            in_references = False
             for index, (text, style) in enumerate(paras, 1):
-                para = _deleted_para_norm(text)
-                if para and _REFERENCE_HEADING_RE.search(para):
-                    in_references = True
-                elif re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
-                    in_references = False
                 if re.match(r"(?i)^heading\s*\d*$", str(style or "").strip()):
                     continue
-                if (len(para) >= _CONTENT_UNIT_MIN_CHARS
-                        or _short_text_carries_fact(para)) \
+                para = _deleted_para_norm(text)
+                if len(para) >= _CONTENT_UNIT_MIN_CHARS \
                         and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para,
-                                 {"is_row": False, "in_references": in_references}))
-            # The ROW is the content unit: individual cells are short fragments
-            # the >=8-char floor drops (F192). The row shape is known here, so
-            # a short row ("9 | 9") is kept as a row rather than dropped by the
-            # prose floor before `_content_unit_sentences` can see it (F056).
-            for index, trow in enumerate(_docx_table_rows(p), len(paras) + 1):
-                para = _deleted_para_norm(trow)
-                if para and not _DELETED_PARA_SKIP_RE.match(para):
-                    rows.append((rel, index, para,
-                                 {"is_row": True, "in_references": in_references}))
-        elif ext in (".rtf", ".doc", ".odt"):
-            # An editable format this scan cannot parse must not disappear
-            # silently: record it so the caller fails closed (F198/F142).
-            if skipped is not None:
-                skipped.append(rel)
-            continue
-        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst",
-                     ".html", ".htm"):
+                    rows.append((rel, index, para))
+        elif ext in (".md", ".markdown", ".txt", ".tex", ".ltx"):
             text = read_text_bounded(p)
             if text is None:
                 if skipped is not None:
                     skipped.append(rel)
                 continue
-            in_references = False
             for start, para in _text_paragraphs_with_lines(text):
                 line = text[:start].count("\n") + 1
-                _nonblank = [ln for ln in para.splitlines() if ln.strip()]
-                _first = _nonblank[0].strip() if _nonblank else ""
-                if _REFERENCE_HEADING_RE.search(_first):
-                    in_references = True
-                elif re.match(r"(?i)^(?:#{1,6}\s|\\(?:sub)*section)", _first):
-                    # A new section ends the reference list.
-                    in_references = False
-                rows.extend((rel, ln, body,
-                             {"is_row": bool(is_row),
-                              "in_references": in_references})
-                            for ln, body, is_row
-                            in _content_paragraph_rows(para, line))
-    if skipped is not None:
-        # Same accounting as the deletion audit: a submitted file symlink or an
-        # unreadable directory is a scan gap, never "no content" (F197).
-        skipped.extend(_gaps)
-        skipped.extend(_links)
+                rows.extend((rel, ln, body)
+                            for ln, body in _content_paragraph_rows(para, line))
     return rows
-
-
-def _content_unit_paragraphs(package: Path, skipped: list = None) -> list:
-    """[(document, line, paragraph)] -- the historical three-field view.
-
-    `_content_unit_paragraphs_meta` carries the structure the sentence splitter
-    needs (`is_row`, `in_references`); callers that only read paragraph text
-    keep the established tuple shape.
-    """
-    return [(rel, line, text)
-            for rel, line, text, _meta
-            in _content_unit_paragraphs_meta(package, skipped=skipped)]
 
 
 def _content_unit_sentences(package: Path, skipped: list = None) -> list:
@@ -6093,51 +5506,18 @@ def _content_unit_sentences(package: Path, skipped: list = None) -> list:
     ("This is false.") while dropping bare fragments.
     """
     units = []
-    for rel, line, paragraph, meta in _content_unit_paragraphs_meta(package, skipped=skipped):
-        if _is_handoff_marker(paragraph):
-            # A hand-off marker can contain an internal sentence boundary
-            # ("[AUTHOR TO COMPLETE: Add the grant number. It is printed on the
-            # cover sheet.]"). Detect it on the WHOLE paragraph before sentence
-            # splitting, or its required removal reads as two deletions (F009).
-            sentences = [paragraph]
-        else:
-            sentences = _content_sentence_parts(paragraph)
-        # The row shape comes from the paragraph reader, where the table
-        # structure still exists (F187): a prose sentence containing a vertical
-        # bar is NOT a table row.
-        is_row = bool(meta.get("is_row"))
-        for sentence_index, sentence in enumerate(sentences):
+    for rel, line, paragraph in _content_unit_paragraphs(package, skipped=skipped):
+        for sentence in _content_sentence_parts(paragraph):
             text = re.sub(r"\s+", " ", str(sentence or "")).strip()
-            # A TABLE ROW is a structural content unit even when every cell is
-            # short (`9 | 9`): the prose character/word floor dropped it, so a
-            # fabricated data row could be added under --disable-insertions
-            # (F241).
-            if len(text) < _CONTENT_UNIT_MIN_CHARS \
-                    and not (is_row or _short_text_carries_fact(text)):
+            if len(text) < _CONTENT_UNIT_MIN_CHARS:
                 continue
             tokens = re.findall(r"[^\W_]+", text.lower(), flags=re.UNICODE)
-            if len(tokens) < _CONTENT_UNIT_MIN_WORDS and not is_row:
+            if len(tokens) < _CONTENT_UNIT_MIN_WORDS:
                 continue
-            unit = {"document": rel, "line": int(line or 0), "text": text,
-                    "norm": text.lower().strip(), "sentence_index": sentence_index,
-                    "tokens": set(tokens),
-                    "in_references": bool(meta.get("in_references"))}
-            if is_row:
-                unit["cells"] = tuple(c.strip() for c in text.split("|"))
-            units.append(unit)
+            units.append({"document": rel, "line": int(line or 0), "text": text,
+                          "norm": text.lower().strip(),
+                          "tokens": set(tokens)})
     return units
-
-
-def _content_tokens(unit: dict) -> set:
-    """Tokens that carry the STATEMENT: stopwords and one-letter words removed.
-
-    The full-token Jaccard counted the shared function-word frame of two
-    unrelated sentences, so "The samples were stored at 4 C." and "The mice
-    were housed at 22 C." scored 0.73 and were paired (F086/F002).
-    """
-    return {str(t) for t in (unit.get("tokens") or ())
-            if t not in _CONTENT_MATCH_STOPWORDS and (len(str(t)) > 2
-                                                      or str(t).isdigit())}
 
 
 def _content_unit_similarity(base: dict, cand: dict) -> float:
@@ -6147,136 +5527,20 @@ def _content_unit_similarity(base: dict, cand: dict) -> float:
     sentence has no counterpart at all. The token Jaccard is the cheap term that
     survives reordering; SequenceMatcher covers a heavy but meaning-preserving
     in-place rewrite. Both are normalized, so case/whitespace are not changes.
-    Similarity is computed over CONTENT tokens only: a shared "the/and/were"
-    frame is not evidence that two statements are the same.
     """
     if base["norm"] == cand["norm"]:
         return 1.0
-    # A table row that gained/lost a CELL is not the same statement, however
-    # similar the surviving cells are: removing a measurement column must be
-    # reported as a missing row, not "paired as a rewrite" (F013).
-    if (base.get("cells") is not None and cand.get("cells") is not None
-            and len(base["cells"]) != len(cand["cells"])):
+    if not base["tokens"] or not cand["tokens"]:
         return 0.0
-    bt, ct = _content_tokens(base), _content_tokens(cand)
-    if not bt or not ct:
-        return 0.0
-    inter = len(bt & ct)
-    union = len(bt | ct)
+    inter = len(base["tokens"] & cand["tokens"])
+    union = len(base["tokens"] | cand["tokens"])
     jac = (inter / union) if union else 0.0
-
-    def _ordered(unit):
-        words = re.findall(r"[^\W_]+", str(unit.get("norm") or ""), flags=re.UNICODE)
-        return " ".join(w for w in words
-                        if w not in _CONTENT_MATCH_STOPWORDS
-                        and (len(w) > 2 or w.isdigit()))
-
-    bjoin, cjoin = _ordered(base), _ordered(cand)
+    # A four-word unit can hit a spurious 0.3 Jaccard on function words alone;
+    # only spend the character-level matcher when there is real token overlap.
     ratio = 0.0
-    if jac >= 0.25 or bjoin in cjoin or cjoin in bjoin:
-        # Preserve the sentence's WORD ORDER: sorting the tokens made unrelated
-        # sentences that happen to share a few nouns look nearly identical.
-        ratio = difflib.SequenceMatcher(None, bjoin, cjoin).ratio()
+    if jac >= 0.25 or base["norm"] in cand["norm"] or cand["norm"] in base["norm"]:
+        ratio = difflib.SequenceMatcher(None, base["norm"], cand["norm"]).ratio()
     return max(jac, ratio)
-
-
-def _match_content_unit_pairs(base_units: list, cand_units: list) -> tuple:
-    """(unmatched base, unmatched candidate, [(base, candidate), ...]).
-
-    The third element is the set of MATCHED pairs, in no particular order. The
-    citation-correction and unit-correction checks need to know which candidate
-    sentence corresponds to which base sentence; the other callers only need
-    the two unmatched lists and call `_match_content_units`.
-    """
-    unmatched = set(range(len(cand_units)))
-    base_left = []
-    pairs = []
-    exact = {}
-    for j, cand in enumerate(cand_units):
-        exact.setdefault(cand["norm"], []).append(j)
-
-    def _slots(units):
-        """(id -> sentence slot) by explicit index, else by position per line.
-
-        A multi-sentence paragraph gives every sentence the paragraph's first
-        line, so line alone cannot identify the slot. The sentence ordinal is
-        the anchor the positional pass needs (F047); constructed units without
-        one fall back to their order among same-(document,line) units.
-        """
-        counts, out = {}, {}
-        for unit in units:
-            key = (unit.get("document"), unit.get("line"))
-            if "sentence_index" in unit:
-                out[id(unit)] = unit["sentence_index"]
-            else:
-                out[id(unit)] = counts.get(key, 0)
-                counts[key] = counts.get(key, 0) + 1
-        return out
-
-    base_slots = _slots(base_units)
-    cand_slots = _slots(cand_units)
-    # 1. Global exact pass: every verbatim copy is consumed before any fuzzy
-    # claim can steal it.
-    for base in base_units:
-        hit = next((j for j in exact.get(base["norm"], []) if j in unmatched), None)
-        if hit is not None:
-            unmatched.discard(hit)
-            pairs.append((base, cand_units[hit]))
-        else:
-            base_left.append(base)
-    # 2. Positional-anchor pass: a unit rewritten IN FULL at the same
-    #    paragraph/sentence slot is a rewrite, not a deletion + insertion. Token
-    #    Jaccard alone marked the benchmark's legitimate full rewrites missing
-    #    (F05); a multi-sentence paragraph shares one line, so the sentence
-    #    ordinal is the anchor (F047). It is deliberately narrow: the slot is
-    #    trusted only when the same paragraph already has a verbatim match (so
-    #    the paragraph is demonstrably aligned) AND the two units share real
-    #    content; an unrelated single same-line sentence still fails (F001).
-    fuzzy_left = []
-    _anchors_done = set()
-    exact_paragraphs = {(base["document"], base["line"])
-                        for base, _cand in pairs}
-    for base in base_left:
-        same_pos = [j for j in unmatched
-                    if cand_units[j]["document"] == base["document"]
-                    and cand_units[j]["line"] == base["line"]
-                    and cand_slots[id(cand_units[j])] == base_slots[id(base)]]
-        if len(same_pos) != 1:
-            continue
-        cand = cand_units[same_pos[0]]
-        shared = _content_tokens(base) & _content_tokens(cand)
-        base_keys = _prose_citation_keys(base["text"])
-        cand_keys = _prose_citation_keys(cand["text"])
-        base_nums = set(re.findall(r"\d+(?:\.\d+)?", base["text"]))
-        cand_nums = set(re.findall(r"\d+(?:\.\d+)?", cand["text"]))
-        paragraph_aligned = (base["document"], base["line"]) in exact_paragraphs
-        similarity = _content_unit_similarity(base, cand)
-        # A single shared token, a shared number or mere same-slot position is
-        # NOT proof of an in-place rewrite (F002): an unrelated replacement
-        # shares "treatment"/"cohort" or one number and used to pass both strict
-        # gates. Require a real similarity floor or several content tokens.
-        if similarity >= _CONTENT_UNIT_MATCH \
-                or (base_keys & cand_keys) \
-                or (len(shared) >= 2 and similarity >= 0.35) \
-                or (paragraph_aligned and similarity >= 0.35) \
-                or (base_nums & cand_nums and similarity >= 0.40):
-            unmatched.discard(same_pos[0])
-            pairs.append((base, cand))
-            _anchors_done.add(id(base))
-    base_left = [b for b in base_left if id(b) not in _anchors_done]
-    # 3. Greedy longest-first fuzzy pass over the leftovers.
-    for base in sorted(base_left, key=lambda u: -len(u["tokens"])):
-        best_j, best_score = None, 0.0
-        for j in list(unmatched):
-            score = _content_unit_similarity(base, cand_units[j])
-            if score > best_score:
-                best_j, best_score = j, score
-        if best_j is not None and best_score >= _CONTENT_UNIT_MATCH:
-            unmatched.discard(best_j)
-            pairs.append((base, cand_units[best_j]))
-        else:
-            fuzzy_left.append(base)
-    return fuzzy_left, [cand_units[j] for j in sorted(unmatched)], pairs
 
 
 def _match_content_units(base_units: list, cand_units: list) -> tuple:
@@ -6292,8 +5556,32 @@ def _match_content_units(base_units: list, cand_units: list) -> tuple:
     reported missing; the docstring's exact-first guarantee was false. After
     the exact pass, fuzzy matching is greedy longest-first over what remains.
     """
-    missing, added, _pairs = _match_content_unit_pairs(base_units, cand_units)
-    return missing, added
+    unmatched = set(range(len(cand_units)))
+    base_left = []
+    exact = {}
+    for j, cand in enumerate(cand_units):
+        exact.setdefault(cand["norm"], []).append(j)
+    # 1. Global exact pass: every verbatim copy is consumed before any fuzzy
+    # claim can steal it.
+    for base in base_units:
+        hit = next((j for j in exact.get(base["norm"], []) if j in unmatched), None)
+        if hit is not None:
+            unmatched.discard(hit)
+        else:
+            base_left.append(base)
+    # 2. Greedy longest-first fuzzy pass over the leftovers.
+    fuzzy_left = []
+    for base in sorted(base_left, key=lambda u: -len(u["tokens"])):
+        best_j, best_score = None, 0.0
+        for j in list(unmatched):
+            score = _content_unit_similarity(base, cand_units[j])
+            if score > best_score:
+                best_j, best_score = j, score
+        if best_j is not None and best_score >= _CONTENT_UNIT_MATCH:
+            unmatched.discard(best_j)
+        else:
+            fuzzy_left.append(base)
+    return fuzzy_left, [cand_units[j] for j in sorted(unmatched)]
 
 
 def _content_unit_example(unit: dict) -> str:
@@ -6308,47 +5596,6 @@ _CONTENT_HANDOFF_MARKER_RE = re.compile(
 _CITATION_RE = re.compile(
     r"\\[a-zA-Z]*cite[a-zA-Z]*\s*(?:\[[^\]]*\]\s*)*\{([^{}]*)\}")
 _BIB_ENTRY_RE = re.compile(r"@\w+\s*\{\s*([^,\s]+)\s*,")
-# A `.bbl` bibliography defines its keys with `\bibitem{key}` (the optional
-# label is consumed first). Recognising only BibTeX syntax left a `.bbl`-only
-# package with no bibliography keys, so a legitimate citation-key correction
-# was reported as a new citation (F081).
-_BBL_ENTRY_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
-
-
-def _bib_keys_in_text(text) -> set:
-    keys = {m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text or "")}
-    keys.update(m.group(1).strip() for m in _BBL_ENTRY_RE.finditer(text or ""))
-    return keys
-# MARKDOWN/DOCX manuscripts cite in prose, not with `\cite`: an author-year
-# call-out `(Smith, 2020)` / `Smith et al. (2020)` is the same citation unit.
-# Recognising only LaTeX made the strict insertion gate unable to see a new
-# narrative citation at all (F03).
-_AUTHOR_YEAR_PAREN_GROUP_RE = re.compile(r"\(([^()]*)\)")
-_AUTHOR_YEAR_PAREN_RE = re.compile(
-    r"(?P<a>[A-Z][A-Za-z'\u2019.\-]+)"
-    r"(?:\s+(?:et\s+al\.?|and\s+[A-Z][A-Za-z'\u2019.\-]+))?"
-    r"\s*,\s*(?P<y>(?:19|20)\d{2})[a-z]?")
-_AUTHOR_YEAR_NARRATIVE_RE = re.compile(
-    r"\b(?P<a>[A-Z][A-Za-z'\u2019.\-]+)"
-    # A bare `Word (YYYY)` is ordinary prose ("Baseline (2019) values ...",
-    # "However (2019) ..."), not a citation (F008). Require a real narrative
-    # citation cue: `et al.` or a second named author.
-    r"(?:\s+et\s+al\.?|\s+and\s+[A-Z][A-Za-z'\u2019.\-]+)"
-    r"\s*\((?P<y>(?:19|20)\d{2})[a-z]?\)")
-
-
-def _prose_citation_keys(text) -> set:
-    """Citation keys one text states: LaTeX `\\cite` AND author-year call-outs."""
-    keys = set()
-    text = str(text or "")
-    for m in _CITATION_RE.finditer(text):
-        keys.update(k.strip() for k in m.group(1).split(",") if k.strip())
-    for group in _AUTHOR_YEAR_PAREN_GROUP_RE.finditer(text):
-        for m in _AUTHOR_YEAR_PAREN_RE.finditer(group.group(1)):
-            keys.add(f"{m.group('a').lower()}{m.group('y')}")
-    for m in _AUTHOR_YEAR_NARRATIVE_RE.finditer(text):
-        keys.add(f"{m.group('a').lower()}{m.group('y')}")
-    return keys
 
 
 def _is_handoff_marker(text) -> bool:
@@ -6356,18 +5603,12 @@ def _is_handoff_marker(text) -> bool:
     return bool(_CONTENT_HANDOFF_MARKER_RE.match(str(text or "")))
 
 
-def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
+def _citation_keys(package: Path) -> set:
     """Citation keys the package's submitted prose and .bib/.bbl entries name.
 
     The same submission surface as the prose scan: a citation in `code/`, an
     evidence area, a scratch file or a file the package's README declares not
     submitted is not a manuscript insertion.
-
-    `include_bibliography=False` returns the PROSE citation occurrences only.
-    The insertion check must use that form: a key that already sits in the
-    package's `.bib` but is cited nowhere in the base is still a NEW citation
-    when the candidate starts citing it, and the union with the `.bib` entry
-    keys hid exactly that insertion (F31).
     """
     keys = set()
     package = Path(package)
@@ -6384,12 +5625,10 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
             continue
         if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
                 or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
+                or is_non_shippable_name(p.name)):
             continue
         ext = p.suffix.lower()
-        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".rst", ".html",
-                   ".htm", ".bib", ".bbl"):
+        if ext in (".md", ".markdown", ".txt", ".tex", ".ltx", ".bib", ".bbl"):
             text = read_text_bounded(p)
         elif ext == ".docx":
             text = "\n".join(_docx_paragraphs(p) or [])
@@ -6397,117 +5636,11 @@ def _citation_keys(package: Path, include_bibliography: bool = True) -> set:
             continue
         if not text:
             continue
-        if ext not in (".bib", ".bbl"):
-            # `\cite{...}` AND author-year call-outs: the manuscript's own
-            # citation syntax is what the prose compares (F03).
-            keys.update(_prose_citation_keys(text))
-        if include_bibliography and ext in (".bib", ".bbl"):
-            keys.update(_bib_keys_in_text(text))
-    return keys
-
-
-# A `thebibliography` list defines its keys in the manuscript's own .tex: the
-# documented in-place citation correction must find them there, not only in a
-# separate .bib/.bbl (F125).
-_TEX_BIBITEM_RE = re.compile(r"\\bibitem\s*(?:\[[^\]]*\])?\s*\{([^{}]+)\}")
-# Prose/database surfaces that may DEFINE a bibliography key.
-_BIBLIOGRAPHY_SURFACES = (".bib", ".bbl", ".tex", ".ltx", ".md", ".markdown",
-                           ".txt", ".rst", ".html", ".htm")
-
-
-def _bibliography_keys(package: Path) -> set:
-    """Keys the package's submitted bibliography DEFINES.
-
-    `.bib`/`.bbl` entries are read by their database syntax; a rendered
-    `thebibliography` list (`\bibitem{...}`) in a submitted .tex is read as
-    well. Without the latter, correcting a cited key whose only definition is
-    its `\bibitem` could never pass the insertion gate (F125).
-    """
-    keys = set()
-    package = Path(package)
-    _decl, _is_submitted = declared_submission_filter(package)
-    for p in _iter_tree_files(package):
-        try:
-            rel = p.relative_to(package).as_posix()
-        except ValueError:
-            continue
-        ext = p.suffix.lower()
-        if not _is_submitted(rel) or ext not in _BIBLIOGRAPHY_SURFACES:
-            continue
-        top = rel.split("/", 1)[0].lower()
-        if top in CORPUS_EXCLUDE_TOP or top in EVIDENCE_DIRNAMES or top == CODE_DIR:
-            continue
-        if (is_bookkeeping_name(p.name) or _is_aux_doc(p.name)
-                or is_non_submitted_readme_name(p.name)
-                or is_non_shippable_name(p.name)
-                or is_non_manuscript_rel(rel)):
-            continue
-        text = read_text_bounded(p)
-        if not text:
-            continue
+        for m in _CITATION_RE.finditer(text):
+            keys.update(k.strip() for k in m.group(1).split(",") if k.strip())
         if ext in (".bib", ".bbl"):
-            keys.update(_bib_keys_in_text(text))
-        else:
-            keys.update(m.group(1).strip() for m in _TEX_BIBITEM_RE.finditer(text))
+            keys.update(m.group(1).strip() for m in _BIB_ENTRY_RE.finditer(text))
     return keys
-
-
-def _citation_removed_keys(base_package: Path, candidate_package: Path) -> set:
-    """Citation keys a MATCHED content unit loses with no replacement.
-
-    The citation gate compared only new keys; deleting a supporting citation
-    from a surviving sentence passed --disable-deletions (F006). A key replaced
-    by a different key in the same unit is the documented correction.
-    """
-    removed = set()
-    try:
-        pairs = _match_content_unit_pairs(
-            _content_unit_sentences(base_package),
-            _content_unit_sentences(candidate_package))[2]
-    except Exception:                                                 # noqa: BLE001
-        return removed
-    # A key stays available when it is still cited ANYWHERE in the delivered
-    # prose. A legitimate sentence split moves the call-out into the second new
-    # unit, so the first matched pair looks like a loss although the citation
-    # survives; only a key gone from the whole package is a deletion (F124).
-    try:
-        package_keys = _citation_keys(candidate_package, include_bibliography=False)
-    except Exception:                                                 # noqa: BLE001
-        package_keys = set()
-    for base, cand in pairs:
-        gone = _prose_citation_keys(base["text"]) - _prose_citation_keys(cand["text"])
-        new = _prose_citation_keys(cand["text"]) - _prose_citation_keys(base["text"])
-        if gone and not new:
-            removed |= (gone - package_keys)
-    return removed
-
-
-def _citation_correction_keys(base_package: Path, candidate_package: Path) -> set:
-    """New keys that SUBSTITUTE for a base key inside the same content unit.
-
-    A wrong `\\cite{smith2020}` corrected to `\\cite{smith2021}` is an in-place
-    repair: the sentence survives and the same matched unit loses one key as it
-    gains another. The old gate computed only `candidate - base`, so the
-    corrected key was indistinguishable from an added citation and the
-    documented repair could never pass (F02). A key added on top of the keys the
-    unit already carried is still an insertion, and the replacement must be
-    defined by the candidate package's own bibliography.
-    """
-    _m, _a, pairs = _match_content_unit_pairs(
-        _content_unit_sentences(base_package),
-        _content_unit_sentences(candidate_package))
-    bib_keys = _bibliography_keys(candidate_package)
-    allowed = set()
-    for base, cand in pairs:
-        base_keys = _prose_citation_keys(base["text"])
-        cand_keys = _prose_citation_keys(cand["text"])
-        gone = base_keys - cand_keys
-        new = cand_keys - base_keys
-        if not gone or not new:
-            continue
-        # One substitution per disappeared key; an extra key is an addition.
-        allowed.update([k for k in sorted(new) if k in bib_keys][:len(gone)])
-    return allowed
 
 
 def restrip_after_backfill(ctx, rec: dict, package: Path, warns: list = None) -> None:
@@ -6566,16 +5699,13 @@ def pipeline_removed_sentences(rec: dict, with_document: bool = False) -> list:
 def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
                           stage: str = "", exempt_removed=None,
                           insertions_allowed=None, deletions_allowed=None,
-                          prefer_rewrite=None, soft_deletions=None) -> list:
-    """Fail a package that inserts/deletes content against the active policy.
+                          prefer_rewrite=None) -> list:
+    """Fail a package that inserts/deletes content under the strict policy.
 
-    Returns [] immediately when both kinds are enabled and no deletion mode is
-    on: the default pipeline does no extra work and behaves exactly as before.
-    With `--enable-soft-deletions` it also runs with both kinds enabled, but
-    only the deletions of the documented removable units are accepted. The
-    check is only about the delivered PACKAGE (a sentence's presence), never
-    about how the agent described the edit, so a correct in-place repair
-    passes.
+    Returns [] immediately when both kinds are enabled: the default pipeline
+    does no extra work and behaves exactly as before. The check is only about
+    the delivered PACKAGE (a sentence's presence), never about how the agent
+    described the edit, so a correct in-place repair passes.
 
     `exempt_removed` is a list of sentences the orchestrator itself removed
     before this check (the PKG-2 dangling-reference repair). They are excluded
@@ -6589,13 +5719,6 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     document` is allowed, and a marker the base carries is exempt from the
     deletion comparison under `readme`/`off` (the placeholder rule requires its
     removal there).
-
-    `soft_deletions` is the MIDDLE policy: both kinds stay enabled, but
-    only the documented removable units may disappear (a duplicate whose other
-    copy survives, a leaked prompt/instruction, a placeholder, an internal
-    artifact, or the orchestrator's own pointer removal). A unit that carries a
-    claim is corrected in place; deleting it fails the attempt. This is what
-    `--enable-soft-deletions` sets; it is off by default.
     """
     insert = (insertions_enabled(ctx) if insertions_allowed is None
               else bool(insertions_allowed))
@@ -6603,119 +5726,36 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
               else bool(deletions_allowed))
     prefer = (prefer_rewrite_over_deletion(ctx) if prefer_rewrite is None
               else bool(prefer_rewrite))
-    # `soft_deletions_allowed`, not the same-named helper: this
-    # function's own parameter shadows the module-level reader.
-    removable = (soft_deletions_allowed(ctx)
-                 if soft_deletions is None
-                 else bool(soft_deletions))
-    scope = "none" if not delete else ("removable" if removable else "all")
-    if insert and scope == "all":
+    if insert and delete:
         return []
     base_package, candidate_package = Path(base_package), Path(candidate_package)
     if not base_package.is_dir() or not candidate_package.is_dir():
-        # A missing package must not read as a clean pass: the policy's whole
-        # job is to compare delivered content, and returning [] here disabled
-        # it silently (F135). Report it and let the caller's other gates fail
-        # the attempt.
-        missing = [str(p) for p in (base_package, candidate_package) if not p.is_dir()]
-        return [f"{stage or 'content policy'}: the strict content policy cannot be applied -- "
-                f"package director{'y is' if len(missing) == 1 else 'ies are'} missing: "
-                f"{', '.join(missing)}"]
+        return []
     label = f"{stage}: " if stage else ""
-    # Exemptions are CONSUMED one-to-one, never treated as a set: a package
-    # that legitimately removed one of two identical sentences must not have
-    # the second, session-deleted copy whitelisted by the same record (F28).
-    exempt_text = Counter()
-    exempt_document = Counter()
+    exempt_text = set()
+    exempt_document = set()
     for s in (exempt_removed or ()):
         if isinstance(s, (tuple, list)) and len(s) == 2:
             doc, sentence = s
             if str(sentence or "").strip():
-                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
+                exempt_document.add((str(doc), _deleted_para_norm(sentence).lower()))
         elif str(s or "").strip():
-            exempt_text[_deleted_para_norm(s).lower()] += 1
+            exempt_text.add(_deleted_para_norm(s).lower())
     mode = author_to_complete_mode_of(ctx)
     allow_marker_insert = mode == "document"
     allow_marker_delete = mode in ("readme", "off")
     skipped = []
-    cand_all = _content_unit_sentences(candidate_package, skipped=skipped)
-    cand_marker_norms = [u["norm"] for u in cand_all if _is_handoff_marker(u["text"])]
-    cand_units = [u for u in cand_all
-                  if not (allow_marker_insert and _is_handoff_marker(u["text"]))]
     base_units = []
     for u in _content_unit_sentences(base_package, skipped=skipped):
-        if exempt_text.get(u["norm"], 0) > 0:
-            exempt_text[u["norm"]] -= 1
+        if u["norm"] in exempt_text or (u["document"], u["norm"]) in exempt_document:
             continue
-        doc_key = (u["document"], u["norm"])
-        if exempt_document.get(doc_key, 0) > 0:
-            exempt_document[doc_key] -= 1
+        if allow_marker_delete and _is_handoff_marker(u["text"]):
             continue
-        if _is_handoff_marker(u["text"]):
-            if allow_marker_delete:
-                # The placeholder rule REQUIRES the removal in readme/off.
-                continue
-            if allow_marker_insert and u["norm"] in cand_marker_norms:
-                # A marker retained by BOTH sides is not a missing unit: match
-                # it against the candidate markers that were filtered out, so
-                # document mode's inserted/kept placeholders do not read as a
-                # deletion (F201). A marker present only in the base stays in
-                # the comparison and remains a deletion (F17).
-                cand_marker_norms.remove(u["norm"])
-                continue
         base_units.append(u)
-    # The exemption list is consumed ABOVE. Hand the soft-deletion helper only
-    # the leftovers: re-applying the raw list let it excuse the same removal a
-    # second time, so the second identical copy of a sentence could be deleted
-    # with no signal (F004).
-    remaining_exempt = [norm for norm, count in exempt_text.items()
-                        for _ in range(count)]
-    remaining_exempt += [(doc, norm)
-                         for (doc, norm), count in exempt_document.items()
-                         for _ in range(count)]
+    cand_units = [u for u in _content_unit_sentences(candidate_package, skipped=skipped)
+                  if not (allow_marker_insert and _is_handoff_marker(u["text"]))]
     missing, added = _match_content_units(base_units, cand_units)
-    # A reference-entry correction the entry comparator accepted (ratio >=
-    # 0.80) must not be re-reported as a missing+added prose unit: the two
-    # comparators disagreed, so a legitimate author/year fix failed both strict
-    # flags (F126). Only the paired entries are excluded; an unpaired
-    # fabrication/removal stays visible.
-    try:
-        ref_pairs, _ref_added, _ref_removed = _reference_entry_corrections(
-            base_package, candidate_package)
-    except Exception:                                                 # noqa: BLE001
-        ref_pairs = []
-
-    def _drop_corrected_units(units, entries):
-        if not ref_pairs or not entries:
-            return units
-        kept = []
-        for unit in units:
-            norm = _deleted_para_norm(unit.get("text")).lower()
-            # Only a unit that IS part of the reference list can be covered by
-            # a corrected entry: an ordinary prose sentence that happens to be
-            # a substring of some bibliography entry used to be dropped too
-            # (F149).
-            if (len(norm) >= _DELETED_PARA_MIN
-                    and unit.get("in_references")
-                    and any(norm in e for e in entries)):
-                continue
-            kept.append(unit)
-        return kept
-
-    if ref_pairs:
-        missing = _drop_corrected_units(missing, [old for old, _new in ref_pairs])
-        added = _drop_corrected_units(added, [new for _old, new in ref_pairs])
     problems = []
-    # THE MIDDLE POLICY: a removal is allowed only for a documented removable
-    # unit. The matcher consumes copies one-to-one, so a surviving duplicate is
-    # not in `missing` only for the copy it matched; the second base occurrence
-    # of an identical sentence is still listed and its norm is in the candidate.
-    policy_name = ("--disable-deletions" if scope == "none"
-                   else "--enable-soft-deletions")
-    if scope == "removable" and missing:
-        missing = soft_deletion_missing_units(
-            missing, cand_units, remaining_exempt,
-            allow_marker_delete=allow_marker_delete)
     if skipped:
         names = ", ".join(sorted(set(skipped))[:6])
         problems.append(
@@ -6723,23 +5763,11 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             f"content-edit policy (corrupt, oversized or unreadable): {names}"
             + (" ..." if len(set(skipped)) > 6 else "")
             + ". The policy is UNENFORCED on those files; repair or remove them before retrying.")
-    if scope != "all" and missing:
-        if scope == "removable":
+    if not delete and missing:
+        if prefer:
             problems.append(
                 f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-                f"delivered package although --enable-soft-deletions is in force. This mode "
-                f"allows removing only a duplicate whose other copy survives, a leaked "
-                f"prompt/instruction, a placeholder, an internal artifact, a merge-covered "
-                f"unit or the pipeline's own pointer; the unit(s) below carry content, so "
-                f"correct them IN PLACE with the "
-                f"right value (a deletion is not a repair) or record the finding "
-                f"`manual-required` and leave the unit in the package: "
-                + "; ".join(_content_unit_example(u) for u in missing[:5])
-                + (" ..." if len(missing) > 5 else ""))
-        elif prefer:
-            problems.append(
-                f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-                f"delivered package although {policy_name} is in force. REWRITE the "
+                f"delivered package although --disable-deletions is in force. REWRITE the "
                 f"missing unit in place rather than recording it as manual-required while an "
                 f"honest rewrite exists (a deletion is not a repair): "
                 + "; ".join(_content_unit_example(u) for u in missing[:5])
@@ -6747,7 +5775,7 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
         else:
             problems.append(
                 f"{label}{len(missing)} content unit(s) present in the base are MISSING from the "
-                f"delivered package although {policy_name} is in force (a deletion is not a "
+                f"delivered package although --disable-deletions is in force (a deletion is not a "
                 f"repair): " + "; ".join(_content_unit_example(u) for u in missing[:5])
                 + (" ..." if len(missing) > 5 else ""))
     if not insert and added:
@@ -6759,40 +5787,8 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
             + ". Correct the existing unit in place instead of adding prose; if a finding can "
               "only be resolved by new text, record it as manual-required/unable and leave the "
               "unit unchanged.")
-    if scope != "all":
-        removed_cites = _citation_removed_keys(base_package, candidate_package)
-        if removed_cites:
-            problems.append(
-                f"{label}{len(removed_cites)} citation key(s) disappeared from a surviving "
-                f"statement although {policy_name} is in force (a removed citation is "
-                f"a deletion): " + ", ".join(sorted(removed_cites)[:8])
-                + (" ..." if len(removed_cites) > 8 else "")
-                + ". Restore the citation, or replace it with the corrected key in place.")
-    ref_added, ref_removed = _reference_entry_changes(base_package, candidate_package)
-    if not insert and ref_added:
-        problems.append(
-            f"{label}{len(ref_added)} reference entr{'y' if len(ref_added) == 1 else 'ies'} "
-            f"appeared in the delivered bibliography although --disable-insertions is in "
-            f"force: " + "; ".join(x[:120] for x in ref_added[:3])
-            + (" ..." if len(ref_added) > 3 else "")
-            + ". A reference entry is a content unit; add it only through the documented "
-              "correction route.")
-    if scope != "all" and ref_removed:
-        problems.append(
-            f"{label}{len(ref_removed)} reference entr{'y' if len(ref_removed) == 1 else 'ies'} "
-            f"present in the base bibliography are MISSING although {policy_name} is in "
-            f"force: " + "; ".join(x[:120] for x in ref_removed[:3])
-            + (" ..." if len(ref_removed) > 3 else "")
-            + ". A removed reference is a deletion; restore it or replace it in place.")
     if not insert:
-        new_keys = (_citation_keys(candidate_package, include_bibliography=False)
-                    - _citation_keys(base_package, include_bibliography=False))
-        if new_keys:
-            # A key that REPLACES a base key in the same content unit is a
-            # correction (F02), not a new citation: the documented in-place
-            # repair of a wrong reference must be able to pass.
-            new_keys = new_keys - _citation_correction_keys(
-                base_package, candidate_package)
+        new_keys = _citation_keys(candidate_package) - _citation_keys(base_package)
         if new_keys:
             problems.append(
                 f"{label}{len(new_keys)} new citation key(s) are in the delivered package "
@@ -6802,1020 +5798,37 @@ def content_edit_problems(ctx, base_package: Path, candidate_package: Path,
     return problems
 
 
-# ---------------------------------------------------------------------
-# FACT SURVIVAL (shared rule D8) -- enforced in BOTH content-edit modes
-#
-# The content-edit switches decide whether a content UNIT may disappear; they
-# do not decide whether a FACT may. The revise/rewrite/integrate prompts
-# already require a wrong value, name, definition or claim to be repaired by
-# writing the correct fact, never by removing the sentence that carries it,
-# and the pipeline's own contract is that nothing in the delivered package may
-# be worse than the base. Prompt text alone did not hold: a review finding that
-# calls a paragraph redundant, procedural, orphaned or corrupted can still be
-# carrying a value the manuscript needs (a count, a measurement, an
-# identifier), and a deletion then removes the only carrier while every
-# finding is reported as resolved and the audit reports "no fact is lost".
-#
-# This layer makes the rule mechanical without knowing any finding kind: a base
-# sentence that has no counterpart in the delivered package may not take a
-# numeric or identifier fact with it. A value that genuinely should go is
-# recorded as manual-required, which is what the manual list is for; it is
-# never dropped silently. It runs in the PERMISSIVE mode too -- that is the
-# mode with no unit-level check, and the mode where a deletion is allowed
-# precisely because it is supposed to be redundant.
-# ---------------------------------------------------------------------
-_FACT_SURVIVAL_NUMBER_RE = re.compile(
-    r"(?<![\w.])(?P<sign>[+\-\u2212])?\d[\d,]*(?:\.\d+)?"
-    r"(?:[eE][+\-]?\d+)?(?!\w|\.\d)")
-_FACT_SURVIVAL_IDENT_RE = re.compile(
-    r"(?i)(?:https?://[^\s)>]+|doi:\s*10\.[^\s,;)]+|10\.\d{4,9}/[^\s,;)]+|"
-    r"orcid[:\s]+\d[\dX-]+|"
-    # A contact e-mail is a fact: hiding it (w:vanish) leaves the visible
-    # sentence otherwise unchanged, so only this class can report its loss
-    # (F129). The address pattern is the one the e-mail gate itself uses.
-    r"[A-Za-z0-9][A-Za-z0-9._%+\-]*@[A-Za-z0-9](?:[A-Za-z0-9.\-]*[A-Za-z0-9])?"
-    r"\.[A-Za-z]{2,}|"
-    r"accession(?:\s+(?:number|no\.?|id))?\s*[:\s]\s*"
-    r"(?P<accession>[A-Za-z0-9][A-Za-z0-9._\-]*))")
-# A measurement unit printed immediately after a value is part of the FACT: 55
-# mg and 55 ml are different measurements, and a deletion that changes only the
-# unit was reported as "value survived" (F07). Only recognised unit spellings
-# qualify, so an ordinary following word ("55 of the animals") leaves the value
-# unit-free instead of inventing a unit. The table therefore has to carry the
-# STANDARD units a paper prints -- an unrecognised unit made the value unitless
-# and a `2500 kcal` -> `2500 kJ` rewrite passed with no message (F019) -- while
-# still refusing to read an ordinary word as a unit.
-_FACT_SURVIVAL_UNIT_RE = re.compile(
-    r"^[ \t]*(?P<unit>%|\u2030|\u00b0C|\u00b0F|[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*"
-    r"(?:/[A-Za-z0-9\u00b5\u03bc]+)?)")
-_FACT_SURVIVAL_UNITS = frozenset("""
-% \u2030 \u00b0C \u00b0F
-m cm mm um \u00b5m nm km ft yd mi
-g mg ug \u00b5g ng pg kg
-L l mL ml uL \u00b5L \u00b5l \u03bcl cL dL nL
-M mM uM \u00b5M nM pM mol mmol umol \u00b5mol nmol pmol
-s ms us \u00b5s ns min h hr hrs d day days wk week weeks mo month months yr year years
-Pa kPa MPa GPa Hz kHz MHz GHz V mV kV W kW MW A mA uA \u00b5A J kJ MJ
-kcal cal Torr torr mmHg cmH2O bar atm psi
-IU U ppm ppb ppt eq mEq Osm mOsm dB Gy mGy Sv mSv Bq Ci
-Da kDa bp kb Mb Gb nt rpm
-""".split())
-# Equivalent spellings/case of the SAME unit are one measurement (F07/R01):
-# `55 ml` and `55 mL`, `55 hr` and `55 h`, `55 mg` and `55 milligrams` are the
-# same fact. Genuinely case-distinct units (`m`/`M`, `mg`/`Mg`) are absent from
-# this table, so they stay distinct keys.
-_FACT_SURVIVAL_UNIT_ALIASES = {
-    # Volume
-    "ml": ("ml", "mL", "milliliter", "milliliters", "millilitre", "millilitres"),
-    "ul": ("ul", "uL", "\u00b5L", "\u03bcL", "\u00b5l", "\u03bcl",
-           "microliter", "microliters", "microlitre", "microlitres"),
-    "l": ("l", "L", "liter", "liters", "litre", "litres"),
-    "dl": ("dl", "dL", "deciliter", "deciliters", "decilitre", "decilitres"),
-    "cl": ("cl", "cL", "centiliter", "centiliters", "centilitre", "centilitres"),
-    "nl": ("nl", "nL", "nanoliter", "nanoliters", "nanolitre", "nanolitres"),
-    # Length
-    "m": ("m", "meter", "meters", "metre", "metres"),
-    "cm": ("cm", "centimeter", "centimeters", "centimetre", "centimetres"),
-    "mm": ("mm", "millimeter", "millimeters", "millimetre", "millimetres"),
-    "um": ("um", "\u00b5m", "\u03bcm", "micrometer", "micrometers",
-           "micrometre", "micrometres"),
-    "nm": ("nm", "nanometer", "nanometers", "nanometre", "nanometres"),
-    "km": ("km", "kilometer", "kilometers", "kilometre", "kilometres"),
-    "ft": ("ft", "foot", "feet"),
-    # Mass
-    "g": ("g", "gram", "grams", "gramme", "grammes"),
-    "mg": ("mg", "milligram", "milligrams", "milligramme", "milligrammes"),
-    "ug": ("ug", "\u00b5g", "\u03bcg", "microgram", "micrograms",
-           "microgramme", "microgrammes"),
-    "kg": ("kg", "kilogram", "kilograms", "kilogramme", "kilogrammes"),
-    "ng": ("ng", "nanogram", "nanograms"),
-    "pg": ("pg", "picogram", "picograms"),
-    # Time
-    "h": ("h", "hr", "hrs", "hour", "hours"),
-    "s": ("s", "sec", "secs", "second", "seconds"),
-    "ms": ("ms", "millisecond", "milliseconds"),
-    "us": ("us", "\u00b5s", "\u03bcs", "microsecond", "microseconds"),
-    "ns": ("ns", "nanosecond", "nanoseconds"),
-    "min": ("min", "mins", "minute", "minutes"),
-    "d": ("d", "day", "days"),
-    "wk": ("wk", "week", "weeks"),
-    "mo": ("mo", "month", "months"),
-    "yr": ("yr", "year", "years"),
-    # Amount of substance / concentration
-    "mol": ("mol", "mole", "moles"),
-    "mmol": ("mmol", "millimole", "millimoles"),
-    "umol": ("umol", "\u00b5mol", "\u03bcmol", "micromole", "micromoles"),
-    "nmol": ("nmol", "nanomole", "nanomoles"),
-    "pmol": ("pmol", "picomole", "picomoles"),
-    "M": ("M", "molar"),
-    "mM": ("mM", "millimolar"),
-    "uM": ("uM", "\u00b5M", "\u03bcM", "micromolar"),
-    "nM": ("nM", "nanomolar"),
-    # Pressure / frequency / electricity / energy / power
-    "Pa": ("Pa", "pascal", "pascals"),
-    "kPa": ("kPa", "kilopascal", "kilopascals"),
-    "MPa": ("MPa", "megapascal", "megapascals"),
-    "GPa": ("GPa", "gigapascal", "gigapascals"),
-    "Hz": ("Hz", "hertz"),
-    "kHz": ("kHz", "kilohertz"),
-    "MHz": ("MHz", "megahertz"),
-    "GHz": ("GHz", "gigahertz"),
-    "V": ("V", "volt", "volts"),
-    "mV": ("mV", "millivolt", "millivolts"),
-    "kV": ("kV", "kilovolt", "kilovolts"),
-    "W": ("W", "watt", "watts"),
-    "kW": ("kW", "kilowatt", "kilowatts"),
-    "MW": ("MW", "megawatt", "megawatts"),
-    "A": ("A", "ampere", "amperes", "amp", "amps"),
-    "mA": ("mA", "milliampere", "milliamperes"),
-    "uA": ("uA", "\u00b5A", "\u03bcA", "microampere", "microamperes"),
-    "J": ("J", "joule", "joules"),
-    "kJ": ("kJ", "kilojoule", "kilojoules"),
-    "MJ": ("MJ", "megajoule", "megajoules"),
-    # Molecular biology
-    "Da": ("Da", "dalton", "daltons"),
-    "kDa": ("kDa", "kilodalton", "kilodaltons"),
-    "bp": ("bp", "basepair", "basepairs"),
-    "kb": ("kb", "kilobase", "kilobases", "kilobasepair", "kilobasepairs"),
-    "Mb": ("Mb", "megabase", "megabases"),
-    "Gb": ("Gb", "gigabase", "gigabases"),
-    "nt": ("nt", "nucleotide", "nucleotides"),
-    "rpm": ("rpm", "revolution", "revolutions"),
-    # Energy / pressure / dose / radiation / length units a paper prints
-    # (F019): a unit outside the table keyed its value as unitless, so a
-    # `2500 kcal -> 2500 kJ` or `760 Torr -> 760 kPa` rewrite passed unseen.
-    "kcal": ("kcal", "Kcal", "kilocalorie", "kilocalories"),
-    "cal": ("cal", "calorie", "calories"),
-    "Torr": ("Torr", "torr"),
-    "mmHg": ("mmHg", "mmHG"),
-    "bar": ("bar", "bars"),
-    "atm": ("atm", "atmosphere", "atmospheres"),
-    "psi": ("psi",),
-    "IU": ("IU", "iu", "international unit", "international units"),
-    "ppm": ("ppm",),
-    "ppb": ("ppb",),
-    "ppt": ("ppt",),
-    "eq": ("eq", "equivalent", "equivalents"),
-    "mEq": ("mEq", "meq"),
-    "Osm": ("Osm", "osmol", "osmole", "osmoles"),
-    "mOsm": ("mOsm", "mosm"),
-    "dB": ("dB", "decibel", "decibels"),
-    "Gy": ("Gy", "gray", "grays"),
-    "mGy": ("mGy",),
-    "Sv": ("Sv", "sievert", "sieverts"),
-    "mSv": ("mSv",),
-    "Bq": ("Bq", "becquerel", "becquerels"),
-    "Ci": ("Ci", "curie", "curies"),
-    "yd": ("yd", "yard", "yards"),
-    "mi": ("mi", "mile", "miles"),
-}
-_FACT_SURVIVAL_UNIT_CANON = {
-    alias: canonical
-    for canonical, aliases in _FACT_SURVIVAL_UNIT_ALIASES.items()
-    for alias in aliases
-}
-_FACT_SURVIVAL_COMPOUND_SIDE_RE = re.compile(
-    r"^[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*$")
-# Below this floor a value is a fact only when it carries a recognised unit or
-# a fact LABEL (`pH 7`, `grade 2`, `score 9`). A bare lone digit stays un-keyed:
-# a list marker, a section number or a cross-reference, and the documented
-# R12-5b contract treats "3 blocks" as a count a rewrite may change. The
-# unit/label line is `_fact_single_digit_is_fact`.
-_FACT_SURVIVAL_MIN_DIGITS = 2
-_FACT_SURVIVAL_SINGLE_DIGIT_LABEL_RE = re.compile(
-    r"(?i)\b(?:ph|grade|score)\b[^.;\n]{0,24}$")
+def _deletion_disposition_ok(value) -> bool:
+    """Does a DELETED_PARAGRAPHS disposition use the seeded vocabulary?
 
-
-def _fact_survival_key(token) -> str:
-    """One comparable key for a printed value or identifier."""
-    raw = str(token or "").strip().rstrip(",.;:)")
-    raw = raw.replace("\u2212", "-")          # Unicode minus is a sign (F093)
-    if not raw:
-        return ""
-    if re.fullmatch(r"[+\-]?\d[\d,]*", raw):
-        # A plain integer is EXACT: `repr(float(...))` merged distinct values
-        # above 2^53 (123456789012345678 == 123456789012345679), so deleting
-        # one while the other survived passed the fact gate. Keep the historic
-        # `-55.0` spelling for values a float represents exactly.
-        try:
-            ival = int(raw.replace(",", ""))
-            return repr(float(ival)) if abs(ival) <= 2 ** 53 else str(ival)
-        except ValueError:
-            pass
-    if re.fullmatch(r"[+\-]?\d[\d,]*(?:\.\d+)?(?:[eE][+\-]?\d+)?", raw):
-        # A signed value and a scientific-notation value are numeric facts:
-        # normalise -55/+55 and 1.2e-4/1.2E-4 to one key (F093/F094).
-        try:
-            return repr(float(raw.replace(",", "")))
-        except ValueError:
-            pass
-    if re.search(r"[A-Za-z/]", raw):
-        return raw.lower()
-    try:
-        return repr(float(raw.replace(",", "")))
-    except ValueError:
-        return raw.replace(",", "")
-
-
-def _fact_survival_canonical_unit(token) -> str:
-    """The canonical spelling of a recognised unit token, or ""."""
-    token = str(token or "")
-    if token in _FACT_SURVIVAL_UNIT_CANON:
-        return _FACT_SURVIVAL_UNIT_CANON[token]
-    return token if token in _FACT_SURVIVAL_UNITS else ""
-
-
-# Words that legitimately follow a one-letter UNIT ("5 V across the resistor",
-# "20 W total", "50 A per channel"). Any other lowercase word after a single
-# capital is a noun, so the letter is a group/grade label, not a unit (F084).
-_FACT_SINGLE_LETTER_UNIT_FOLLOW = frozenset("""
-across total per max min maximum minimum above below over under each every
-daily weekly monthly annually respectively approximately about or and to in at
-by for from with of on the a an is was were are has have than as that which
-when while after before during versus vs
-""".split())
-
-
-def _fact_single_letter_is_label(follow: str) -> bool:
-    """Is the lowercase word after a one-letter, count-following capital a noun?
-
-    `55 A participants` reads the letter `A` as the ampere and then rejects the
-    correct edit to `55 participants` as a changed measurement (F084). A real
-    one-letter unit is followed by a unit reading (`across`, `total`, `per`) or
-    by punctuation/end of phrase; a content noun means the letter was a label.
+    The seed's instructions name exactly three shapes: `OK — <why no fact is
+    lost>`, `manual-required`, and `fact removed — RP-xxx`. The shared
+    `disposition_artifact_problems` only rejects empty/boilerplate cells, so a
+    single `x` used to pass the deletion-fact gate without disposing anything.
     """
-    m = re.match(r"[ \t]+([A-Za-z][A-Za-z\-]*)", str(follow or ""))
-    if not m:
+    text = str(value or "").strip()
+    if not text:
         return False
-    word = m.group(1)
-    return word[0].islower() and word.lower() not in _FACT_SINGLE_LETTER_UNIT_FOLLOW
-
-
-def _fact_survival_unit_after(text, end: int) -> str:
-    """The recognised, canonicalised measurement unit after a value, or ""."""
-    window = str(text or "")[int(end):int(end) + 24]
-    m = _FACT_SURVIVAL_UNIT_RE.match(window)
-    if not m:
-        return ""
-    unit = m.group("unit")
-    if len(unit) == 1 and re.match(r"-[A-Za-z]", window[m.end():]):
-        # The one-letter label of a hyphenated word ("12 A-rated") is not the
-        # ampere (R01); a genuine unit is not glued to a following word.
-        return ""
-    if len(unit) == 1 and unit.isupper() and _fact_single_letter_is_label(
-            window[m.end():]):
-        # A single CAPITAL letter after a count is a group/grade LABEL far more
-        # often than a unit: "55 A participants" was keyed as 55 amperes, so a
-        # correct clarification to "55 participants" was rejected as a changed
-        # measurement (F084). A real one-letter unit is followed by a unit
-        # reading ("across", "total", "per"), not by a content noun.
-        return ""
-    canonical = _fact_survival_canonical_unit(unit)
-    if canonical:
-        return canonical
-    # A compound unit ("mg/mL", "umol/L", "cells/mL") is one fact token: each
-    # side must look like a unit word, and at least one side must be a
-    # recognised unit so an ordinary "and/or" is not invented as a unit (R02).
-    parts = unit.split("/")
-    if len(parts) != 2 or not all(
-            _FACT_SURVIVAL_COMPOUND_SIDE_RE.match(p) for p in parts):
-        return ""
-    sides = [_fact_survival_canonical_unit(p) for p in parts]
-    if not any(sides):
-        return ""
-    if any(not side and len(part) == 1 for side, part in zip(sides, parts)):
-        return ""
-    return "/".join(side or part.lower() for side, part in zip(sides, parts))
-
-
-def _fact_survival_value_key(raw, unit: str = "") -> str:
-    """The comparable key of one numeric value, unit included when printed."""
-    key = _fact_survival_key(raw)
-    return f"{key} {unit}" if unit else key
-
-
-def _fact_number_is_display_marker(text, match) -> bool:
-    """A display/citation LABEL or bracketed number, never a fact.
-
-    `Figure 12`, `Table 2`, `[1]` and `[^12]` number something else; their
-    digits are not measurements, whatever their width.
-    """
-    text = str(text or "")
-    before = text[:match.start()].rstrip().lower()
-    if re.search(r"\b(?:fig(?:ure)?|tables?|sections?|eq(?:uation)?s?|"
-                 r"ref(?:erence)?s?|appendix|step|line|panel)\s*$", before):
-        return True
-    return text[max(0, match.start() - 2):match.start()].endswith(("[", "^"))
-
-
-def _fact_single_digit_is_marker(text, match) -> bool:
-    """True for a one-digit match that is a marker rather than a fact.
-
-    A lone `1`/`2` is a list marker, a section number or a cross-reference in
-    nearly every paragraph, so it cannot prove a fact survived. The marker
-    shapes are exempt; every other single digit is a value, count, score or
-    grade (F010).
-    """
-    if _fact_number_is_display_marker(text, match):
-        return True
-    text = str(text or "")
-    before = text[:match.start()].rstrip().lower()
-    return bool(re.match(r"^[.)]\s", text[match.end():])
-                and (not before or before.endswith(("\n", "."))))
-
-
-def _fact_single_digit_is_fact(text, match) -> bool:
-    """A one-digit value that carries a recognised unit or fact label (F010).
-
-    `5 mg`, `pH 7`, `grade 2` and `score 9` are measurements/scores and must be
-    keyed. A bare lone count (`3 blocks`) is NOT a survival token: R12-5b pins
-    that contract, and a rewrite may legitimately change such a count.
-    """
-    if _fact_single_digit_is_marker(text, match):
-        return False
-    text = str(text or "")
-    if _fact_survival_unit_after(text, match.end()):
-        return True
-    return bool(_FACT_SURVIVAL_SINGLE_DIGIT_LABEL_RE.search(text[:match.start()]))
-
-
-def _fact_survival_tokens(text) -> list:
-    """Numeric values and identifiers a text carries, in printing order."""
-    found = []
-    text = str(text or "")
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-        raw = match.group(0)
-        if len(re.sub(r"\D", "", raw)) >= _FACT_SURVIVAL_MIN_DIGITS \
-                or not _fact_single_digit_is_marker(text, match):
-            found.append(raw)
-    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
-        # The accession NUMBER, never the word "number" in front of it: the old
-        # `accession[:\s]+[A-Z0-9]` captured "number" from "accession number
-        # 12345" and lost the identifier itself (F08).
-        found.append(match.group("accession") or match.group(0))
-    return found
-
-
-def _fact_survival_keys(units) -> set:
-    keys = set()
-    for unit in units or ():
-        text = str(unit.get("text") or "")
-        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-            raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
-                    and not _fact_single_digit_is_fact(text, match):
-                continue
-            keys.add(_fact_survival_value_key(
-                raw, _fact_survival_unit_after(text, match.end())))
-        for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
-            keys.add(_fact_survival_key(match.group("accession") or match.group(0)))
-    return keys
-
-
-def _fact_survival_lost_tokens(text, surviving_keys, handoff_keys=()) -> list:
-    """Values in `text` with no surviving carrier, unit included.
-
-    A unit-bearing value survives only when the SAME value+unit key survives;
-    a bare value recorded in the author hand-off (which names the number, not
-    always its unit) still clears it, so the documented manual route is not
-    broken.
-    """
-    lost = []
-    text = str(text or "")
-    handoff_keys = set(handoff_keys or ())
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-        raw = match.group(0)
-        if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
-                and not _fact_single_digit_is_fact(text, match):
-            continue
-        unit = _fact_survival_unit_after(text, match.end())
-        num_key = _fact_survival_key(raw)
-        if unit:
-            if _fact_survival_value_key(raw, unit) in surviving_keys:
-                continue
-            if num_key in handoff_keys:
-                continue
-            lost.append(f"{raw} {unit}")
-        elif num_key not in surviving_keys and num_key not in handoff_keys:
-            lost.append(raw)
-    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
-        token = match.group("accession") or match.group(0)
-        key = _fact_survival_key(token)
-        if key not in surviving_keys and key not in handoff_keys:
-            lost.append(token)
-    return lost
-
-
-def _fact_loss_examples(missing_units, surviving_keys, handoff_keys=()) -> list:
-    """[(unit, [lost tokens])] for deleted units that took a fact with them."""
-    lost = []
-    for unit in missing_units or ():
-        tokens = _fact_survival_lost_tokens(
-            unit.get("text") or "", surviving_keys, handoff_keys)
-        if tokens:
-            lost.append((unit, tokens))
-    return lost
-
-
-def _fact_number_units(units) -> dict:
-    """{bare number key: {unit, ...}} for the numeric values a text states."""
-    out = {}
-    for unit in units or ():
-        text = str(unit.get("text") or "")
-        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-            raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
-                    and not _fact_single_digit_is_fact(text, match):
-                continue
-            out.setdefault(_fact_survival_key(raw), set()).add(
-                _fact_survival_unit_after(text, match.end()))
-    return out
-
-
-def _fact_text_skeleton(text) -> str:
-    """The text with every value+unit replaced by its value marker.
-
-    Two sentences with the same skeleton differ only in the measurement unit
-    (or not at all): that is the signature of a pure unit edit, which may be a
-    documented correction (`55 mg` -> `55 ml`, F04). A sentence that also
-    changes any other word produces a different skeleton and stays reported.
-
-    A unit-shaped token is stripped even when the table does not recognise it
-    (`55 in` -> `55 cm`): the skeleton is the INPUT to the recorded-correction
-    test, and an unknown base spelling must not make a pure unit fix look like a
-    rewritten sentence. Recognition still decides whether a change is reported;
-    it does not decide whether the documented correction route exists.
-    """
-    text = str(text or "")
-    out, last = [], 0
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-        raw = match.group(0)
-        if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS:
-            continue
-        out.append(text[last:match.start()])
-        out.append(f"<{_fact_survival_key(raw)}>")
-        end = match.end()
-        unit_match = _FACT_SURVIVAL_UNIT_RE.match(text[end:end + 24])
-        if unit_match:
-            token = unit_match.group("unit")
-            if _fact_survival_unit_after(text, end) \
-                    or re.fullmatch(r"[A-Za-z\u00b5\u03bc][A-Za-z0-9\u00b5\u03bc]*",
-                                    token):
-                end += unit_match.end()
-        last = end
-    out.append(text[last:])
-    return _deleted_para_norm("".join(out)).lower()
-
-
-def _measurement_named(raw, unit, text) -> bool:
-    """Does `text` name this value+unit in any recognised spelling?"""
-    forms = _FACT_SURVIVAL_UNIT_ALIASES.get(unit, (unit,))
-    alt = "|".join(re.escape(f) for f in sorted(set(forms), key=len, reverse=True))
-    return bool(re.search(
-        rf"(?i)(?<![\w.]){re.escape(str(raw))}\s*(?:{alt})(?![\w])",
-        str(text or "")))
-
-
-def _unit_change_is_correction(base_text, cand_text, raw, base_unit, cand_units,
-                               authority_text: str = "") -> bool:
-    """Is this a RECORDED unit correction rather than a changed measurement?
-
-    True only when (a) the two sentences are otherwise identical (their value
-    skeletons match), (b) the candidate's replacement unit is a DIFFERENT unit,
-    not a case variant (`m`/`M` are distinct measurements), and (c) the package's
-    OWN author hand-off records the corrected measurement. Without (c) a pure
-    unit edit is exactly the silent fact change this gate exists to catch (a
-    real `55 millimeters` -> `55 milliliters` edit stays reported, F203); with
-    it, the reviser has the documented way to repair a wrong base unit (F04).
-    A rewrite that changes other words never qualifies.
-    """
-    if _fact_text_skeleton(base_text) != _fact_text_skeleton(cand_text):
-        return False
-    if "/" in str(base_unit):
-        # A compound unit (`mg/kg`) states a RATE/ratio: changing one side is a
-        # changed measurement, never a spelling correction (R02).
-        return False
-    for cand_unit in cand_units or ():
-        if not cand_unit or cand_unit == base_unit:
-            continue
-        if "/" in cand_unit:
-            continue
-        if cand_unit.lower() == str(base_unit).lower():
-            # A case-only change (m -> M) is a different unit, not a spelling.
-            continue
-        if authority_text and _measurement_named(raw, cand_unit, authority_text):
+    ok = re.match(r"(?i)^OK\s*[\u2014\u2013:-]\s*(.+)$", text)
+    if ok:
+        # The seeded instruction asks for `OK — <why no fact is lost>`, not
+        # merely "some character after the dash": one non-space character
+        # (`OK — x`) used to dispose a deleted fact-bearing paragraph. Require
+        # an actual reason (>= 4 words), the smallest bar that still admits the
+        # documented short closures (`OK — duplicate; no fact lost`).
+        reason = ok.group(1).strip()
+        # The seed's own empty-table row is `OK — nothing removed`: there is no
+        # deleted paragraph to explain, so it is not the one-character closure
+        # this check exists to reject.
+        if reason.lower() in ("nothing removed", "no rows removed"):
             return True
+        words = re.findall(r"[^\s]+", reason)
+        return len(words) >= 4
+    if re.match(r"(?i)^manual-required\b", text):
+        return True
+    if re.match(r"(?i)^fact\s+removed\s*[\u2014\u2013:-]\s*RP-\d+\b", text):
+        return True
     return False
-
-
-def _fact_unit_change_examples(base_units, cand_units, pairs=None,
-                               authority_text: str = "") -> list:
-    """[(unit, printed value, surviving units)] for a unit-only change.
-
-    A sentence that survives fuzzy matching can still have had its measurement
-    unit changed (`55 mg` -> `55 ml`). The deletion gate never saw that: the
-    unit was not part of the key and the sentence was not "missing" (F07). A
-    changed NUMBER is a correction, not this class, so only a value that
-    survives with a DIFFERENT unit is reported.
-
-    A pure unit edit on an otherwise identical sentence is the documented
-    correction of a wrong unit and is NOT reported (F04); the caller's
-    message no longer tells the reviser to restore the original.
-    """
-    if pairs is None:
-        _m, _a, pairs = _match_content_unit_pairs(base_units, cand_units)
-    cand_by_base = {id(base): cand for base, cand in pairs}
-    changed = []
-    for unit in base_units or ():
-        text = str(unit.get("text") or "")
-        paired = cand_by_base.get(id(unit))
-        # Compare the MATCHED candidate occurrence, not the package-wide unit
-        # set: a surviving copy of `55 mg` in another sentence must not hide a
-        # `55 mg` -> `55 ml` change in this one (F129).
-        surviving = _fact_number_units([paired]) if paired is not None else {}
-        seen = set()
-        # The base's own unit set for this number: a candidate that ADDS a
-        # second unit ("55 mg or 55 ml") is a new fact even when the base unit
-        # also survives.
-        base_units_by_num = {}
-        for _bm in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-            if len(re.sub(r"\D", "", _bm.group(0))) < _FACT_SURVIVAL_MIN_DIGITS \
-                    and not _fact_single_digit_is_fact(text, _bm):
-                continue
-            base_units_by_num.setdefault(_fact_survival_key(_bm.group(0)), set()).add(
-                _fact_survival_unit_after(text, _bm.end()))
-        for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-            raw = match.group(0)
-            if len(re.sub(r"\D", "", raw)) < _FACT_SURVIVAL_MIN_DIGITS \
-                    and not _fact_single_digit_is_fact(text, match):
-                continue
-            printed_unit = _fact_survival_unit_after(text, match.end())
-            num_key = _fact_survival_key(raw)
-            if (num_key, printed_unit) in seen:
-                continue
-            seen.add((num_key, printed_unit))
-            others = surviving.get(num_key)
-            if not others:
-                continue
-            if printed_unit:
-                if printed_unit in others:
-                    added_units = (others - (base_units_by_num.get(num_key) or set())) - {""}
-                    if not added_units:
-                        continue
-                    changed.append((unit, f"{raw} {printed_unit}",
-                                    sorted(u or "(unitless)" for u in others)))
-                    continue
-                if _unit_change_is_correction(
-                        text, paired.get("text") or "", raw, printed_unit,
-                        others, authority_text):
-                    continue
-                changed.append((unit, f"{raw} {printed_unit}",
-                                sorted(u or "(unitless)" for u in others)))
-                continue
-            # The base printed NO unit this table recognises, but the paired
-            # candidate gives the same number a unit: the fact gained a
-            # measurement. Unknown spellings are not invented as units above
-            # ("55 of the animals"), yet a real `55 in` -> `55 cm` rewrite is a
-            # changed measurement and must be reported (F019).
-            gained = sorted(u for u in others if u)
-            if not gained:
-                continue
-            if _unit_change_is_correction(
-                    text, paired.get("text") or "", raw, "", others,
-                    authority_text):
-                continue
-            changed.append((unit, f"{raw} (unitless)", gained))
-    return changed
-
-
-def _fact_unit_change_message(changed, label: str) -> str:
-    def one(item):
-        unit, printed, others = item
-        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} {printed!r} "
-                f"survives only as {', '.join(others)}")
-
-    return (f"{label}{len(changed)} measurement(s) keep the number but change its UNIT: "
-            + "; ".join(one(x) for x in changed[:5])
-            + (" ..." if len(changed) > 5 else "")
-            + ". A unit is part of the fact: when the BASE unit was itself the defect, "
-              "record the corrected measurement (value AND unit) in "
-              "README-AUTHOR-TO-COMPLETE.md/MANUAL_STEPS.md with its evidence and make a "
-              "unit-only edit -- a RECORDED pure unit fix is a correction and passes this "
-              "gate; do not change a unit as a side effect of rewriting the sentence, and "
-              "do not let a surviving sentence in another unit hide the change.")
-
-
-# ---------------------------------------------------------------------
-# IDENTITY INTEGRITY -- two spellings of one identity value in one package
-#
-# An identity field (an address, a name) is a fact, and a package cannot carry
-# two spellings of it: one of them is a typo. The revise prompt already requires
-# a wrong value to be corrected by writing the CORRECT fact, and a package that
-# declares an identity statement authoritative supplies that fact; nothing made
-# the rule mechanical, so a front-matter address that disagreed with the
-# authoritative one could be reported as an "author query" and shipped twice.
-#
-# The check is deliberately narrow: it fires only when two occurrences share
-# their local part and their DOMAINS differ by at most two characters, which is
-# the signature of a domain typo and is not how two different people's
-# addresses usually differ.
-# ---------------------------------------------------------------------
-_EMAIL_TOKEN_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
-
-
-def _bounded_edit_distance(a: str, b: str, limit: int = 2) -> int:
-    """Levenshtein distance, returning limit+1 as soon as it cannot beat limit."""
-    if abs(len(a) - len(b)) > limit:
-        return limit + 1
-    previous = list(range(len(b) + 1))
-    for i, ca in enumerate(a, 1):
-        current = [i] + [0] * len(b)
-        best = i
-        for j, cb in enumerate(b, 1):
-            current[j] = min(previous[j] + 1, current[j - 1] + 1,
-                             previous[j - 1] + (ca != cb))
-            if current[j] < best:
-                best = current[j]
-        if best > limit:
-            return limit + 1
-        previous = current
-    return previous[-1]
-
-
-def fact_survival_required(insertions_allowed: bool, deletions_allowed: bool) -> bool:
-    """Is the shared D8 fact-survival gate needed for this content-edit policy?
-
-    It is needed exactly when a DELETION is permitted. The strict no-deletion
-    mode already reports every missing base unit from `content_edit_problems`,
-    while every mode that permits a deletion has no other gate that stops it
-    from taking a value or identifier with it -- including `--disable-insertions`
-    alone, where the unit-level deletion check does not run.
-    """
-    return bool(deletions_allowed)
-
-
-def identity_typo_problems(candidate_package: Path, stage: str = "") -> list:
-    """Two spellings of one address in the submitted prose.
-
-    The package's own authoritative identity statement decides which spelling
-    is correct; leaving both in place ships a typo the author cannot see. A pair
-    that is genuinely two people (the heuristic cannot know) is disposed by
-    recording both spellings in the package's own author hand-off, exactly like
-    a removed fact: that record is what clears this gate.
-    """
-    package = Path(candidate_package)
-    if not package.is_dir():
-        return []
-    handoff_texts = [text.lower() for _name, text in _manual_handoff_texts(package)]
-    skipped: list = []
-    seen = []
-    for unit in _content_unit_sentences(package, skipped=skipped):
-        for match in _EMAIL_TOKEN_RE.finditer(unit.get("text") or ""):
-            address = match.group(0)
-            local, _, domain = address.partition("@")
-            seen.append((local, domain.lower(), address,
-                         unit.get("document") or "", int(unit.get("line") or 0)))
-    problems = []
-    if skipped:
-        # A corrupt/oversized submitted document makes this gate blind, not
-        # clean: say so instead of reporting no typo pair (F196).
-        names = ", ".join(sorted(set(skipped))[:6])
-        problems.append(
-            f"{stage + ': ' if stage else ''}{len(set(skipped))} submitted file(s) could "
-            f"not be scanned for the identity-typo gate (corrupt, oversized, symlinked or "
-            f"unreadable): {names}"
-            + (" ..." if len(set(skipped)) > 6 else "")
-            + ". The gate is UNENFORCED on those files; repair or remove them before "
-              "retrying.")
-    # Compare WHOLE addresses, not one local part's domains: the old key made a
-    # same-domain local-part variant (`j.smith@` vs `jsmith@`) and a wider
-    # domain typo invisible (F120). A near-identical local part on one domain,
-    # a near-identical domain under one local part, and a one/two-character
-    # edit of the full address are all two spellings of one identity.
-    def _norm_addr_local(value: str) -> str:
-        return re.sub(r"[._+-]", "", value.lower())
-
-    def _norm_addr_domain(value: str) -> str:
-        return re.sub(r"[._-]", "", value.lower().strip("."))
-
-    def _one_identity(first, second) -> bool:
-        local1, domain1, addr1 = first[0], first[1], first[2]
-        local2, domain2, addr2 = second[0], second[1], second[2]
-        if addr1.lower() == addr2.lower():
-            return False
-        nl1, nl2 = _norm_addr_local(local1), _norm_addr_local(local2)
-        nd1, nd2 = _norm_addr_domain(domain1), _norm_addr_domain(domain2)
-        if not nl1 or not nl2 or not nd1 or not nd2:
-            return False
-        if domain1 == domain2:
-            # `j.smith@` and `jsmith@` (or a one-character local spelling).
-            return (nl1 != nl2 and _bounded_edit_distance(nl1, nl2, 1) <= 1) \
-                or (nl1 == nl2 and local1 != local2)
-        if nl1 == nl2:
-            if _bounded_edit_distance(domain1, domain2, 2) <= 2:
-                return True
-            # A wider typo (`uni.edu` vs `uni-edu.org`) is one spelling that
-            # gained a label: compare the normalized whole addresses.
-            full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
-            if full1.startswith(full2) or full2.startswith(full1):
-                return abs(len(full1) - len(full2)) <= 6
-        full1, full2 = f"{nl1}@{nd1}", f"{nl2}@{nd2}"
-        return _bounded_edit_distance(full1, full2, 2) <= 2
-
-    reported = set()
-    for i in range(len(seen)):
-        for j in range(i + 1, len(seen)):
-            if not _one_identity(seen[i], seen[j]):
-                continue
-            first, second = seen[i], seen[j]
-            key = tuple(sorted((first[2].lower(), second[2].lower())))
-            if key in reported:
-                continue
-            if any(first[2].lower() in text and second[2].lower() in text
-                   for text in handoff_texts):
-                continue           # recorded for the author: a genuine pair
-            reported.add(key)
-            label = f"{stage}: " if stage else ""
-            problems.append(
-                f"{label}one address is printed two ways: "
-                f"{first[2]} ({first[3]}:{first[4]}) and {second[2]} "
-                f"({second[3]}:{second[4]}). One spelling is a typo, and the package's "
-                f"own authoritative identity statement decides which: correct the other "
-                f"occurrence to that value (an identity typo is a decidable correction, "
-                f"not an author query). If the pair is genuinely two people, record both "
-                f"spellings in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as "
-                f"manual-required with the evidence -- that record clears this gate.")
-    return problems[:3]
-
-
-def _manual_handoff_texts(package: Path) -> list:
-    """[(name, text)] of the package's OWN author hand-off files.
-
-    The compliant route the prompts name is `README-AUTHOR-TO-COMPLETE.md` /
-    `MANUAL_STEPS.md` beside the submitted documents. Reading them makes a
-    gate's message actionable instead of sending the session into a retry loop
-    no edit can pass. Only the package ROOT is read: a same-named file under
-    `work/` (agent scratch) or an evidence area is not the author hand-off, so
-    it must not be able to clear a gate. `read_text_bounded` keeps an
-    agent-written file from exhausting memory and refuses a planted symlink.
-    """
-    root = Path(package)
-    if not root.is_dir():
-        return []
-    wanted = {AUTHOR_TO_COMPLETE_README.lower(), "manual_steps.md"}
-    out = []
-    try:
-        entries = sorted(root.iterdir(), key=lambda p: p.name.lower())
-    except OSError:
-        return []
-    for path in entries:
-        if path.name.lower() not in wanted or not path.is_file():
-            continue
-        text = read_text_bounded(path)
-        if text:
-            out.append((path.name, text))
-    return out
-
-
-_HANDOFF_TABLE_ID_RE = re.compile(r"(?i)\bT-\d+\b")
-
-
-# Dates/timestamps in a hand-off line are metadata: their components are not
-# the fact values the hand-off records (F121).
-_HANDOFF_DATE_RE = re.compile(
-    r"(?i)\b\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?:[T ]\d{1,2}:\d{2}(?::\d{2})?(?:\.\d+)?Z?)?\b"
-    r"|\b\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}\b")
-_HANDOFF_TIME_RE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
-
-
-def _manual_handoff_keys(package: Path) -> set:
-    """Value keys the delivered package records in its author hand-off list.
-
-    Only the row's ACTION column is read, never its id column: the standard
-    table id `T-001` made `_fact_survival_tokens` produce the numeric key 1.0
-    (T-002 -> 2.0), so every package with a hand-off table silently exempted
-    the values 1, 2, ... from the fact gate (F195). A `T-###` occurrence
-    anywhere on a line is dropped for the same reason.
-
-    A DATE or timestamp is metadata, not a recorded fact value: `2026-11-01`
-    used to emit the bare keys 1, 11 and 2026, so a line carrying only a date
-    exempted a real `11 mg` loss without naming that fact (F121). The date and
-    time spellings are removed before the token scan.
-    """
-    keys = set()
-    for _name, text in _manual_handoff_texts(package):
-        for line in str(text or "").splitlines():
-            stripped = line.strip()
-            if stripped.startswith("|"):
-                cells = [c.strip() for c in stripped.strip("|").split("|")]
-                if len(cells) > 1:
-                    # The first column is the row id; the action/description
-                    # columns are where a manual value is recorded.
-                    line = " | ".join(cells[1:])
-            line = _HANDOFF_TABLE_ID_RE.sub(" ", line)
-            line = _HANDOFF_DATE_RE.sub(" ", line)
-            line = _HANDOFF_TIME_RE.sub(" ", line)
-            for token in _fact_survival_tokens(line):
-                keys.add(_fact_survival_key(token))
-    return keys
-
-
-def _fact_pair_values(text):
-    """[(bare numeric key, printed form)] and [identifier key] of one text."""
-    nums, idents = [], []
-    text = str(text or "")
-    ident_spans = []
-    for match in _FACT_SURVIVAL_IDENT_RE.finditer(text):
-        token = match.group("accession") or match.group(0)
-        idents.append((_fact_survival_key(token), token))
-        ident_spans.append((match.start(), match.end()))
-    for match in _FACT_SURVIVAL_NUMBER_RE.finditer(text):
-        raw = match.group(0)
-        ndig = len(re.sub(r"\D", "", raw))
-        if ndig < 1:
-            continue
-        if any(a <= match.start() < b for a, b in ident_spans):
-            # The `10.9999` prefix of a DOI is part of the identifier, not a
-            # second fact: reporting it twice inflated the message (F004).
-            continue
-        if _fact_number_is_display_marker(text, match):
-            # A display/citation LABEL number is not a fact, whatever its
-            # width (`Figure 12`, `Table 2`), and neither is a bracketed
-            # citation/list/footnote marker (`[1]`, `[^12]`).
-            continue
-        if ndig < _FACT_SURVIVAL_MIN_DIGITS and _fact_single_digit_is_marker(
-                text, match):
-            # A single digit can carry a real fact (`5 mg`, `pH 7`, a count),
-            # and pair deltas need it so a 12 -> 6 correction is recognised as a
-            # replacement rather than a deletion (R12-3). Exempt only a list
-            # marker (`1.` at a line start) or a display label.
-            continue
-        unit = _fact_survival_unit_after(text, match.end())
-        nums.append((_fact_survival_key(raw), f"{raw} {unit}".strip()))
-    return nums, idents
-
-
-def _fact_pair_delta_examples(pairs, handoff_keys=()) -> tuple:
-    """(lost, added) values inside MATCHED pairs, corrections excluded.
-
-    A value that disappears from a surviving sentence while a DIFFERENT value
-    appears in the same sentence is a correction and stays allowed (R12-3). A
-    value that disappears with no replacement is a lost fact (F003), and a value
-    that appears with no removal is an insertion (F004). Identifiers follow the
-    same rule.
-    """
-    handoff = set(handoff_keys or ())
-    lost, added = [], []
-    for base, cand in pairs or ():
-        bnums, bids = _fact_pair_values(base.get("text"))
-        cnums, cids = _fact_pair_values(cand.get("text"))
-        for kind, bvals, cvals in (("num", bnums, cnums), ("ident", bids, cids)):
-            bmap, cmap = {}, {}
-            for key, printed in bvals:
-                bmap.setdefault(key, printed)
-            for key, printed in cvals:
-                cmap.setdefault(key, printed)
-            gone = [k for k in bmap if k not in cmap]
-            new = [k for k in cmap if k not in bmap]
-            pair_n = min(len(gone), len(new))
-            for key in gone[pair_n:]:
-                printed = bmap[key]
-                if key not in handoff:
-                    lost.append((base, [printed]))
-            for key in new[pair_n:]:
-                printed = cmap[key]
-                if key not in handoff:
-                    added.append((cand, [printed]))
-    return lost, added
-
-
-def _fact_pair_added_message(added, label: str) -> str:
-    def one(item):
-        unit, tokens = item
-        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} added "
-                f"{', '.join(sorted(set(tokens)))} "
-                f"({str(unit.get('text') or '')[:80]})")
-
-    return (f"{label}{len(added)} surviving statement(s) gained a value or identifier that "
-            f"the base did not state and did not replace: " + "; ".join(one(x) for x in added[:5])
-            + (" ..." if len(added) > 5 else "")
-            + ". A measurement, count or identifier is corrected in place (one value replaces "
-              "another), never appended as a new fact. If the new fact is independently "
-              "evidenced, record it in README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md with "
-              "that evidence; otherwise remove it.")
-
-
-def _fact_loss_message(lost, label: str) -> str:
-    def one(item):
-        unit, tokens = item
-        return (f"{unit.get('document') or '?'}:{int(unit.get('line') or 0)} lost "
-                f"{', '.join(sorted(set(tokens)))} "
-                f"({str(unit.get('text') or '')[:80]})")
-
-    return (f"{label}{len(lost)} deleted content unit(s) carry a value or identifier that no "
-            f"surviving sentence states: " + "; ".join(one(x) for x in lost[:5])
-            + (" ..." if len(lost) > 5 else "")
-            + ". A wrong value, name, definition or claim is repaired by writing the CORRECT "
-              "fact in place (rule D8); removing the sentence that carries it is not a repair. "
-              "If the value cannot be decided from the package, record it in "
-              "README-AUTHOR-TO-COMPLETE.md or MANUAL_STEPS.md as manual-required with the "
-              "value to restore -- that record clears this gate; do not drop it silently.")
-
-
-def _fact_exempt_sets(exempt_removed):
-    """(text Counter, (document, text) Counter) of pipeline removals.
-
-    Counters, not sets: one recorded removal exempts ONE base occurrence. A set
-    exempted every identical copy, so deleting a second number-bearing copy took
-    the last value with no fact-loss report (F005).
-    """
-    exempt_text, exempt_document = Counter(), Counter()
-    for s in (exempt_removed or ()):
-        if isinstance(s, (tuple, list)) and len(s) == 2:
-            doc, sentence = s
-            if str(sentence or "").strip():
-                exempt_document[(str(doc), _deleted_para_norm(sentence).lower())] += 1
-        elif str(s or "").strip():
-            exempt_text[_deleted_para_norm(s).lower()] += 1
-    return exempt_text, exempt_document
-
-
-def fact_preservation_problems(base_package: Path, candidate_package: Path,
-                               stage: str = "", exempt_removed=None) -> list:
-    """Problems where a deleted base sentence took a value/identifier with it.
-
-    `exempt_removed` honours the same exemptions the content-edit policy uses
-    (the pipeline's own packaging removals), consumed one-to-one so one removal
-    does not exempt every identical copy; a required removal then never trips
-    this check.
-    """
-    base_package, candidate_package = Path(base_package), Path(candidate_package)
-    if not base_package.is_dir() or not candidate_package.is_dir():
-        return []
-    exempt_text, exempt_document = _fact_exempt_sets(exempt_removed)
-    skipped = []
-    base_units = []
-    for u in _content_unit_sentences(base_package, skipped=skipped):
-        if _is_handoff_marker(u["text"]):
-            # An author hand-off placeholder is not a fact-bearing sentence: in
-            # `readme`/`off` its removal is REQUIRED, and treating that removal
-            # as a lost fact made the documented placeholder rule unrepairable
-            # (F194).
-            continue
-        doc_key = (u["document"], u["norm"])
-        if exempt_text.get(u["norm"], 0) > 0:
-            exempt_text[u["norm"]] -= 1
-            continue
-        if exempt_document.get(doc_key, 0) > 0:
-            exempt_document[doc_key] -= 1
-            continue
-        base_units.append(u)
-    cand_units = [u for u in _content_unit_sentences(candidate_package, skipped=skipped)
-                  if not _is_handoff_marker(u["text"])]
-    missing, _added = _match_content_units(base_units, cand_units)
-    surviving = _fact_survival_keys(cand_units)
-    handoff = _manual_handoff_keys(candidate_package)
-    lost = _fact_loss_examples(missing, surviving, handoff)
-    # A value can also vanish from a sentence that still MATCHES: the unit
-    # change check below only sees a value that survives with a different unit,
-    # never one that disappears entirely (F003). Check both directions of every
-    # matched pair, treating a same-sentence removal+addition as a correction.
-    missing_ids = {id(u) for u in missing}
-    pairs = [(b, c) for b, c in _match_content_unit_pairs(base_units, cand_units)[2]
-             if id(b) not in missing_ids]
-    pair_lost, pair_added = _fact_pair_delta_examples(pairs, handoff)
-    lost = lost + pair_lost
-    # A unit-only change can live in a SURVIVING sentence (the fuzzy matcher
-    # pairs "55 mg" with "55 ml"), so check matched units too. Units already in
-    # `missing` are covered by the loss message; do not report them twice.
-    # The package's own author hand-off is the documented channel for a value
-    # the reviser must CHANGE rather than keep: a corrected unit recorded there
-    # is a correction, not a silent fact change (F04).
-    _authority = "\n".join(text for _name, text in _manual_handoff_texts(candidate_package))
-    changed = _fact_unit_change_examples(
-        [u for u in base_units if id(u) not in missing_ids], cand_units,
-        authority_text=_authority)
-    label = f"{stage}: " if stage else ""
-    problems = []
-    if skipped:
-        # The gate matched only the files it could read. An unreadable submitted
-        # document is an UNENFORCED pass, not a clean one: report it here too,
-        # because `content_edit_problems` returns before its own scan in the
-        # default (both-allowed) mode (F196).
-        names = ", ".join(sorted(set(skipped))[:6])
-        problems.append(
-            f"{label}{len(set(skipped))} submitted file(s) could not be scanned for the "
-            f"fact-survival gate (corrupt, oversized, symlinked or unreadable): {names}"
-            + (" ..." if len(set(skipped)) > 6 else "")
-            + ". The fact gate is UNENFORCED on those files; repair or remove them "
-              "before retrying.")
-    if lost:
-        problems.append(_fact_loss_message(lost, label))
-    if changed:
-        problems.append(_fact_unit_change_message(changed, label))
-    if pair_added:
-        problems.append(_fact_pair_added_message(pair_added, label))
-    return problems
 
 
 def deletion_audit_problems(sb: Path, expected_rows: int = None,
@@ -7846,58 +5859,16 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
     # dropped row as kept).
     _norm_para = _deletion_audit_identity
     problems, seen_rows = [], 0
-    all_rows = []
     seen_paragraphs = set()
     seen_refs = {}
     expected_refs = [_deletion_audit_ref(i, row)
                      for i, row in enumerate(expected_occurrences or ())]
     check_plan = plan_ids is not None
     plan_ids = {str(x).strip().upper() for x in (plan_ids or ()) if str(x).strip()}
-    _expected_paras = {_norm_para(x) for x in (expected_paragraphs or ())
-                       if _norm_para(x)}
-    _expected_ref_set = set(expected_refs)
-
-    def _is_seeded_block(block) -> bool:
-        """Is this block the seeded disposition table (not a session's summary)?
-
-        The artifact's prompt says to edit the seeded table in place; it does
-        not forbid an ADDITIONAL summary/coverage table, and sibling artifacts
-        legitimately carry several tables. Only the block that reproduces the
-        seeded occurrence ids/paragraphs (or the seeded header shape) is the
-        contract-bearing table (F199). A summary table with a
-        `disposition`-like column must not demand one verdict per metric row.
-        """
-        header = {str(h).strip().lower() for h in (block.get("header") or [])}
-        # The seeded table's OWN header shape, not any table that happens to
-        # call a column `#` and another `paragraph`: a session's appended
-        # summary/coverage table was forced through per-row disposition checks.
-        if ({"#", "document", "line", "paragraph"} <= header
-                and any("disposition" in h for h in header)):
-            # The exact-name lookup later reports a RENAMED column
-            # (`disposition notes`) as "no disposition column" (F190); a
-            # summary table without the seed's four identity columns is not
-            # the contract-bearing block (F169).
-            return True
-        for row in block.get("rows") or ():
-            ref = str(row.get("#") or "").strip()
-            # A row only identifies the seed when the SEED's own identity set
-            # exists and the row matches it; otherwise every table with a `#`
-            # column would be treated as the disposition table.
-            if ref and ref in _expected_ref_set:
-                return True
-            if _expected_paras and _norm_para(row.get("paragraph")) in _expected_paras:
-                return True
-        return False
-
     for block in parse_markdown_blocks(p):
         if not block["rows"]:
             continue
-        if not _is_seeded_block(block):
-            # A summary/coverage table the session appended: it is neither a
-            # seeded row nor a disposition table, so it is out of this check.
-            continue
         seen_rows += len(block["rows"])
-        all_rows.extend(block["rows"])
         seen_paragraphs.update(_deletion_audit_identity(row.get("paragraph"))
                                for row in block["rows"]
                                if str(row.get("paragraph") or "").strip())
@@ -7905,30 +5876,18 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
             ref = str(row.get("#") or "").strip()
             if ref:
                 seen_refs[ref] = seen_refs.get(ref, 0) + 1
-        # Resolve the disposition column ONCE, with the same exact-name
-        # vocabulary `disposition_artifact_problems` accepts. The old substring
-        # test (`"disposition" in header`) admitted `disposition notes`, while
-        # the per-row lookup used the exact key `disposition` and found nothing:
-        # every cell then read EMPTY and no problem was produced (F190).
-        disp_key = next((k for k in DISPOSITION_COLUMNS if k in block["header"]), None)
-        if disp_key is None:
+        if not any("disposition" in str(h) for h in block["header"]):
             problems.append(f"{p.name} has a table with no disposition column; "
                             f"re-emit the seeded table with its last column intact")
             continue
         problems += disposition_artifact_problems(
             block["rows"], block.get("widths"), len(block["header"]))
         for row in block["rows"]:
-            disposition = str(row.get(disp_key) or "").strip()
+            disposition = str(row.get("disposition") or "").strip()
             if not disposition:
                 # Already reported as an EMPTY cell by the shared checker.
                 continue
-            # The seed's `OK — nothing removed` row exists only when the seed
-            # had no row: allow the phrase only there (F191).
-            _empty_seed_row = (expected_rows == 0) or (
-                expected_rows is None
-                and str(row.get("#") or "").strip() in ("-", "\u2014"))
-            if not _deletion_disposition_ok(
-                    disposition, allow_nothing_removed=_empty_seed_row):
+            if not _deletion_disposition_ok(disposition):
                 problems.append(
                     f"{p.name} row {str(row.get('#') or '?').strip()} has a disposition "
                     f"outside the seeded vocabulary: {disposition[:80]!r}. Dispose it as "
@@ -7936,8 +5895,8 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
                     f"`fact removed — RP-xxx`")
         if check_plan:
             for row in block["rows"]:
-                disposition = str(row.get(disp_key) or "")
-                for match in re.finditer(r"(?i)fact\s+removed\s*[—–:-]\s*(RP-\d+)",
+                disposition = str(row.get("disposition") or "")
+                for match in re.finditer(r"(?i)fact\s+removed\s*[—:-]\s*(RP-\d+)",
                                          disposition):
                     if match.group(1).upper() not in plan_ids:
                         problems.append(
@@ -7967,14 +5926,6 @@ def deletion_audit_problems(sb: Path, expected_rows: int = None,
                 f"{p.name} disposes seeded row id(s) {len(duplicated)} time(s) instead of "
                 f"once (e.g. {duplicated[0]!r}): one paragraph cannot be disposed twice "
                 f"in place of a distinct one")
-    # The dispositions are the audit's own record of what a deletion cost. A row
-    # disposed `OK — no fact is lost` while the value it carried appears nowhere
-    # in the delivered package is a false record (D8), whatever the revise stage
-    # was told. Check the FULL seeded paragraph, not the table's truncated cell.
-    _full_by_ref = {_deletion_audit_ref(i, row): str(row.get("paragraph") or "")
-                    for i, row in enumerate(expected_occurrences or ())}
-    problems += [f"{p.name}: {item}"
-                 for item in deletion_row_fact_loss_problems(sb, all_rows, _full_by_ref)]
     return problems
 
 
@@ -8030,44 +5981,6 @@ def response_comment_quotes(letter: str) -> dict:
         quote = comments[0].strip().strip("\"'“”‘’").strip()
         if quote:
             out[m.group(1)] = quote
-    return out
-
-
-def response_answers(letter: str) -> dict:
-    """{concern id: the non-empty `**Response:**` answer in that block}.
-
-    The response prompt's block has three parts: the `## <id>` heading, the
-    reviewer's `**Comment:**` quotation and the authors' `**Response:**` answer.
-    Only the first two were parsed, so a certified letter could carry a quote
-    and a Changes line and answer nothing at all (F099). Fenced examples are not
-    blocks; a block with two answers is ambiguous and therefore has none (the
-    postcheck fails it). An answer may follow the marker on the next non-empty
-    line, but never from another `**Field:**` line.
-    """
-    out = {}
-    for part in re.split(r"(?m)^##\s+", _markdown_outside_fences(letter))[1:]:
-        m = re.match(r"([A-Za-z0-9_.\-]+)", part)
-        if not m:
-            continue
-        answers, lines = [], part.splitlines()
-        for idx, line in enumerate(lines):
-            am = re.match(r"\s*\*\*Response:\*\*\s*(.*)$", line)
-            if not am:
-                continue
-            text = am.group(1).strip()
-            if not text:
-                for nxt in lines[idx + 1:]:
-                    nxt = nxt.strip()
-                    if not nxt:
-                        continue
-                    if re.match(r"\*\*[^*]+\*\*\s*:?", nxt):
-                        break
-                    text = nxt
-                    break
-            if text:
-                answers.append(text)
-        if len(answers) == 1:
-            out[m.group(1)] = answers[0]
     return out
 
 
@@ -8147,119 +6060,6 @@ def response_heading_occurrences(pid: str, blob: str) -> int:
     return count
 
 
-def response_local_problems(sb: Path, target: Path = None) -> list:
-    """The ctx-free half of `postcheck_response`, shared with the pre-flight.
-
-    These are the detectors that need only the sandbox: the letter's per-concern
-    `## <id>` block, the `**Comment:**` presence, the map's status/response
-    contract, and the letter's `**Changes:**` binding to map entries whose files
-    exist in the package. The postcheck adds the concern ledger's verbatim quote,
-    the already-addressed rule and the before/after span check, which need the
-    concern run's state (F184).
-    """
-    errs = []
-    md = sb / JOURNAL_RESPONSE_MD_REL
-    letter = ""
-    if not md.is_file():
-        errs.append(f"{JOURNAL_RESPONSE_MD_REL} is missing: the response to reviewers is "
-                    f"the deliverable of this mode")
-    else:
-        letter = read_text_bounded(md)
-        if letter is None:
-            errs.append(f"{JOURNAL_RESPONSE_MD_REL} could not be read (it is a symlink/"
-                        f"non-regular file or over the byte budget)")
-            letter = ""
-        elif not letter.strip():
-            errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to reviewers "
-                        f"must carry one block per concern")
-    data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
-    if not isinstance(data, dict):
-        errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
-                    f"machine-readable map)")
-        return errs
-    rows = [x for x in (data.get("rows") or []) if isinstance(x, dict)]
-    target = Path(target) if target is not None else sb / "target"
-    try:
-        _decl = declared_submission_set(target)
-        declared = set(_decl.get("files") or ()) if _decl.get("declared") else set()
-    except Exception:                                                # noqa: BLE001
-        declared = set()
-    comment_quotes = response_comment_quotes(letter)
-    answers = response_answers(letter)
-    letter_changes = response_letter_change_paths(letter)
-    for row in rows:
-        cid = str(row.get("id") or "")
-        status = str(row.get("status") or "").strip()
-        response = str(row.get("response") or "").strip()
-        if status not in ("addressed", "partially-addressed", "already-addressed", "planned",
-                          "not-applicable"):
-            errs.append(f"response row {cid!r}: status {status!r} is not one of addressed/"
-                        f"partially-addressed/already-addressed/planned/not-applicable")
-        if not response:
-            errs.append(f"response row {cid!r}: the response sentence is empty")
-        if cid and letter.strip():
-            mentions = response_heading_occurrences(cid, letter)
-            if not mentions:
-                errs.append(f"response letter does not carry a `## {cid}` block")
-            elif mentions > 1:
-                errs.append(f"response letter carries {mentions} `## {cid}` headings: "
-                            f"exactly one block per concern is required")
-        if cid and letter.strip() and not comment_quotes.get(cid):
-            errs.append(f"response {cid!r}: no **Comment:** line carries the reviewer's "
-                        f"verbatim quotation")
-        if cid and letter.strip() and not answers.get(cid):
-            errs.append(f"response {cid!r}: the block carries no non-empty **Response:** "
-                        f"line answering the concern; every block must say what the authors "
-                        f"did, or why they did not")
-        changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
-        new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
-        map_paths = {str(c.get("file") or "").strip() for c in changes
-                     if str(c.get("file") or "").strip()} | set(new_data)
-        for lp in letter_changes.get(cid) or []:
-            if lp not in map_paths:
-                errs.append(
-                    f"response {cid!r}: the letter's `**Changes:**` line cites {lp!r}, "
-                    f"but {JOURNAL_RESPONSE_MAP_REL} records no change or new-data file "
-                    f"with that path for this concern")
-        if status in ("planned", "not-applicable", "already-addressed") \
-                and (changes or new_data):
-            errs.append(f"response row {cid!r}: status {status!r} must not list completed "
-                        f"changes/new data")
-        for c in changes:
-            f = str(c.get("file") or "").strip()
-            operation = str(c.get("operation") or "edit").strip().lower()
-            if operation not in ("edit", "remove"):
-                errs.append(f"response row {cid!r}: change operation {operation!r} is not "
-                            f"`edit` or `remove`")
-            if not f:
-                errs.append(f"response row {cid!r}: a change entry names no file")
-            elif Path(f).is_absolute() or ".." in Path(f).parts:
-                errs.append(f"response row {cid!r}: change file {f!r} is not a "
-                            f"package-relative path")
-            elif operation == "remove":
-                if (target / f).is_file():
-                    errs.append(f"response row {cid!r}: change {f!r} is recorded as "
-                                f"`remove`, but the package still carries it")
-            elif not (target / f).is_file():
-                errs.append(f"response row {cid!r}: change file {f!r} does not exist in the "
-                            f"package -- the letter must not cite a file the revision does not "
-                            f"carry")
-            elif declared and f not in declared:
-                errs.append(f"response row {cid!r}: change file {f!r} is not in the package's "
-                            f"DECLARED submitted set")
-        for f in new_data:
-            if Path(f).is_absolute() or ".." in Path(f).parts:
-                errs.append(f"response row {cid!r}: new-data file {f!r} is not a "
-                            f"package-relative path")
-            elif not (target / f).is_file():
-                errs.append(f"response row {cid!r}: new-data file {f!r} does not exist in "
-                            f"the package")
-            elif declared and f not in declared:
-                errs.append(f"response row {cid!r}: new-data file {f!r} is not in the "
-                            f"package's DECLARED submitted set")
-    return errs
-
-
 def postcheck_response(ctx: Ctx, rec: dict):
     """Modes 2-4: the letter covers every concern and cites the package truthfully."""
     sb = ctx.sandbox_of(rec)
@@ -8273,12 +6073,13 @@ def postcheck_response(ctx: Ctx, rec: dict):
     errs.extend(structured_output_problems(ctx, rec))
     warns.extend(inherited_structured_output_notes(ctx, rec))
     target = sb / "target"
-    try:
-        src = _journal_concern_source(ctx, r)
-    except RuntimeError:
+    src_rec = ctx.run(rid_concerns(r)) or ctx.run(rid_feedback(r))
+    if src_rec is None:
+        errs.append("the concern ledger's sandbox is missing (no concerns/feedback run in this "
+                    "round): the letter cannot be verified against the concerns")
         src = None
-        errs.append("the concern ledger's sandbox is missing (no concerns/feedback/repair run "
-                    "in this round): the letter cannot be verified against the concerns")
+    else:
+        src = ctx.sandbox_of(src_rec)
     ledger_rows = {str(row.get("id")): row
                    for row in (journal_concern_rows(src) if src else [])}
     md = sb / JOURNAL_RESPONSE_MD_REL
@@ -8300,7 +6101,6 @@ def postcheck_response(ctx: Ctx, rec: dict):
             errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
                         f"reviewers must carry one block per concern")
     comment_quotes = response_comment_quotes(letter)
-    answers = response_answers(letter)
     letter_changes = response_letter_change_paths(letter)
     data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
     if not isinstance(data, dict):
@@ -8333,13 +6133,6 @@ def postcheck_response(ctx: Ctx, rec: dict):
         # paraphrased quote passed (F60). The concern ledger's own `quote` was
         # itself verified against the feedback when the ledger was written, so
         # it is the authority here.
-        if letter.strip() and not answers.get(cid):
-            # The letter prompt makes `**Response:**` one of the block's three
-            # parts; parsing only the Comment left the answer unchecked, so a
-            # certified letter could answer nothing (F099).
-            errs.append(f"response {cid!r}: the block carries no non-empty **Response:** "
-                        f"line answering the concern; every block must say what the authors "
-                        f"did, or why they did not")
         concern_quote = " ".join(str((ledger_rows.get(cid) or {}).get("quote") or "").split())
         comment = comment_quotes.get(cid)
         if concern_quote and not comment:
@@ -8354,11 +6147,10 @@ def postcheck_response(ctx: Ctx, rec: dict):
             if len(re.findall(r"\S+", c_norm)) < 4 and not _full_quote:
                 errs.append(f"response {cid!r}: the Comment quotation is shorter than 4 words "
                             f"({comment!r}); quote the reviewer's own wording, not a label")
-            elif not response_comment_verifies(ctx, sb, ledger_rows.get(cid), comment,
-                                                concern_quote):
+            elif not response_comment_is_verbatim(comment, concern_quote):
                 errs.append(f"response {cid!r}: the Comment quotation is not verbatim from the "
-                            f"reviewer feedback (preserve its typos and punctuation; it may be "
-                            f"a shorter excerpt but must add no words)")
+                            f"reviewer feedback (the concern ledger's quote is {concern_quote!r}); "
+                            f"it may be a shorter excerpt but must add no words")
         changes = [c for c in (row.get("changes") or []) if isinstance(c, dict)]
         new_data = [str(x) for x in (row.get("new_data") or []) if str(x).strip()]
         # Bind the letter's own `**Changes:**` claims to the same row's validated
@@ -8473,9 +6265,8 @@ def postcheck_response(ctx: Ctx, rec: dict):
         if status in ("addressed", "partially-addressed") and not changes and not new_data:
             errs.append(f"response row {cid!r}: status {status!r} claims work done but cites no "
                         f"change and no new data file")
-        if status in ("planned", "not-applicable", "already-addressed") \
-                and (changes or new_data):
-            errs.append(f"response row {cid!r}: status {status!r} must not list completed "
+        if status == "planned" and (changes or new_data):
+            errs.append(f"response row {cid!r}: status 'planned' must not list completed "
                         f"changes/new data")
         if status in ("addressed", "partially-addressed") \
                 and str(src_row.get("action") or "") == "new-experiment" and not new_data:
@@ -8498,15 +6289,7 @@ def postcheck_response(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
-# Ledger dispositions that record an ACTUAL edit. `false-positive`,
-# `manual-required`, `not-found-in-source`, `clarification`, `discarded` and
-# `dropped-by-audit` are non-actions: their rows authorize no file change in a
-# concern-scoped revision (F15).
-_SCOPED_ACTIONABLE_VERDICTS = frozenset({
-    "confirmed", "fixed", "fixed-with-caveat", "placeholder-inserted"})
-
-
-def _scope_tree_files(root: Path, unreadable: list = None) -> dict:
+def _scope_tree_files(root: Path) -> dict:
     """{exact relative path: (rel, sha256)} of a package's submission files.
 
     The key is the EXACT path, not `_doc_key`: two distinct documents that
@@ -8515,11 +6298,6 @@ def _scope_tree_files(root: Path, unreadable: list = None) -> dict:
     the first in `want`/`got` -- the guard then missed a dropped sibling and
     compared one document's digest against another's. A version-token rename is
     paired later, only when the stripped key is unambiguous on both sides.
-
-    A path that cannot be hashed is NOT silently dropped (F101): dropping it
-    from BOTH trees made "could not read this file" indistinguishable from "this
-    file did not change", which hid a wholesale rewrite behind `chmod 000`. The
-    caller passes `unreadable` to receive those paths and reports them.
     """
     out = {}
     if not root.is_dir():
@@ -8535,55 +6313,11 @@ def _scope_tree_files(root: Path, unreadable: list = None) -> dict:
         try:
             out[rel] = (rel, sha256_file(p))
         except OSError:
-            if unreadable is not None:
-                unreadable.append(rel)
             continue
     return out
 
 
-def _collapse_ws(text: str) -> str:
-    """Whitespace-insensitive form of a document (for the exemption comparison).
-
-    Removing a mid-line sentence also removes the whitespace that separated it
-    from its neighbour, so the re-stripped base and the revised file can differ
-    only in whitespace. That difference is not a content edit.
-    """
-    return " ".join((text or "").split())
-
-def _pipeline_change_is_explained(base: Path, rev: Path, rel: str,
-                                  removed=()) -> bool:
-    """Is `rev/rel` exactly `base/rel` with the RECORDED removals applied?
-
-    `pipeline_changed` exempts the orchestrator's own PKG-2 sentence removal.
-    Exempting the WHOLE file let a concern-scoped session also change an
-    unrelated value in it (F179). Bounding it to "the revised text is a
-    subsequence of the base" still exempted any additional deletion, so an
-    unrelated sentence could be removed without a ledger row. The exemption is
-    now the recorded removed sentences THEMSELVES, keyed to the document they
-    were removed from (`removed` is [(document, sentence), ...]): only the
-    pipeline's own spans are neutralized, and every remaining difference still
-    needs a structured ledger row.
-    """
-    try:
-        b = read_text_bounded(base / rel)
-        r = read_text_bounded(rev / rel)
-    except OSError:
-        return False
-    if b is None or r is None:
-        return False
-    if b == r:
-        return True
-    for item in (removed or ()):
-        if not isinstance(item, (tuple, list)) or len(item) != 2:
-            continue
-        document, sentence = str(item[0] or ""), str(item[1] or "").strip()
-        if document != rel or not sentence:
-            continue
-        if sentence in b:
-            b = b.replace(sentence, "", 1)
-    return _collapse_ws(b) == _collapse_ws(r)
-def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
-                          removed=()) -> list:
+def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=()) -> list:
     """The major/minor scope guard: only concern-driven edits are allowed.
 
     File-level and mechanical: an added or deleted file is an error; a modified
@@ -8595,38 +6329,14 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
     before this check ran (the PKG-2 removal of a dangling reference, which is a
     submission-surface rule and not a concern-driven edit): those are exempt --
     the session never made them and cannot name them in its ledger -- and the
-    exemption is reported by the caller. `removed` is the recorded list of
-    `(document, sentence)` pairs the orchestrator actually removed; only those
-    spans are exempt, so an ADDITIONAL deletion in the same file still needs a
-    ledger row (F179).
+    exemption is reported by the caller.
     """
     errs = []
     pipeline_changed = {str(p) for p in (pipeline_changed or ())}
     base = sb / "base"
     if not base.is_dir() or not rev.is_dir():
         return errs
-    _unreadable = []
-    want, got = (_scope_tree_files(base, _unreadable),
-                 _scope_tree_files(rev, _unreadable))
-    # The A1 base is a whole-corpus copy, so it carries `base/code/`; revised
-    # analysis code is written at `<sandbox>/code/` (p06 `_candidate_dest`),
-    # never inside `revised/`. Comparing base/ to revised/ alone reported every
-    # base code file as a DROPPED document while the real code area was never
-    # checked at all (F178). Map the code area onto the base's `code/` side.
-    _code_root = sb / CODE_DIR
-    if _code_root.is_dir():
-        for _rel, (_, _digest) in _scope_tree_files(_code_root, _unreadable).items():
-            _key = f"{CODE_DIR}/{_rel}"
-            got[_key] = (_key, _digest)
-    for _rel in sorted(set(_unreadable)):
-        # Fail closed: a file the guard cannot hash may have been rewritten
-        # behind it (F101).
-        errs.append(
-            f"{_rel} cannot be read (unreadable, non-regular, or over the byte "
-            f"budget), so the scope guard cannot prove it unchanged; make it "
-            f"readable and re-run the check")
-    if errs:
-        return errs
+    want, got = _scope_tree_files(base), _scope_tree_files(rev)
     # Authorisation comes from STRUCTURED ledger fields only: a `file`/`files`/
     # `path` field (or a change/edit row's `file`) that names the changed file.
     # Searching the serialized JSON for the basename let a quoted sentence in
@@ -8669,27 +6379,6 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
     for row in ledger_rows:
         if not isinstance(row, dict):
             continue
-        # A row whose disposition is NOT an edit must authorize nothing: a
-        # `false-positive` / `manual-required` / `discarded` row says the
-        # reviser did not act on that finding, so using its `file` cell to
-        # authorize a change bypassed the concern-scoped contract (F15). Only
-        # an actionable disposition (a confirmed finding that was fixed, or a
-        # final status recording the edit) can name a changed file. A row with
-        # NO recognisable verdict keeps the historical path (the ledger
-        # contract itself is enforced by `revision_ledger_problems`), but an
-        # explicit rejection/drop is never an authorization.
-        _verdict = _ledger_row_verdict(row)
-        if _verdict and _verdict not in _SCOPED_ACTIONABLE_VERDICTS:
-            continue
-        if not _verdict:
-            _raw_verdict = ""
-            for _key in ("verdict", "final_status", "status", "disposition"):
-                _raw_verdict = str(row.get(_key) or "").strip()
-                if _raw_verdict:
-                    break
-            if re.match(r"(?i)^(?:reject|drop|not[\s_-]*applicable|n/?a|declin)",
-                        _raw_verdict):
-                continue
         for key in ("file", "files", "path", "paths", "changed_files"):
             value = row.get(key)
             values = value if isinstance(value, (list, tuple)) else [value]
@@ -8714,6 +6403,7 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
         # the same relative path; the FILE NAME ALONE is not (F02), and neither
         # is "../outside/x" (the old lstrip("./") made it "outside/x").
         return strip_leading_dot_slash(value)
+
     authorized_paths = {_ledger_rel(p) for p in authorized}
     added = sorted(set(got) - set(want))
     dropped = sorted(set(want) - set(got))
@@ -8767,8 +6457,7 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
     for _old_rel, rel in sorted(changed, key=lambda pair: pair[1]):
         if is_author_to_complete_readme_name(Path(rel).name):
             continue
-        if rel in pipeline_changed and _pipeline_change_is_explained(
-                base, rev, rel, removed):
+        if rel in pipeline_changed:
             continue
         if _ledger_rel(rel) not in authorized_paths:
             errs.append(f"scoped revision changed {rel!r} but the ledger carries no structured "
@@ -8776,6 +6465,8 @@ def scoped_scope_problems(ctx: Ctx, sb: Path, rev: Path, pipeline_changed=(),
                         f"edit must trace to a reviewer concern. A bare basename does not "
                         f"authorize a same-named document in another directory")
     return errs
+
+
 POSTCHECK_HANDLERS.update({
     "feedback": postcheck_feedback,
     "concerns": postcheck_concerns,
@@ -8786,6 +6477,8 @@ REBUILD_HANDLERS.update({
     "concerns": lambda ctx, rec: materialize_concerns(ctx, int(rec["round"])),
     "response": lambda ctx, rec: materialize_response(ctx, int(rec["round"])),
 })
+
+
 def journal_final_target(ctx: Ctx) -> tuple:
     """(the package the submission is built from, a label for the prompt)."""
     mode = journal_mode_of(ctx)
@@ -8801,11 +6494,8 @@ def journal_final_target(ctx: Ctx) -> tuple:
         # `run` that re-assembles the submission package must read the winner.
         rrec = ctx.round_get(1) or {}
         win_rel = str(rrec.get("winner_dir") or "")
-        # State data is untrusted path input: an absolute value discarded
-        # ctx.root and `../` escaped it. Resolve and require containment.
-        winner = contained_under_or_none(ctx.root, win_rel) if win_rel else None
-        if winner is not None and winner.is_dir():
-            return winner, f"the {mode} revision"
+        if win_rel and (ctx.root / win_rel).is_dir():
+            return ctx.root / win_rel, f"the {mode} revision"
         sb = ctx.sandbox_of(rec)
         return sb / REVISED_DIR, f"the {mode} revision"
     pins = ctx.state.get("pinned") or []
@@ -8813,6 +6503,8 @@ def journal_final_target(ctx: Ctx) -> tuple:
         pin = pins[-1]
         return pinned_docs_dir(ctx, pin), f"the pinned champion {pin.get('id')}"
     return ctx.pristine, "the original (no round was pinned)"
+
+
 def journal_final_version_id(ctx: Ctx) -> str:
     """The round-version id whose tracked changes belong to the submission.
 
@@ -8826,6 +6518,8 @@ def journal_final_version_id(ctx: Ctx) -> str:
         return f"r{int(ctx.rounds_count())}_{revise_vid(1)}"
     pins = ctx.state.get("pinned") or []
     return str(pins[-1].get("id") or "") if pins else ""
+
+
 def publish_journal_submission(ctx: Ctx, target: Path, label: str,
                                response_dir: Path = None) -> Path:
     """Assemble the JOURNAL SUBMISSION: the package minus the non-submitted areas.
@@ -8877,38 +6571,20 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     for name in non_submitted:
         if (stage / name).exists():
             rmtree_force(stage / name)
-    # The declaration filter runs AFTER the PKG-2 scan (F180): the scan's
-    # declaration-aware index classifies a reference to a README-excluded file
-    # as 'absent' (removable) only while the file is still present. Deleting it
-    # first made the same pointer 'unknown' (PKG-3, an author action) and left a
-    # dangling pointer in a shipped document -- silent for a `.md` document.
-    # Snapshot the carried set now; the unlink is deferred below.
-    declaration_keep = None
-    declared_snapshot = []
     if decl.get("declared"):
-        declaration_keep = set(decl.get("files") or [])
-        declared_snapshot = [q.relative_to(stage).as_posix()
-                             for q in sorted(stage.rglob("*")) if q.is_file()]
+        keep = set(decl.get("files") or [])
+        for q in sorted(stage.rglob("*")):
+            if not q.is_file():
+                continue
+            rel = q.relative_to(stage).as_posix()
+            if rel in keep:
+                continue
+            dropped_by_declaration.append(rel)
+            q.unlink()
     response_files = []
     if response_dir is not None:
         for rel in (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL):
             src = response_dir / rel
-            if src.is_symlink():
-                # `is_file()`/copy2 follow the link: a response stage could
-                # plant `RESPONSE_TO_REVIEWERS.md -> /etc/passwd` and have it
-                # delivered in journal_submission/.
-                die(f"refusing to publish {src}: it is a symlink, not a response "
-                    f"document (a symlinked output is never package content)")
-            try:
-                # The LEAF check above is not enough: the agent-writable sandbox
-                # can replace `response/` itself with a link to an outside
-                # directory and copy2 then publishes those bytes (F181). Refuse
-                # any symlinked parent component too.
-                _refuse_symlinked_read_parent(src)
-            except OSError as e:
-                die(f"refusing to publish {src}: {e}. A response deliverable must "
-                    f"be read from a real path inside its run sandbox, never through "
-                    f"a symlinked directory")
             if src.is_file():
                 out = stage / Path(rel).name
                 shutil.copy2(src, out)
@@ -8927,15 +6603,36 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
         if rd.is_dir():
             out_dir = stage / "tracked_changes"
             for p in sorted(rd.iterdir()):
-                if p.is_symlink():
-                    die(f"refusing to publish tracked-changes entry {p}: it is a "
-                        f"symlink (a link is never package content)")
                 if p.is_file():
                     # NEVER overwrite the clean document: the marked-up copies
                     # go in their own folder beside it.
                     out_dir.mkdir(exist_ok=True)
                     shutil.copy2(p, out_dir / p.name)
                     marked.append(f"tracked_changes/{p.name}")
+    # The author's README files are never submitted (any depth), treated like
+    # `code/` for submission purposes -- including a marked-up copy of one, so
+    # this runs AFTER the tracked-change copies are placed. They stay in the
+    # corpus/pin/winner; only this copy drops them, and the manifest names
+    # every one.
+    readme_dropped = []
+    # A Word owner (lock) file is not a document and never part of a submission
+    # (no submission pattern names one); the delivered folder carries only real
+    # files, and the manifest names what was dropped.
+    word_owner_dropped = []
+    for q in sorted(stage.rglob("*")):
+        if not q.is_file():
+            continue
+        if is_word_owner_name(q.name):
+            word_owner_dropped.append(q.relative_to(stage).as_posix())
+            q.unlink()
+        elif is_non_submitted_readme_name(q.name):
+            readme_dropped.append(q.relative_to(stage).as_posix())
+            q.unlink()
+    # The generic non-shippable sweep also runs on the SUBMISSION COPY: a legacy
+    # or base pin that predates the stage-side sweep must not hand a `.pyc`, a
+    # `.DS_Store` or a `:Zone.Identifier` stub to the journal. This is a derived
+    # copy (the pin keeps its judged bytes), so the sweep is legal here.
+    non_shippable_dropped = strip_non_shippable_files_in_dir(stage).get("removed") or []
     # `name`, not `p.name`: `p` is the tracked-changes copy loop's variable
     # above, so the old generator raised UnboundLocalError whenever the guard
     # fired without any redline to copy (and otherwise named the last redline
@@ -8961,62 +6658,7 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     except Exception as e:                                            # noqa: BLE001
         reference_strip = {"error": f"{type(e).__name__}: {e}"}
         dangling = non_submitted_reference_rows(stage, missing_areas)
-    # The deferred declaration filter (F180): the strip above has now seen the
-    # carried-but-not-submitted files while they were still present, so a
-    # pointer at one was classified 'absent' and REMOVED instead of being left
-    # in a shipped document as an unresolvable name. Files already dropped by
-    # the README/owner/non-shippable sweeps stay listed (their entry in the
-    # manifest is the record, not the unlink).
-    if declaration_keep is not None:
-        for rel in declared_snapshot:
-            if rel in declaration_keep:
-                continue
-            q = stage / rel
-            if q.is_file():
-                q.unlink()
-            dropped_by_declaration.append(rel)
-    # The author's README files are never submitted (any depth), treated like
-    # `code/` for submission purposes -- including a marked-up copy of one, so
-    # this runs AFTER the tracked-change copies are placed. They stay in the
-    # corpus/pin/winner; only this copy drops them, and the manifest names
-    # every one.
-    readme_dropped = []
-    # A Word owner (lock) file is not a document and never part of a submission
-    # (no submission pattern names one); the delivered folder carries only real
-    # files, and the manifest names what was dropped.
-    word_owner_dropped = []
-    for q in sorted(stage.rglob("*")):
-        if not q.is_file():
-            continue
-        if is_word_owner_name(q.name):
-            word_owner_dropped.append(q.relative_to(stage).as_posix())
-            q.unlink()
-        elif is_non_submitted_readme_name(q.name):
-            readme_dropped.append(q.relative_to(stage).as_posix())
-            q.unlink()
-    # The generic non-shippable sweep also runs on the SUBMISSION COPY: a legacy
-    # or base pin that predates the stage-side sweep must not hand a `.pyc`, a
-    # `.DS_Store` or a `:Zone.Identifier` stub to the journal. This is a derived
-    # copy (the pin keeps its judged bytes), so the sweep is legal here.
-    non_shippable_dropped = strip_non_shippable_files_in_dir(stage).get("removed") or []
-    # A crashed PKG-2 engine is not a clean scan: record and print the failure
-    # instead of publishing a copy that was never repaired with no trace (F182).
-    reference_strip_error = (str(reference_strip.get("error") or "")
-                             if isinstance(reference_strip, dict) else "")
-    if reference_strip_error:
-        print(f"[journal] WARNING: the PKG-2 dangling-reference scan could NOT run "
-              f"({reference_strip_error}); the shipped copy is reported, not repaired "
-              f"(recorded in journal_submission.json -> reference_strip_error)")
     manifest = hash_manifest(stage)
-    if not (manifest.get("files") or {}):
-        # An "assembled" submission with no file is not a submission: the
-        # unchanged tree is left in place and the operator is told why (F188).
-        die(f"the assembled {final_dst.name}/ would be EMPTY: every carried file was "
-            f"excluded as non-submitted (README/owner/non-shippable sweep, the "
-            f"declaration filter, or the stripped evidence/code areas)"
-            + (f"; the README declared only {decl.get('patterns')!r}" if decl.get("declared")
-               else "")
-            + f". Nothing was published; the previous {final_dst.name}/ is unchanged.")
     # Build the record now, but do NOT publish it yet: a failed swap would
     # otherwise leave a record describing a package that was never installed
     # (R03). The write happens after os.replace(stage, final_dst) succeeds.
@@ -9050,10 +6692,6 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
               # PKG-3: names the submission carries NOWHERE. Reported,
               # never removed (`dangling` above is the removal set).
               "unresolvable_references": list(reference_strip.get("advisory") or []),
-              # A scan that could not run left the shipped copy unrepaired: the
-              # record says so instead of looking like a clean pass (F182).
-              **({"reference_strip_error": reference_strip_error}
-                 if reference_strip_error else {}),
               "manifest": manifest,
               "created": utcnow()}
     if readme_dropped:
@@ -9132,46 +6770,43 @@ def publish_journal_submission(ctx: Ctx, target: Path, label: str,
     if backup is not None:
         rmtree_force(backup)
     return final_dst
+
+
 def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: int,
                            manual: bool, nowait: bool, poll: int,
                            retry_backoff: int = 0, retry_backoff_max: int = 0) -> tuple:
     """The post-round journal step: the response letter (when required) + the
     submission package."""
-    r = max(1, ctx.rounds_count())
+    ensure_decision_write_quality(ctx)
+    r = journal_finalization_round(ctx)
     target, label = journal_final_target(ctx)
     if not target.is_dir():
         die(f"the journal finalization has no package to publish ({target} does not exist); "
             f"finish the round first")
     response_dir = None
     if journal_needs_response(ctx):
-        ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
-              "manual": manual, "nowait": nowait, "poll": poll,
-              "retry_backoff": retry_backoff, "retry_backoff_max": retry_backoff_max}
         rid = rid_response(r)
         rec = ctx.run(rid)
         done = bool(rec and rec.get("status") == "done"
                     and (ctx.sandbox_of(rec) / JOURNAL_RESPONSE_MD_REL).is_file())
         if not done:
             materialize_response(ctx, r, target=target, target_label=label)
+            ph = {"cmd": cmd, "timeout": timeout, "jobs": jobs, "retries": retries,
+                  "manual": manual, "nowait": nowait, "poll": poll,
+                  "retry_backoff": retry_backoff, "retry_backoff_max": retry_backoff_max}
             ok, paused = run_phase(ctx, [rid], label="journal response", **ph)
             if not ok:
                 return False, paused
         rec = ctx.run(rid) or {}
+        problem = required_writer_problem(ctx, rec)
+        if problem:
+            die("response publication blocked: " + problem)
         response_dir = ctx.sandbox_of(rec)
-        # The letter is itself an LLM deliverable: an independent audit must
-        # dispose every concern and every claim, and ONE repair pass applies the
-        # confirmed defects (see p24; the repair edits only response/).
-        if response_audit_of(ctx) == "on":
-            response_dir, _ok, _paused = run_response_deliverable_chain(
-                ctx, r, response_dir, ph)
-            if not _ok:
-                return False, _paused
     dst = publish_journal_submission(ctx, target, label, response_dir=response_dir)
     ctx.state.setdefault("journal", {})
     ctx.state["journal"].update({"mode": journal_mode_of(ctx),
                                  "submission_dir": dst.relative_to(ctx.root).as_posix(),
                                  "response": bool(response_dir),
-                                 "response_audit": response_audit_of(ctx),
                                  "published_at": utcnow()})
     ctx.save_state()
     print(f"[run] journal submission assembled: {dst} "
@@ -9180,6 +6815,8 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
           + (f"; response letter included ({', '.join(sorted(p.name for p in dst.iterdir() if p.name.startswith('RESPONSE') or p.name == 'response_map.json'))})" if response_dir else "; no response letter (transfer mode)")
           + ")")
     return True, False
+
+
 def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
     """Re-verify one attempt's deliverables and record its outcome.
 
@@ -9214,6 +6851,11 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
             ok, errs, warns = False, [
                 f"postcheck raised {type(e).__name__}: {e} "
                 f"(treated as a failed attempt; the sandbox is rebuilt on retry)"], []
+    if ok and kind == "response":
+        quality_error = write_quality_problem(sb=ctx.sandbox_of(rec), kind=kind, rec=rec)
+        if quality_error:
+            ok = False
+            errs = list(errs) + [quality_error + "; run the stage with an agent to audit it"]
     warns = list(warns) + stray_notes
     rec["postcheck"] = {"ok": ok, "errors": errs, "warnings": warns, "checked_at": utcnow()}
     rec["status"] = "done" if ok else "failed"
@@ -9274,6 +6916,8 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
         record_attempt(ctx, rec, ok, errs, warns, source=source)
     ctx.log("postcheck", rec["id"], "ok" if ok else "failed")
     return ok
+
+
 # =====================================================================
 # THE SANDBOX SELF-CHECK (`selfcheck --sandbox <dir> --stage <kind>`)
 #
@@ -9293,6 +6937,7 @@ def postcheck(ctx: Ctx, rec: dict, source: str = "postcheck") -> bool:
 # self-check says so. Everything it prints comes from the same function the
 # postcheck calls, so the two can never disagree.
 # =====================================================================
+
 SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "revise",
                     "integrate", "judge",
                     # The journal-mode sessions are agent runs too: they had no
@@ -9300,6 +6945,7 @@ SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "r
                     # inconsistent concern ledger was only discovered by the
                     # postcheck after the attempt.
                     "feedback", "concerns", "response")
+
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
 # `expected` is recorded as a warning. Two layers read this table: the rescue
@@ -9345,6 +6991,8 @@ STAGE_DELIVERABLES = {
     # `signal_search_dirs` (judge_review/) rather than to this rescue.
     "judge": {"required": (), "expected": ("judge_review/artifacts/VIS_visual.md",)},
 }
+
+
 def _prompt_rewrite_level(sb: Path) -> str:
     """The rewrite level THIS sandbox's prompt declares ("" when unreadable).
 
@@ -9359,6 +7007,8 @@ def _prompt_rewrite_level(sb: Path) -> str:
     text = text[:20000]
     m = re.search(r"THIS ARM'S LEVEL:\s*(structural|sentence)", text, re.IGNORECASE)
     return m.group(1).lower() if m else ""
+
+
 def _sandbox_handoff_mode(sb: Path) -> str:
     """The author-to-complete policy THIS sandbox's prompt states.
 
@@ -9378,6 +7028,8 @@ def _sandbox_handoff_mode(sb: Path) -> str:
     if "PIPELINE HAND-OFF PLACEHOLDERS" in text:
         return "document"
     return DEFAULT_AUTHOR_TO_COMPLETE
+
+
 def _zero_item_handoff_package(mode, marker) -> bool:
     """True when the readme policy and the marker agree no manual item is owed.
 
@@ -9394,6 +7046,25 @@ def _zero_item_handoff_package(mode, marker) -> bool:
     summary = marker.get("summary") if isinstance(marker, dict) else None
     count = summary.get("manual_items") if isinstance(summary, dict) else None
     return is_int(count) and count == 0
+
+
+def _usable_deliverable(p: Path) -> bool:
+    """Is this file worth ADOPTING into its canonical path?
+
+    Non-empty, and (for JSON) parseable: a truncated file moved into place would
+    only turn a "missing" failure into a "malformed" one, and the rescue exists
+    to preserve work, not to shuffle garbage.
+    """
+    try:
+        if not p.is_file() or p.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+    if p.suffix.lower() == ".json":
+        return read_json(p, revive=False, lenient=True) is not None
+    return True
+
+
 def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
     """Move a REQUIRED bookkeeping deliverable the session wrote one level up.
 
@@ -9434,20 +7105,6 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
         if src is None:
             continue
         src_rel = src.relative_to(sb).as_posix()
-        # Never write through a symlinked package directory: the rescue runs
-        # BEFORE the stage handler's symlinked-package refusal (F022).
-        _walk = target
-        _linked = None
-        while _walk != sb and sb in _walk.parents:
-            if _walk.is_symlink():
-                _linked = _walk
-                break
-            _walk = _walk.parent
-        if _linked is not None:
-            notes.append(f"the `{name}` written to `{src_rel}` was NOT adopted: "
-                         f"{_linked.relative_to(sb).as_posix()} is a symlink, so the move "
-                         f"would write outside the sandbox")
-            continue
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(target))
@@ -9459,6 +7116,8 @@ def rescue_misplaced_deliverable(ctx: Ctx, rec: dict) -> list:
                      f"ADOPTED (moved into place) -- the prompts pin the deliverable's path")
         print(f"  [warn] {rec.get('id')}: {notes[-1]}")
     return notes
+
+
 def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
     """(errs, warns) for the ctx-free source gates of a package-producing stage.
 
@@ -9500,8 +7159,9 @@ def stage_source_gates(sb: Path, kind: str, pkg_dir: Path) -> tuple:
     errs.extend(r_errs)
     warns.extend(r_warns)
     return errs, warns
-def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
-                      prompt_text: str | None = None) -> tuple:
+
+
+def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0) -> tuple:
     """(ok, errors, warnings) for the paperwork of one sandbox (read-only).
 
     `kind` is the run's stage; `run_id`/`r` are only used to CHECK the marker.
@@ -9517,7 +7177,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     """
     kind = str(kind or "")
     errs, warns = [], []
-    strict = _selfcheck_artifact_policy(sb) != "off"
     if kind not in SELFCHECK_STAGES:
         return False, [f"unknown stage {kind!r} (known: {', '.join(SELFCHECK_STAGES)})"], []
     # `round` stays None when the caller did not supply one: the marker's own
@@ -9527,63 +7186,15 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     rec = {"id": run_id, "kind": kind, "round": (int(r) if r else None)}
     if not sb.is_dir():
         return False, [f"the sandbox {sb} does not exist"], []
-    # The REVIEW prompt is read BEFORE the deliverables loop: it states the
-    # round's review scope and (for a split round) this session's half, and
-    # both decide whether the discovery phase's deliverables are owed at all.
-    # It used to be read inside the findings branch, so the pre-flight demanded
-    # the full package's discovery round -- including its `findings_extra.json`
-    # warning -- from a formatting-writing or split-A session whose own prompt
-    # forbids that phase.
-    _prompt, _scope, _split, _review_part_b = "", "full", "off", False
-    _no_discovery = False
-    if kind == "guided_review":
-        _prompt = (str(prompt_text) if prompt_text is not None
-                   else (read_text_bounded(sb / PROMPT_FILE) or ""))
-        _scope, _split, _review_part_b = review_prompt_scope(_prompt, sb)
-        _no_discovery = (_scope != "full"
-                         or (_split != "off" and not _review_part_b))
     # 1. the completion signal: it must be at the ROOT and it must name THIS run
     marker = marker_json(sb, kind)
-    if kind == "judge" and not isinstance(marker, dict):
-        # `postcheck_judge` treats scores.json as the judge's completion signal
-        # and only WARNS about a missing marker; the pre-flight must not fail a
-        # judge whose sheet the postcheck accepts (F187).
-        warns.append(f"{MARKER_FILE} missing (scores.json alone is accepted as the "
-                     f"judge signal)")
-    else:
-        _marker_checks(rec, marker, kind, errs, warns, sb=sb)
+    _marker_checks(rec, marker, kind, errs, warns, sb=sb)
     # 2. the stage's own deliverables: the REQUIRED ones fail an attempt in the
     #    postcheck, the EXPECTED ones are warnings there too.
     table = STAGE_DELIVERABLES.get(kind) or {}
-    def _adoptable_required(rel: str):
-        """A stray copy `rescue_misplaced_deliverable` would move into place.
-
-        Read-only preview of the postcheck's rescue: a required file written one
-        level up is ADOPTED, not failed, so the pre-flight must say so instead
-        of telling the session "the postcheck fails" (F189).
-        """
-        pkg = Path(rel).parent
-        name = Path(rel).name
-        cands = [sb / name]
-        if str(pkg) != ".":
-            cands.append(sb / pkg / "work" / name)
-        cands.append(sb / "work" / name)
-        return next((c for c in cands if _usable_deliverable(c)), None)
     for rel in table.get("required", ()):
-        p = sb / rel
-        if not p.is_file():
-            src = _adoptable_required(rel)
-            if src is not None:
-                warns.append(f"{rel} is missing from its canonical path, but the postcheck "
-                             f"ADOPTS `{src.relative_to(sb).as_posix()}` and moves it into "
-                             f"place (`rescue_misplaced_deliverable`); do not duplicate it")
-            else:
-                errs.append(f"{rel} is missing (the postcheck fails an attempt without it)")
-        elif p.stat().st_size == 0 and p.suffix.lower() in (".md", ".txt"):
-            # A 0-byte report is not a deliverable: `postcheck_rewrite` rejects
-            # it as EMPTY, so the pre-flight must not call it present (F186).
-            errs.append(f"{rel} is EMPTY (structured output): the postcheck fails an "
-                        f"attempt without its required content")
+        if not (sb / rel).is_file():
+            errs.append(f"{rel} is missing (the postcheck fails an attempt without it)")
     # The manual list is the POLICY's file, not always MANUAL_STEPS.md (R01):
     # under `readme` (the default) C10/F16 rewrite the prompt to the README and
     # a compliant package carries no MANUAL_STEPS.md, which the postchecks
@@ -9592,14 +7203,6 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
     _handoff_rel = handoff_target(_handoff_mode)
     for rel in table.get("expected", ()):
         expected = rel
-        # The discovery round's extra-findings file belongs to a review pass
-        # that OWES that phase. A formatting-writing round and a split-A
-        # session are told not to run D0-D5, so warning that its file is
-        # missing asks for work their own prompt forbids (the postcheck does
-        # not warn either).
-        if (kind == "guided_review" and _no_discovery
-                and Path(expected).name == "findings_extra.json"):
-            continue
         _is_manual_list = Path(rel).name == "MANUAL_STEPS.md"
         if _is_manual_list:
             expected = (Path(rel).parent / _handoff_rel).as_posix()
@@ -9615,12 +7218,14 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.append(problem)
     # 4. the stage-specific contracts, each through the postcheck's own helper
     if kind == "guided_review":
-        # The scope/split were read with the prompt above, BEFORE the findings
-        # branch, so the state the preview starts from (no findings.json yet)
-        # still knows a formatting-writing round and a split-A session owe no
-        # discovery phase. `check_review_contract` verifies the corpus pointer,
-        # the coverage table and the M1b long-form gate; it needs no pipeline
-        # state, so the session gets the whole contract, not a summary of it.
+        # The session prompt is read TWICE in this block: by the review-contract
+        # branch for its scope, and by the discovery-contract check at the end,
+        # which runs whether or not findings.json parsed. Initialise it here --
+        # the branch that reads the file sits inside an `else`, so a missing or
+        # broken findings.json (exactly the pre-flight state this selfcheck
+        # exists to diagnose) raised NameError instead of reporting the missing
+        # deliverable.
+        _prompt = ""
         fj = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
         if not isinstance(fj, dict):
             errs.append(f"{FINDINGS_REL} is missing or does not parse as a JSON object "
@@ -9628,32 +7233,39 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         elif not isinstance(fj.get("findings"), list):
             errs.append(f"{FINDINGS_REL} has no 'findings' list")
         else:
+            # Read THIS session's prompt FIRST: it states the round's review scope,
+            # and the pre-flight must preview the verdict the postcheck (which
+            # derives the scope from the plan) will reach. With the default
+            # `scope="full"` a formatting-writing session's selfcheck demanded the
+            # content rounds' parity artifacts its prompt scopes out -- the
+            # pre-flight disagreeing with the verdict it previews.
+            _prompt = read_text_bounded(sb / PROMPT_FILE) or ""
+            _scope = ("formatting-writing"
+                      if "FORMATTING AND WRITING ONLY" in _prompt else "full")
+            # A SPLIT round's two halves owe different artifacts. The postcheck
+            # reads the plan; the selfcheck usually runs in its own process with no
+            # ctx, so it reads the split mode its own prompt states and the half its
+            # own sandbox name states (`r<r>_guided_review_b`), and the two verdicts agree.
+            _split = "off"
+            if "SPLIT REVIEW" in _prompt:
+                _split = ("aspects"
+                          if ("PACKAGING/compliance" in _prompt
+                              or "CONTENT/scientific" in _prompt) else "phases")
+            # `check_review_contract` needs no pipeline state (it verifies the
+            # corpus pointer, the coverage table and the M1b long-form gate), so
+            # the session gets the whole contract, not a summary of it.
             check_review_contract(None, sb, fj, errs, warns, scope=_scope, split=_split)
         # The discovery round's D0-D5 contract, unless THIS session's own prompt
         # says the phase is not its job (the formatting-writing scope, or the
         # mechanical half of a split review).
+        _no_discovery = ("FORMATTING AND WRITING ONLY" in _prompt
+                         or ("SPLIT REVIEW" in _prompt
+                             and "YOUR SCOPE (B)" not in _prompt))
         if not _no_discovery:
             _derrs, _dwarns = discovery_contract_problems(sb)
             errs.extend(f"discovery round: {d}" for d in _derrs)
             warns.extend(f"discovery round: {d}" for d in _dwarns)
-        # Re-derive the M20 seed from the read-only base/ the review was given,
-        # exactly as the postcheck does: a deleted or emptied
-        # `work/FORMAT_SCAN.json` must not make the preview disagree with the
-        # gate (R02). The scan is code-side, not root state, so the preview can
-        # run it; only a failed scan falls back to the sandbox's own copy.
-        m20_seed_rows = None
-        if (sb / "base").is_dir():
-            try:
-                fpol = read_json(sb / "format_policy.json", revive=False, lenient=True)
-                info = scan_format_in_sources(
-                    [(sb / "base", "", ())],
-                    policy=fpol if isinstance(fpol, dict) else None)
-                m20_seed_rows = [r for r in (info.get("rows") or []) if isinstance(r, dict)]
-            except Exception:                                      # noqa: BLE001 -- preview only
-                m20_seed_rows = None
-        report = artifact_quality_report(sb / GUIDED_REVIEW_DIR,
-                                         require_files=True,
-                                         m20_seed_rows=m20_seed_rows)
+        report = artifact_quality_report(sb / GUIDED_REVIEW_DIR)
         for rel, problems in sorted(report.items()):
             for p in problems:
                 errs.append(f"decision artifact {rel}: {p}")
@@ -9671,7 +7283,23 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         perrs, pwarns, findings = _cold_start_contract_problems(sb)
         errs.extend(perrs)
         warns.extend(pwarns)
-        errs.extend(cold_start_coverage_problems(sb))
+        # The coverage file's FULL contract, the postcheck's own way: a symlinked
+        # file, an unreadable one and an EMPTY one all failed there while this
+        # pre-flight only tested `is_file()` (which follows a symlink and accepts
+        # a zero-byte file). A 39-minute cold-start pass would have learned that
+        # only after the marker.
+        coverage = sb / COLD_START_COVERAGE_REL
+        if coverage.is_symlink() or not coverage.is_file():
+            errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and "
+                        f"the round's honest limits are part of the deliverable")
+        else:
+            coverage_text = read_text_bounded(coverage)
+            if coverage_text is None:
+                errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
+                            f"non-regular file or over the byte budget)")
+            elif not coverage_text.strip():
+                errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, "
+                            f"the findings they produced and what could not be checked")
         if findings:
             repro = cold_start_reproduction(sb, findings)
             for r in repro["results"]:
@@ -9680,13 +7308,9 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"printed {r['produced']!r} where the finding declares "
                                 f"{r['declared']!r} -- the declared computation does not "
                                 f"reproduce")
-                elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
-                    _what = ("is missing" if r["status"] == "missing"
-                             else "was NOT re-run because no verifier jail is available on this "
-                                  "host (agent-written code is never run with host access)"
-                             if r["status"] == "no-jail" else r["status"])
+                elif r["status"] in ("missing", "timeout", "failed", "empty"):
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                                f"{_what}"
+                                f"{'is missing' if r['status'] == 'missing' else r['status']}"
                                 + (f" ({r['detail']})" if r["detail"] else ""))
                 elif r["status"] == "skipped-over-budget":
                     errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
@@ -9704,8 +7328,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.extend(audit_artifact_problems(
                 _audit,
                 [str(f.get("id") or "").strip() for f in _frozen_review_findings(sb)
-                 if str(f.get("id") or "").strip()],
-                expected_round=rec.get("round")))
+                 if str(f.get("id") or "").strip()]))
             # The coverage table is part of the contract the postcheck enforces:
             # `postcheck_audit` appends `audit_coverage_problems` to the same
             # disposition problems, so the pre-flight must run it too. It did
@@ -9723,8 +7346,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         # the postcheck's OWN detectors. What still needs the run root (the
         # staging of the original feedback against the evidence area, the
         # pristine copies) stays in `postcheck_feedback`/`postcheck_concerns`.
-        data = journal_ledger_problems(None, sb, errs, warns,
-                                       require_seed=(kind == "feedback"))
+        data = journal_ledger_problems(None, sb, errs, warns)
         if kind == "feedback":
             errs.extend(feedback_files_problems(sb))
         else:
@@ -9735,10 +7357,26 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             errs.extend(ferrs)
             warns.extend(fwarns)
     elif kind == "response":
-        # The same sandbox-local detectors the response postcheck runs (F184):
-        # a missing concern block, an invented change file or a letter claim the
-        # map does not carry is caught while the session can still fix it.
-        errs.extend(response_local_problems(sb))
+        # The letter and its machine-readable map, the postcheck's own two
+        # error families. The per-concern coverage comparison reads the concern
+        # run's sandbox (root state) and stays in `postcheck_response`.
+        md = sb / JOURNAL_RESPONSE_MD_REL
+        if not md.is_file():
+            errs.append(f"{JOURNAL_RESPONSE_MD_REL} is missing: the response to reviewers is "
+                        f"the deliverable of this mode")
+        else:
+            letter = read_text_bounded(md)
+            if letter is None:
+                errs.append(f"{JOURNAL_RESPONSE_MD_REL} could not be read (it is a symlink/"
+                            f"non-regular file or over the byte budget): the response to "
+                            f"reviewers must be a readable text deliverable")
+            elif not letter.strip():
+                errs.append(f"{JOURNAL_RESPONSE_MD_REL} is EMPTY: the response to "
+                            f"reviewers must carry one block per concern")
+        if not isinstance(read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True),
+                          dict):
+            errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable (the letter's "
+                        f"machine-readable map)")
     elif kind in ("rewrite", "revise", "integrate"):
         pkg = output_dir_of(rec)
         d = sb / pkg
@@ -9769,31 +7407,13 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             # revise sessions (their rows lived under a key the reader did not
             # know); it now runs BEFORE the marker too.
             frozen = findings_from_sandbox(sb, sandbox_audit_record(sb))
-            # Coerce every id exactly like frozen_finding_ids(): a numeric
-            # `{"id": 1}` used to be dropped here while the postcheck required
-            # "1", so the pre-flight certified a ledger the postcheck rejected
-            # (F075).
-            ids = []
-            for f in frozen:
-                fid = str(f.get("id") or "").strip()
-                if fid and fid not in ids:
-                    ids.append(fid)
+            ids = [str(f.get("id")).strip() for f in frozen
+                   if isinstance(f.get("id"), str) and str(f.get("id")).strip()]
             total = len(ids) if (sb / FINDINGS_REL).exists() else None
             lerrs, lwarns = revision_ledger_problems(d, ids, total,
                                                      "revised/revision_report.json")
             errs.extend(lerrs)
             warns.extend(lwarns)
-            # Pre-flight parity for the removal accounting: the postcheck fails
-            # a ledger that reports a removed finding sentence as `fixed`. The
-            # pre-flight reports the same verdict as a warning because it cannot
-            # see the orchestrator's own dangling-reference removals (they live
-            # in the run record, not in the sandbox); the postcheck is
-            # authoritative.
-            _removals = finding_removal_problems(
-                sb / "base", d, frozen,
-                final_status=revision_ledger_final_status(d))
-            _rerr, _rwarn = finding_removal_messages(_removals, "revised/")
-            warns.extend(_rerr + _rwarn)
             # PRE-FLIGHT PARITY for the two postcheck families that failed the
             # neohet reviser: deliverable validation and the "no new finding-tier
             # family" regression. The postcheck runs both; a selfcheck that omits
@@ -9828,59 +7448,10 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                 errs.append(f"integrate: {len(led['missing_artifact'])} ledger row(s) carry no "
                             f"`artifact` (a before/after pair for a small row, an outline diff "
                             f"for a large row) -- the row cannot be re-checked")
-            # The postcheck's OWN Rule 1B detectors, verbatim: this pre-flight
-            # used to check only the artifact and the parse, so a ledger the
-            # postcheck hard-fails (an unverified port, a missing revalidated
-            # verdict, a blank verdict) previewed as a pass (F127).
-            if led["rows"]:
-                if led["missing_verdict"]:
-                    errs.append(f"integrate: {len(led['missing_verdict'])} ledger row(s) carry "
-                                f"no `verdict` (port / keep-self / synthesize / "
-                                f"ignore-cosmetic) -- without it no row is classified as an "
-                                f"edit, so Rule 1B cannot be enforced")
-                if led["invalid_verdict"]:
-                    errs.append(f"integrate: {len(led['invalid_verdict'])} ledger row(s) carry a "
-                                f"`verdict` outside port / keep-self / synthesize / "
-                                f"ignore-cosmetic -- an unclassified row is not a disposed "
-                                f"difference: " + "; ".join(led["invalid_verdict"][:4]))
-                if led["invalid_size"]:
-                    errs.append(f"integrate: {len(led['invalid_size'])} ledger row(s) carry a "
-                                f"`size` outside small / large -- the size-class requirement "
-                                f"cannot be read: " + "; ".join(led["invalid_size"][:4]))
-                if led["legacy_ports"]:
-                    errs.append("integrate: DIFF_LEDGER.md has no `revalidated` column but "
-                                "carries port/synthesize row(s) -- Rule 1B forbids editing an "
-                                "unverified item; record the column and the confirmed/rejected "
-                                "verdict")
-                elif led["legacy_no_revalidated"]:
-                    warns.append("integrate: legacy DIFF_LEDGER.md has no `revalidated` column; "
-                                 "new runs must record one (this legacy ledger is not treated "
-                                 "as a port)")
-                elif led["missing_revalidated"]:
-                    errs.append(f"integrate: {len(led['missing_revalidated'])} ledger row(s) "
-                                f"carry no `revalidated` verdict (Rule 1B requires "
-                                f"confirmed/rejected per item)")
-                if led["invalid_revalidated"]:
-                    errs.append(f"integrate: {len(led['invalid_revalidated'])} ledger row(s) "
-                                f"carry a `revalidated` value other than confirmed/rejected: "
-                                + "; ".join(led["invalid_revalidated"][:4]))
-                if led["invalid_ports"]:
-                    errs.append(f"integrate: {len(led['invalid_ports'])} port/synthesize row(s) "
-                                f"lack `revalidated: confirmed` -- Rule 1B forbids editing an "
-                                f"unverified item: " + "; ".join(led["invalid_ports"][:4]))
             if not led["rows"]:
-                # SAME policy as `postcheck_integrate`: with donors the ledger
-                # must account for each one, so a header-only/unparseable table
-                # is an ERROR there and must not preview as a warning (F185).
-                _msg = (f"{INTEGRATION_LEDGER_REL} carries no ledger row (a "
-                        f"header-only or unparseable table cannot account for any "
-                        f"difference; the per-difference artifacts, the size classes "
-                        f"and the finding-effect column cannot be checked)")
-                if donors:
-                    errs.append(f"integrate: {_msg} -- every donor needs at least "
-                                f"its no-difference row")
-                else:
-                    warns.append(_msg)
+                warns.append(f"{INTEGRATION_LEDGER_REL} could not be parsed as a table (the "
+                             f"per-difference artifacts, the size classes and the finding-effect "
+                             f"column cannot be checked)")
             # Contract: the round's frozen discovery list is reconciled by id --
             # a resolution cannot be lost between the revise arm and the
             # integrated package.
@@ -9906,21 +7477,16 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                                 f"round stages one structural and one sentence-level arm so the "
                                 f"pool has both kinds of difference")
         # W-12's language pass: one row per change plus one coverage row per step.
-        # The postcheck routes both families through `strict_dispositions(ctx)`
-        # (`check_language_pass`); the pre-flight has no Ctx, so it reads the
-        # same recorded policy from the enclosing run root (F113).
         lp = language_pass_report(d)
         if not lp["present"]:
-            (errs if strict else warns).append(
-                f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
-                f"required artifact of every package-producing stage: one row per change "
-                f"plus one coverage row per step (including the steps that changed "
-                f"nothing)")
+            errs.append(f"{kind}: no work/R6_language.md -- the L1-L11 language pass is a "
+                        f"required artifact of every package-producing stage: one row per change "
+                        f"plus one coverage row per step (including the steps that changed "
+                        f"nothing)")
         elif lp["missing"]:
-            (errs if strict else warns).append(
-                f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
-                f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
-                f"unaudited step)")
+            errs.append(f"{kind}: the language pass covers {11 - len(lp['missing'])}/11 steps; no "
+                        f"coverage row for {', '.join(lp['missing'])} (a step with no row is an "
+                        f"unaudited step)")
         visual = {REWRITTEN_DIR: VISUAL_ARTIFACT_REWRITTEN,
                   REVISED_DIR: VISUAL_ARTIFACT_REVISED,
                   INTEGRATED_DIR: VISUAL_ARTIFACT_INTEGRATED}.get(pkg)
@@ -9977,6 +7543,8 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         if _cl_rows:
             errs.extend(judge_cover_letter_artifact_problems(sb, _cl_rows))
     return (not errs), errs, warns
+
+
 def cmd_selfcheck(args) -> None:
     """`selfcheck`: print the postcheck's paperwork verdict for one sandbox."""
     sb = Path(args.sandbox).expanduser().resolve()

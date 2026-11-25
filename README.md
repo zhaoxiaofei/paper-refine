@@ -40,7 +40,7 @@ profile. Running it needs Python 3.9+ and no third-party packages.
 | run it for the first time | *Quick start*, then *Requirements* |
 | read the result of a run | *What you get* |
 | look up a command or flag | *Everyday commands*, *Exit codes*, *Operational notes* |
-| choose the model and CLI harness | [Model and harness matrix](#choosing-the-model-and-harness---agent-harness---agent-model), [provider setup](docs/agent-harnesses.md) |
+| choose the model and CLI harness | *Choosing the model and harness* |
 | choose how to run: own rounds, new submission, or a real journal decision | *Revision modes* |
 | enforce a specific venue's rules | *Venues and journals* |
 | see how one round is built | *Round model* |
@@ -65,13 +65,13 @@ checkouts — is installed by one script:
 source ./activate-deps.sh          # export PAPER_REFINE_ROOT / PAPER_REFINE_DEPS / ZOTERO_SKILL
 ```
 
-`install_dependencies.sh` writes only checkout-relative paths, except a dependency installed outside the checkout (the Zotero bridge), which `deps.env` records by absolute path. `deps.env` records them and
+`install_dependencies.sh` writes only checkout-relative paths. `deps.env` records them and
 `activate-deps.sh` resolves them for the current shell; no machine path is baked into a prompt
 or into the generated dependency files. (The harness MCP registrations necessarily name an
 absolute server path, because a harness starts its servers from its own working directory.) The
 script also probes the optional system tools
 (Zotero Desktop, Word/PowerShell, LibreOffice, Poppler, Ghostscript, ImageMagick, TeX Live,
-`codex`/`dsh`/`claude`) and prints the exact missing command instead of installing an OS package.
+`codex`/`dsh`) and prints the exact missing command instead of installing an OS package.
 Use `--dry-run` to see the plan, `--offline` to reuse existing checkouts, and `--help` for
 the switches that skip conda, Node, the external checkouts or the agent-tooling
 registration.
@@ -80,14 +80,11 @@ registration.
 
 The pipeline is standard-library only, but it needs Python 3.9+ and an
 agent CLI for its sessions — by default the DeepSeek Harness (`dsh`) running
-DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, or
-`--manual` for a human-driven run; see *Requirements*. The
+DeepSeek Flash, or another `--agent-harness`/`--agent-model` pair, the legacy
+`--agent` names, or `manual` for a human-driven run; see *Requirements*. The
 shortest path:
 
 ```bash
-# 0. a fresh clone must initialize the required agent-common submodule first
-git submodule update --init --recursive
-
 # 1. create a pipeline root from the pristine submission directory
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds
 #    another venue/journal:
@@ -120,51 +117,41 @@ python paper_pipeline.py run-decide --root ./paper_rounds
 `status --root ./paper_rounds` prints what the root is configured to do at any
 time, and `--help` lists every command and flag.
 
-A finished decision can be certified, provisional or blocked; a blocked decision makes
-`decide` exit 5, and a provisional one exits 0 unless `--require-complete` is given (then 4)
-— see *Exit codes*.
+A finished decision can be certified, provisional or blocked; `decide` exits 4 or 5 in the
+last two cases — see *Exit codes*.
 
 ## Requirements
 
 * Python 3.9+ (the pipeline and both companion tools are standard-library only,
   except that `pairwise_scores.py` imports `openpyxl` to write its workbook; the
   pipeline itself and score collection do not need it).
-* On Linux, `bubblewrap` (`bwrap`) when a cold-start review declares a verifier:
-  the orchestrator re-runs that agent-written script in a private, read-only
-  mount/network/PID namespace. If the jail cannot be built the verifier is NOT
-  run and the attempt fails (a verifier is optional — omit it, or install
-  bubblewrap).
 * An agent CLI for the stage sessions. The new pair selects the two axes
   independently: `--agent-harness dsh|gpt-codex|claude-code` (default `dsh`)
   and `--agent-model deepseek-flash|gpt-sol|gpt-terra|claude-opus|claude-sonnet|
-  qwen38-27b|dots3-note-preview` (default `deepseek-flash`). `--manual` stages
-  every session prompt for a human-driven run, and a custom command can be
-  supplied via `--agent-cmd`.
-* The `agent-common/` submodule. A normal `git clone` does NOT populate it, and
-  the pipeline refuses to start without it: run
-  `git submodule update --init --recursive` (the dependency installer also
-  initializes it). A source archive must carry the populated directory.
+  qwen38-27b|dots3-note-preview` (default `deepseek-flash`). The legacy
+  `--agent codex|claude|dsh|qwen|dots` and `--agent manual` remain available,
+  as does a custom command via `--agent-cmd`.
 * Optional, probed at runtime and never required: the `docx` CLI (read/render/
-  diff/validate), a .docx→PDF converter (`docx2pdf.sh` + Word, the
-  `docx-converter` MCP tool, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
-  `pdftoppm`, `docxcompare.sh` / the `docx-compare` MCP tool (Word's own
+  diff/validate), a .docx→PDF converter (the `docx-converter` MCP tool,
+  `docx2pdf.sh` + Word, `docx render`, LibreOffice, `pandoc`), `pdftotext`/
+  `pdftoppm`, the `docx-compare` MCP tool / `docxcompare.sh` (Word's own
   comparison engine for tracked changes), `latexdiff` (LaTeX difference
-  tracking), the `zot` CLI (pyzotero-cli) as the FIRST route for read-only
-  Zotero reference resolution, and the `zotero` MCP service (the Zotero
-  bridge's `zotero_status`, `zotero_search_items`, `zotero_get_item` reads).
+  tracking), the `zotero` MCP service (the Zotero bridge's `zotero_status`,
+  `zotero_search_items`, `zotero_get_item` reads), and the `zot` CLI
+  (pyzotero-cli) as the LAST-RESORT route for read-only Zotero reference
+  resolution.
 * Optional: the external Zotero skill (`$ZOTERO_SKILL` / `$zotero-use`) that the
   Zotero stage prompts name for the skill route and for their
   `validate_zotero_docx.py` proof step. `./install_dependencies.sh` clones the
   helper and the `$zotero-use` skill under `external/`, and `activate-deps.sh`
   exports `$ZOTERO_SKILL` (a checkout-relative path turned absolute only for the
-  current shell). The stage prompts pin the ROUTE ORDER: the `zot` CLI from
-  pyzotero-cli first when it is available, then the Zotero MCP service when the
-  session exposes it, and this skill only as the FALLBACK when the CLI and the
-  MCP service are both unavailable. When none of the three routes works, the
-  citation or live field goes to manual verification. The skill script is NOT
-  bundled in this repository; when the skill is not installed, the pipeline's
-  own code-side live-field inventory and continuity gate
-  (`paper_docx_format.py`, run by every
+  current shell). The stage prompts pin the ROUTE ORDER: the Zotero MCP service
+  first when the session exposes it, then this skill, and the `zot` CLI from
+  pyzotero-cli only as the FALLBACK when the MCP service and the skill are both
+  unavailable. When none of the three routes works, the citation or live field
+  goes to manual verification. The skill script is NOT bundled in this
+  repository; when the skill is not installed, the pipeline's own code-side
+  live-field inventory and continuity gate (`paper_docx_format.py`, run by every
   DOCX stage) is the check that actually enforces field preservation, and the
   prompts' `PROVE IT` step degrades to that gate.
 * The two DOCX MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) read the
@@ -175,6 +162,133 @@ A finished decision can be certified, provisional or blocked; a blocked decision
   launching the agent (and preserves any operator-configured roots), so the
   agent-driven path is contained even when the operator sets nothing; set it
   explicitly when you drive the servers outside the pipeline.
+
+### `--agent dsh`: the DeepSeek Harness (`dsh`) as the session backend
+
+`dsh` is a separate install (node >= 22, `npm i -g @deepseek-ai/dsh@alpha`), and
+the pipeline drives it the way it drives the other two CLIs: one non-interactive
+session per stage, `PROMPT.md` piped on stdin, cwd = the stage's sandbox. The
+argv is `dsh --profile headless --json -`: `headless` is the harness's one-shot
+driver (one fresh persisted session, print the result, exit), and `--json`
+turns its stdout into a newline-delimited event stream whose opening `session`
+line names the session -- which is what lets a stopped session be CONTINUED with
+`--session-id <id>` exactly like a codex one (see *A STOPPED session is
+continued, not restarted*). The harness's own home (`$DSH_HOME`, default
+`~/.dsh`) owns the model, the MCP servers and the DeepSeek credential
+(`DEEPSEEK_API_KEY`), the way `~/.codex/config.toml` owns the codex CLI's -- so
+this preset carries no overrides, and a prompt that wants an MCP tool the
+harness does not have falls back to the next converter in its own list. Since
+that one-shot contract belongs to the installed BUILD rather than to a flag,
+`--agent dsh` reads the harness's own `dsh --profile headless --help` once
+per invocation and names the gap (with the upgrade) up front instead of letting
+every session of a wave fail one by one -- including the conditions that would
+otherwise only appear as a stack trace per session: a build without the one-shot
+flags, and a `node` the harness cannot run under (it needs node >= 22 AND must be
+installed for the node that runs it, so putting a v22 first on PATH does not fix
+a harness `npm i -g`-installed under v18 -- reinstall it under v22). A missing
+`dsh` gets the install line.
+Verified end to end against dsh 0.2.1-alpha.4 and 0.2.0-rc.2. Reached through a
+custom `--agent-cmd` instead (e.g. the npx form, for a machine with no global
+install), the sessions run exactly the same way but keep the custom-command
+rule: no continuation form, so a stopped session gets a fresh attempt.
+
+### `--agent qwen`: Qwen3.8-27B through an OpenAI-compatible vLLM endpoint (and Claude Code's Anthropic route)
+
+`--agent qwen` points an existing harness at a vLLM server instead of
+reimplementing the agent loop. The adapter, `paper_qwen_agent.py`, is copied
+beside the root's driver at `setup` and travels through `sync-code`. It chooses
+the harness with `PAPER_QWEN_HARNESS`:
+
+* `codex` (default) — `codex exec` with a custom `model_provider=qwen` route.
+  The installed codex accepts only `wire_api="responses"`; vLLM exposes
+  `/v1/responses`, so the route uses it. Qwen rejects codex's `max` reasoning
+  effort; the adapter defaults to `medium` (`PAPER_QWEN_REASONING_EFFORT`).
+* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` provider patch
+  and an `agent-default-model` override for the qwen route.
+* `claude` — `claude --print` against vLLM's Anthropic Messages endpoint (when
+  the server serves it).
+* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+
+The endpoint is `PAPER_QWEN_BASE_URL` (default
+`http://127.0.0.1:8000/v1`), model `PAPER_QWEN_MODEL` (default
+`qwen3.8-27b`), and key `PAPER_QWEN_API_KEY` (default `dummy`; vLLM usually
+needs none). When the endpoint is not reachable the adapter starts the SSH
+tunnel:
+
+```
+ssh -p 52080 -N -L 8000:127.0.0.1:8000 zxf@101.6.31.113
+```
+
+(`PAPER_QWEN_SSH_HOST`, `PAPER_QWEN_SSH_PORT`, `PAPER_QWEN_TUNNEL_LOCAL`,
+`PAPER_QWEN_TUNNEL_REMOTE`; `PAPER_QWEN_TUNNEL=off` forbids starting it). A
+tunnel the adapter started is stopped on exit; an operator's existing tunnel is
+left alone. Check the route without running a session:
+
+```
+python3 paper_qwen_agent.py --probe          # endpoint, model, tool support
+python3 paper_qwen_agent.py --check-tools    # exit 0/1 on tool_choice=auto
+printf 'Summarize this file: ...' | python3 paper_qwen_agent.py --chat
+```
+
+**Agentic sessions need tool calls.** vLLM accepts `tool_choice=auto` only
+when started with `--enable-auto-tool-choice --tool-call-parser <parser>` (and
+a model tool template). Without that flag, dsh fails a tool-using turn and
+codex's tools are not executed; the adapter warns on a dsh run and reports the
+gap in `--probe`. `--harness chat` is a text-only route and does not complete a
+pipeline stage that must write artifacts. Set `PAPER_QWEN_REQUIRE_TOOLS=1` to
+make the tool probe a hard preflight for a production run (the default is
+warn-and-run so the adapter can still be exercised against a text-only
+endpoint).
+
+### `--agent dots`: dots3-note-prev through the Dots API
+
+`--agent dots` keeps the harness and points it at the Dots API instead of
+reimplementing the agent loop; the platform's documentation is
+<https://dots.ai/platform/docs>. The adapter, `paper_dots_agent.py`, is copied
+beside the root's driver at `setup` and travels through `sync-code`. Create a
+key on the platform and export it as `DOTS_API_KEY`; the default endpoint is
+`https://note3-prev-api.askdiandian.com/v1` and the model is
+`dots3-note-prev`. It chooses the harness with `PAPER_DOTS_HARNESS`:
+
+* `codex` (default) — `codex exec` with a custom `model_provider=dots` route:
+  the platform's documented Responses protocol (`wire_api="responses"`),
+  `DOTS_API_KEY` read from the environment, web search disabled, and the
+  model's enforced 393,000-token window declared explicitly (it is not in Codex's
+  built-in catalog). The reasoning effort defaults to `medium`
+  (`PAPER_DOTS_REASONING_EFFORT`).
+* `dsh` — `dsh --profile headless` plus a generated `llm-pi-ai` route over the
+  platform's OpenAI-compatible Chat Completions endpoint and an
+  `agent-default-model` override. The route declares the 393,000-token window
+  and the output cap, and does not invent a reasoning parameter the platform
+  does not document.
+* `claude` — `claude --print` against the platform's Anthropic Messages
+  endpoint (its documented Claude Code route).
+* `chat` — a direct `/v1/chat/completions` call (text-only; no tools).
+
+The endpoint and model are `PAPER_DOTS_BASE_URL` and `PAPER_DOTS_MODEL`; the
+capacity defaults are `PAPER_DOTS_CONTEXT_WINDOW=393000` and
+`PAPER_DOTS_MAX_TOKENS=65536`. `PAPER_DOTS_SKIP_PROBE=1` skips the
+`/v1/models` preflight for a gateway that does not expose that listing. Check
+the route without running a session:
+
+```
+python3 paper_dots_agent.py --probe          # endpoint, model, key, tool support
+python3 paper_dots_agent.py --check-tools    # exit 0/1 on tool_choice=auto
+printf 'Summarize this file: ...' | python3 paper_dots_agent.py --chat
+```
+
+**Agentic sessions need tool calls.** The hosted route supports them; the
+adapter checks `tool_choice=auto` before a dsh session and warns if the
+endpoint refuses it. `--harness chat` is a text-only route and does not
+complete a pipeline stage that must write artifacts. Set
+`PAPER_DOTS_REQUIRE_TOOLS=1` (or `PAPER_DOTS_CHECK_TOOLS=1`) to make the tool
+probe a hard preflight for a production run. The platform applies per-key RPM
+and TPM limits; keep `--jobs` modest when the key is rate-limited (the
+pipeline's normal retry/backoff policy applies to a 429). The optional LLM
+audits have their own backends: the defect audit defaults to `codex-lite` and
+the conflict audit is off; pass `--defect-audit dots` / `--conflict-agent dots`
+to keep those passes on Dots too (the judge panel already defaults to
+the producer's harness/model pair).
 
 ### Choosing the model and harness (`--agent-harness` / `--agent-model`)
 
@@ -197,7 +311,129 @@ options. The defaults are **`dsh` + `deepseek-flash`**:
 | `gpt-codex` | OpenAI Codex (`codex exec`) | `gpt-sol` |
 | `claude-code` | Claude Code (`claude --permission-mode bypassPermissions --print`) | `claude-sonnet` |
 
-See [Agent harnesses and model providers](docs/agent-harnesses.md) for provider setup, custom endpoints, and separate judge settings.
+`qwen38-27b` through `claude-code` requires a vLLM server that serves the
+Anthropic Messages API; on a server that only serves the OpenAI routes the
+first request fails rather than silently switching protocols.
+`qwen38-27b` through `gpt-codex` uses the qwen adapter's Codex route, which
+needs a vLLM server that serves `/v1/responses`; a server with only Chat
+Completions should use `dsh` for that model (or the Codex chat-completions
+bridge in the reference evaluation harness).
+
+The two axes are independent only where the wire protocol supports the pair.
+If only the harness is given, its default model is used; if only the model is
+given, its default harness is used. An unsupported pair (GPT through Claude
+Code, Claude through Codex) is refused before any session starts, never once
+per stage. `--judge-agent-harness` and
+`--judge-agent-model` select the same pair for the judge panel and default to
+the producer's pair; `--judge-agent` remains the legacy shortcut.
+`PAPER_AGENT_HARNESS` / `PAPER_AGENT_MODEL` (and the `PAPER_JUDGE_AGENT_*`
+equivalents) supply defaults when the flags are absent.
+
+#### Arbitrary OpenAI-compatible endpoints
+
+`--agent-model` also accepts an `http://` or `https://` chat-completions URL.
+A custom endpoint runs on **`dsh`** (the default harness): Codex only speaks the
+Responses protocol and Claude Code only Anthropic Messages, so an arbitrary
+chat-completions URL is refused on those two rather than silently translated.
+
+```bash
+# a local vLLM/OpenAI-compatible server
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model http://127.0.0.1:8000/v1/chat/completions \
+    --agent-model-api-key "$LOCAL_KEY"
+
+# OpenRouter (it hosts many models, so name the one to use)
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model https://openrouter.ai/api/v1/chat/completions \
+    --agent-model-api-key "$OPENROUTER_API_KEY" \
+    --agent-model-name "anthropic/claude-sonnet-4.5"
+```
+
+The key is exported to the adapter through `PAPER_AGENT_MODEL_API_KEY` (the
+judge equivalent uses `PAPER_JUDGE_AGENT_MODEL_API_KEY`); it is never written
+into the generated DSH provider patch or the run record, and the option's
+value is redacted from the run log. Prefer the environment variable when the
+process list must not show the key. `--agent-model-name` /
+`PAPER_AGENT_MODEL_NAME` is required when the endpoint's `/v1/models` listing
+has more than one model; a single-model endpoint (such as a local vLLM) is
+detected automatically. The adapter reuses the endpoint's advertised context
+window when its catalog carries one, and otherwise uses
+`PAPER_AGENT_CONTEXT_WINDOW` (default 32768) and `PAPER_AGENT_MAX_TOKENS`
+(default 8192).
+
+`--agent-model-prep-json` merges a JSON object into every request to the
+custom endpoint, after the harness has built its normal payload:
+
+```bash
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-model http://127.0.0.1:8000/v1/chat/completions \
+    --agent-model-api-key "$LOCAL_KEY" \
+    --agent-model-prep-json '{"temperature": 0.2, "max_tokens": 8192, "reasoning_effort": "high"}'
+```
+
+The merge is recursive and the object may be incomplete: keys it omits keep
+the harness defaults (including nested keys such as `reasoning.summary`), and
+a key it carries replaces that default; provider-specific spellings (such as
+`max_token_len`) are passed through verbatim. It applies only to a custom
+endpoint URL, so to use it with a model that also has a shorthand (for example
+qwen38-27b) pass that model's endpoint URL and `--agent-model-name` instead of
+the shorthand. `PAPER_AGENT_MODEL_PREP_JSON` supplies the same object from the
+environment. Every `--agent-*` option has a `--judge-agent-*` equivalent, so
+the judge side uses `--judge-agent-model`, `--judge-agent-model-api-key`,
+`--judge-agent-model-name`, `--judge-agent-model-prep-json` (or
+`PAPER_JUDGE_AGENT_MODEL_PREP_JSON`) and `--judge-agent-cmd` in the same way.
+
+**Credentials.** The native harnesses use their own configuration first:
+`dsh` uses its `$DSH_HOME` credentials (its GPT/Claude routes use
+`OPENAI_API_KEY`/`ANTHROPIC_API_KEY` or the stored DSH sign-in); `gpt-codex`
+uses the Codex login or `OPENAI_API_KEY`; `claude-code` uses the Claude Code
+login or `ANTHROPIC_API_KEY`. `gpt-codex` and `claude-code` running
+`deepseek-flash` use DeepSeek's documented Responses and Anthropic-compatible
+endpoints and require `DEEPSEEK_API_KEY`. `qwen38-27b` keeps the
+`PAPER_QWEN_*` vLLM settings and `dots3-note-preview` keeps `DOTS_API_KEY`.
+The "latest" ids above were read from Codex 0.167.0 and the DSH catalog on
+2026-11-10; a newer harness release can be supported by updating the small
+registry in `paper_model_agent.py` / `paper_pipeline_parts/p01_venues.py`.
+The optional `--defect-audit` and `--conflict-agent` passes keep their own
+legacy backend choices (`codex-lite`, `codex`, `claude`, `dsh`, `qwen`,
+`dots`, `manual`); pass the family that matches the run (e.g.
+`--defect-audit dsh`) when those passes should not fall back to ChatGPT.
+
+Examples:
+
+```bash
+# the new default: DeepSeek Harness + DeepSeek Flash
+python paper_pipeline.py run --root ./paper_rounds
+
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness gpt-codex --agent-model gpt-sol
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness claude-code --agent-model claude-opus
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness dsh --agent-model gpt-terra
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness gpt-codex --agent-model deepseek-flash
+# a different, cheaper judge pair
+python paper_pipeline.py run --root ./paper_rounds \
+    --agent-harness claude-code --agent-model claude-sonnet \
+    --judge-agent-harness gpt-codex --judge-agent-model gpt-terra
+```
+
+**Legacy `--agent` / `--judge-agent`.** The old names keep their exact old
+commands and cannot be combined with the new pair. They map to:
+
+| legacy name | effective pair | note |
+| --- | --- | --- |
+| `codex` | `gpt-codex` + the CLI's own model | exact old `codex exec` command |
+| `claude` | `claude-code` + the CLI's own model | exact old `claude` command |
+| `dsh` | `dsh` + `deepseek-flash` | exact old `dsh` command |
+| `qwen` | `gpt-codex` + `qwen38-27b` | still honours `PAPER_QWEN_HARNESS` |
+| `dots` | `gpt-codex` + `dots3-note-preview` | still honours `PAPER_DOTS_HARNESS` |
+| `manual` | manual | stages every prompt for a human |
+
+The `--agent qwen` and `--agent dots` sections above remain the detailed
+reference for their adapters; the new pair is the preferred route because it
+selects the harness explicitly.
 
 ## What you get
 
@@ -206,7 +442,7 @@ Everything lives under the root you passed to `setup`:
 | path | what it is |
 | --- | --- |
 | `reports/DECISION_REPORT.md` | the human-readable decision: each round's ranked table, the champion, the issue census, and every reported-only signal |
-| `reports/decision.json` | the same decision, machine-readable; its `score_model` defines the scoring and ranking contract |
+| `reports/decision.json` | the same decision, machine-readable; its `score_model_doc` defines the scoring and ranking contract |
 | `reports/round<r>_raw_scores.csv` | every directed score the panel produced, with the sheet it came from |
 | `reports/round<r>_issue_census.csv` | how many defects of each tier and severity every version carries (`own` vs `peer`), plus the sibling matrices the ranking walks |
 | `reports/round<r>_defects.csv` | WHICH defects: one row per defect the panel filed, with the version it belongs to, the comparison's target/opponent, the check id, the defect class, the severity and the sheet's own evidence sentence |
@@ -223,8 +459,8 @@ Everything lives under the root you passed to `setup`:
 The selection rule is one incumbent guard plus one ordered default key. Retention
 is applied first: if the key's leader is not the incumbent and ties it exactly on
 (median, mean, IQR), the incumbent is kept. Otherwise the default key decides:
-**ordered defect census** (fewer defects, and a worse severity earlier, wins) →
-**median** → **mean** → **IQR** → content **digest**. The prefix comes from the
+**defect prefix** (fewer defects wins) → **median** → **mean** → **IQR** → content
+**digest**. The prefix comes from the
 blind panel's own issue ledger; the panel statistics sit below it. See *How a
 round is decided* below for the rationale and the gates.
 
@@ -270,7 +506,7 @@ counted and named as a gap) and every OS by-product (`:Zone.Identifier`,
 `.DS_Store`, a Word owner file — never documents, stripped from the delivered
 copy). Two shipped surfaces that attribute one display item to different tools
 are `PKG-5` (a resources-table row against the item's own legend — the pipeline
-reports it and picks NO side), and four classes of statement a package makes
+reports it and picks NO side), and three classes of statement a package makes
 about ITSELF are `PKG-6/7/8/9` (2026-10-15): one text that both denies
 generative-AI use and describes the AI workflow it used (PKG-6, with scoped
 denials — "no AI tools were used for the statistical analysis" — deliberately
@@ -328,18 +564,17 @@ evidence pack.
 | `set-venue` / `set-journal` / `set-article-type` | change the rule set / target journal / content type |
 | `add-venue ID` | an agent writes/updates the venue profile + README row and downloads OA exemplars; the code then derives the pinned structure-only template pack |
 | `build-venue-templates --venue ID` | re-derive that pack from the exemplars (`<venue-id>.manuscripts/`) without an agent |
-| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor\|llm` | switch the revision mode (`llm` is option 5) |
+| `set-revision-mode continue\|init\|transfer\|resubmit\|major\|minor` | switch the revision mode |
 | `set-champion-select judge\|revise\|integrate` | how a future round's champion is chosen: the panel (default), or the no-judge auto-promotion of the revised / integrated revised submission (PROVISIONAL; see the champion-selection section) |
 | `set-tiebreak-defect-floor N` / `set-dedup-mode off\|location` | calibration of the selection key |
 | `set-submit-code off\|on` | whether `code/` is part of the submission (`off`, the default: revision content the stages revise and the judges evaluate, but stripped from `journal_submission/` like `raw_data/`, and not citeable by the response letter; `on`: the submission carries it and the letter may cite it) |
 | `retry --run ID` / `retry --runs SELECTION` / `prune --keep-latest N` | reset one session, or the same subset `run --only` would drive / reclaim disk from old sandboxes |
 | `redline --root ROOT` / `track --root ROOT` | (re)write the tracked-changes `.docx` tree / the difference-tracking copies (`*.tracking-*`) plus the persistent PDF renders |
-| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the `zot` CLI first, then the Zotero MCP service, and the Zotero skill only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
+| `--zotero off\|read\|edit\|apply` (`setup`; default `edit`) | the Zotero policy every stage prompt repeats: the stage tries the Zotero MCP service first, then the Zotero skill, and the `zot` CLI only as the fallback when both are unavailable; `off` = the run policy forbids all Zotero tooling and every stage prompt says so; the pipeline does NOT uninstall the operator's MCP registration or skill, so a machine that must be incapable of Zotero access should install with `install_dependencies.sh --no-zotero-mcp --no-external`, `read` = resolve citations read-only, `edit` = the revised copy may add/edit/delete citation fields (the library stays read-only), `apply` = as `edit` plus the one allowed library write through the `zot` CLI. Whichever mode is set, the code-side field-continuity gate fails a stage that drops, unlinks or malforms a live field |
 | `--vs-original-rule {median,sign}` (`setup`) | the anti-regression gate's rule: `median` (default) compares a pair's median directed score; `sign` instead requires the exact one-sided sign test over the pair's directed scores to be significant. The pair carries `2*judges` scores, so the sign rule needs at least 3 judges: at 2 judges the smallest attainable one-sided p (4/4 losses) is 0.0625, and `setup` refuses that combination rather than shipping a gate that can never reject |
 | `--stop-after-no-progress K` (`setup`) | adaptive stop (default 0 = off): once K consecutive rounds pin the round's own base, `run` stops before the next round and `decide` treats the last completed round as the answer; `--rounds` stays the hard cap |
-| `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. `--judge-manual` stages the judge prompts for a human, and `--judge-agent-cmd JSON` overrides the judge command |
+| `--judge-agent-harness {dsh,gpt-codex,claude-code}` / `--judge-agent-model NAME` (`run`) | run the judge panel only on a different (e.g. cheaper) model/harness; both default to the producer's pair. The legacy `--judge-agent {codex,claude,dsh,qwen,dots,manual}` / `--judge-agent-cmd JSON` remain |
 | `--retry-backoff S` / `--retry-backoff-max S` (`run`) | exponential retry wait: base S doubling per failed attempt (default 30s), capped per wait (default 600s); 0 retries immediately |
-| `--tolerate-fail` / `--no-tolerate-fail` (`setup`, `run`) | collection mode (default: off): a stage that exhausts its retries is printed `TOLERATED_FAIL` and its BEST FAILED TRIAL (most required output files, then fewest FAIL messages) is used so the pipeline continues; the decision stays PROVISIONAL and is never certified. The strict default keeps the round incomplete and exits 3 |
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
 | `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
@@ -351,7 +586,7 @@ evidence pack.
 | 0 | success (`decide`: certified decision; `run`: every configured round complete) |
 | 1 | a run failed / the process hit an error |
 | 2 | nothing to decide yet, or a usage error |
-| 3 | a round is incomplete (progress saved; resume with `run`); with `--tolerate-fail` a stage that exhausted its retries and had a usable trial is a `TOLERATED_FAIL` warning and `run` exits 0 instead |
+| 3 | a round is incomplete (progress saved; resume with `run`) |
 | 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
 | 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
 
@@ -466,15 +701,23 @@ human letter should drive the revision.
 | — | `init` | start a **new submission**: conform to the venue's template (or its guidelines → academic convention when no template ships) first, then the default rounds | **not written** | allowed | the round's full review |
 | option 1 | `transfer` | revise for a **new journal** (e.g. read iScience, submit to Frontiers in Immunology) | **not written** | allowed | the round's full review + the decision letter's concerns |
 | option 2 | `resubmit` | new submission to the **same journal** | **required** | allowed | the round's full review + the concerns |
-| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review and no judge panel; the scoped revision audit/bounded repair, the concern audit/repair and the response audit/repair DO run |
-| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only (same audit/repair chain as 3) |
+| option 3 | `major` | complete a **major revision** at the same journal | **required** | forbidden | **concern-scoped only** — no general review, no audit, no judge panel |
+| option 4 | `minor` | as 3, for a **minor revision** | **required** | forbidden | concern-scoped only |
 | option 5 | `llm` | revise against the pre-filtered `llm_review_feedback/` area only (explicit selection only; an unconfigured root remains on `continue`) | **not written** | allowed | the round's full review + the LLM review's concerns |
 
-**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted HUMAN concerns, and their base is the previously reviewed submission — the round itself stages no general review and no judge panel. It DOES stage the concern audit → concern repair pair, the scoped revision audit → bounded repair pair, and the response audit → response repair pair: every LLM-written deliverable is checked by an independent session and its confirmed defects are applied by one repair pass. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
+**The pre-filtered `llm` area supplements the normal full review; it never replaces it.** Options 3–4 are concern-scoped major/minor modes: their edits are confined to the admitted human concerns, and their base is the previously reviewed submission — the round itself stages no general review, no audit and no judge panel. Where a mode replaces the general review, every class the external pre-filter dropped and every class the concern ledger does not cover is recorded as a named gap, never treated as clean.
+
+Both `init` and `transfer` run the conforming agent before round 1: an
+applicable official Word template takes precedence; otherwise the agent uses
+the target journal's recorded author guidelines and academic convention,
+preserving the source format (including Markdown, text and LaTeX packages).
+The conforming output must pass its independent audit and conditional bounded
+repair before it can become the working original. `--no-template-stage` is an
+explicit opt-out from conformance, not an opt-out from auditing a writer that ran.
 
 How each mode runs:
 
-* **The journal modes** enumerate the letter into a concern ledger
+* **The four journal modes** enumerate the letter into a concern ledger
   (`concerns/JF_concerns.json|md`: one row per distinct concern, verbatim
   quote — checked against the text rendering of the feedback — plus `action`
   and `disposition`). The feedback is EXTERNAL prose: it never becomes a
@@ -486,32 +729,21 @@ How each mode runs:
   `original_submission/` is never discovered as a letter: it is staged
   READ-ONLY and separately under `feedback/original_submission/`, and every
   journal stage may read it only as the reviewer-visible earlier manuscript.
-  A sibling `llm_review_feedback/` area is read too in the modes that admit
-  it (`transfer`, `resubmit`, `llm`), when present: its remaining findings
-  were already filtered for false positives, so they are enumerated with the
-  same standing as the human points (staged under `feedback/llm/`, origin kept
-  in the ledger's `source`/`author` columns, and never silently dropped).
-  **Major/minor do NOT admit that stream:** only a human reviewer's demand may
-  become a concern or a finding there.
+  A sibling `llm_review_feedback/` area is read too, when present: its
+  remaining findings were already filtered for false positives, so they are
+  enumerated with the same standing as the human points (staged under
+  `feedback/llm/`, origin kept in the ledger's `source`/`author` columns, and
+  never silently dropped).
 * **Options 1–2** feed the ledger into the normal round: the review reconciles
   every concern (`guided_review/concerns_reconciled.json`) and files a `check: "JF"`
   finding for each unanswered one; the rewrites carry the concern block; the
   revise arms answer the findings; the judge panel and `decide` work as usual.
 * **Options 3–4** run a different, restricted path: `r1_concerns` produces the
   ledger AND the only finding list (`check: "JF"`, one finding per concern);
-  `r1_concern_audit` independently disposes every concern against the HUMAN
-  feedback (confirmed / defective / dropped), and `r1_concern_repair` applies
-  only the confirmed corrections/removals and regenerates the finding list.
-  The point-by-point response is written FIRST as `r1_response_draft` (the
-  reviewer's verbatim quotation — typos and wrong punctuation preserved — plus
-  the authors' intended answer and planned changes); the reviser implements
-  that plan. The single `r1_a2_revise` session edits the manuscript ONLY for
-  those ids
+  the single `r1_a2_revise` session edits the manuscript ONLY for those ids
   (every other observation goes to `MANUAL_STEPS.md`), and the code-side scope
   guard fails the attempt for a changed file the ledger does not name or a
-  file added/removed. The revised package then gets the scoped `REVISION AUDIT`
-  → `BOUNDED REPAIR` pair (auditing the revision's own delta against the
-  repaired concerns). There is no judge panel and no champion decision —
+  file added/removed. There is no judge panel and no champion decision —
   `decide` reports the scoped revision instead.
 * **Option 5 (`llm`)** runs like options 1–2 (the normal round with the concern
   ledger reconciled by the review, rewrites allowed) with two differences: only
@@ -520,20 +752,10 @@ How each mode runs:
   response letter or `journal_submission/` package is produced — there is no
   journal to submit to. The mode is selected only with `--revision-mode llm`
   (or `set-revision-mode llm`); the directory's presence is not a selector.
-* **Options 2–4** write the point-by-point response in TWO steps. In a
-  concern-scoped or resubmit round, `response_draft` is written BEFORE the
-  revision: it fixes the reviewer's verbatim quotation and the authors'
-  intended answer, and the reviser implements it. After the revision, the FINAL response stage
-  reconciles the same letter with the package: `RESPONSE_TO_REVIEWERS.md` +
-  `response_map.json`, one block/row per concern, the reviewer's own text
-  character-for-character (typos, wrong punctuation and capitalization
-  preserved), every cited file/span verified to exist in the final package,
-  `planned` rows forbidden from claiming results, and a new-experiment concern
-  required to cite its new data. The letter is an LLM deliverable:
-  `RESPONSE AUDIT` disposes every concern row and every claim against the
-  repaired ledger, the final package and the revision ledger, and `RESPONSE
-  REPAIR` applies only confirmed defects to `response/` (never to the
-  manuscript) before `journal_submission/` is assembled.
+* **Options 2–4** then run a response stage: `RESPONSE_TO_REVIEWERS.md` +
+  `response_map.json`, one block/row per concern, every cited file verified to
+  exist in the final package, `planned` rows forbidden from claiming results,
+  and a new-experiment concern required to cite its new data.
 * **The four journal modes** finish by assembling `<root>/journal_submission/`: the final
   package minus `raw_data/` and — unless `--submit-code on` /
   `set-submit-code on` asks for it — the analysis-code area (`code/`), minus
@@ -597,10 +819,7 @@ submission:
   decision report follow it.
 
 The **cover letter** has two separate reported budgets (neither gates): its
-*persuading part* against the venue profile's own `cover_letter` bound — a
-range, or a one-sided `at most N words` / `at least N words` when the profile
-states only one side; the built-in 300–500-word preference applies only when the
-profile configures no cover-letter block — and its
+*persuading part* against the operator's 300–500-word preference, and its
 **TOTAL content** — salutation, body, disclosures and signature — against a
 profile's `cover_letter.total_max` when one is configured. The shipped profiles
 record no total cap (Nature Biotechnology's own guidance states none), so the
@@ -650,7 +869,7 @@ python paper_pipeline.py set-venue frontiers-in-immunology  # a shipped journal 
 python paper_pipeline.py set-venue --journal "Cell"      # ... and the journal, atomically
 python paper_pipeline.py set-venue my-journal --profile my-journal.json   # install a profile of your own
 python paper_pipeline.py set-journal "Cell"              # change only the journal
-python paper_pipeline.py set-article-type --list --root ./paper_rounds  # the venue's content types + their caps
+python paper_pipeline.py set-article-type --list         # the venue's content types + their caps
 python paper_pipeline.py set-article-type brief-communication   # select the article type
 python paper_pipeline.py set-article-type --show         # current venue / type / journal / limits
 python paper_pipeline.py set-venue --show                # current venue, journal, resolved limits
@@ -730,7 +949,7 @@ python paper_pipeline.py conform --root ./paper_rounds --agent --agent-cmd '["my
 
 **`transfer` and `init` run that stage FIRST.** A root configured with `--revision-mode transfer`
 or `--revision-mode init` conforms the submission before the feedback/round stages: the sandbox is
-staged and (unless `--manual`, which stops with the instruction to fill it) the agent
+staged and (unless `--agent manual`, which stops with the instruction to fill it) the agent
 session runs, and the code-side postcheck gates the whole run. With an official Word template the
 session copies it and replaces its placeholders; with no `.official` directory, `init` still runs
 the session, falling back to the journal's own author guidelines and then to academic convention
@@ -793,8 +1012,8 @@ those styles are removed — with the document text proven byte-identical or the
   headings imported from another publisher's template). When the venue ships a
   Word template, the orchestrator also **renders it once per root** (the
   operator's `docx-converter` MCP tool first -- the orchestrator drives the
-  configured server over a minimal stdio JSON-RPC client, then `docx2pdf.sh`,
-  then LibreOffice: PDF + page
+  configured server over a minimal stdio JSON-RPC client, the same first choice
+  every prompt mandates -- then `docx2pdf.sh`, then LibreOffice: PDF + page
   images + a
   `manifest.json` naming the renderer and each template document's page count,
   cached by template digest) and seeds that render into every producing/
@@ -948,10 +1167,7 @@ schedule: `2 3` = two rounds following the schedule's rounds 2 and 3, `3`/`-1`
 `--caption-limit N` (default: the venue profile's own),
 `--jobs N`, `--agent-harness NAME`, `--agent-model NAME_OR_URL`,
 `--agent-model-api-key KEY`, `--agent-model-name MODEL`,
-`--manual`, `--agent-cmd JSON`, `--judge-manual`, `--retries N`,
-`--max-turns N` (model-turn cap for one agent session; default **3000**, `0` = unlimited;
-the orchestrator counts the harness's own `turn_end` events and kills a session that
-exceeds it, so a long-horizon stage still has a bound),
+`--agent {codex,claude,dsh,qwen,dots,manual}` (legacy), `--agent-cmd JSON`, `--retries N`,
 `--poll S` (manual mode), `--no-redline`, `run --only 1,2` (only rounds 1 and
 2; see *Running only some of the steps*). Opt-in audits:
 `--defect-audit {codex-lite,codex,claude,dsh,qwen,dots,manual}`, `--defect-audit-cmd JSON`,
@@ -959,10 +1175,11 @@ exceeds it, so a long-horizon stage still has a bound),
 `--no-conflict-agent` select the two optional LLM audits (the defect audit is
 on by default with an agent backend; the conflict LLM pass is off by default).
 Setup-time policy flags:
-`--audit {off,on}` (the auditor stage), `--revision-audit {on,off}`
-(after every revise run: an independent revision audit writes a bounded-repair
-plan, and ONE bounded repair pass applies it; ON by default, `PAPER_REVISION_AUDIT=off`
-turns an existing root off), `--guided-review {on,off}` / `--no-guided-review` (the round's
+`--audit {off,on}` controls the earlier review-disposition auditor.
+The post-write `--revision-audit on` is mandatory in every mode, including
+major/minor. Legacy `revision_audit: off` and `PAPER_REVISION_AUDIT=off` do not
+bypass it; new setup commands reject `--revision-audit off`.
+`--guided-review {on,off}` / `--no-guided-review` (the round's
 checklist pass; ON by default; OFF runs the cold-start review alone and records the guided classes
 as a named
 gap, see "The GUIDED review" below), `--execution-profile {high,medium}` (the instruction
@@ -973,9 +1190,6 @@ same rules, tested — see "Execution profiles" below),
 `--enable-deletions|--disable-deletions` (`setup` records the policy; `run`/`run-decide`
 may override it for one invocation; both are ENABLED by default, the historical
 behaviour — see "Content-edit policy" below),
-`--enable-soft-deletions|--disable-soft-deletions` (the middle deletion
-policy: both kinds stay enabled, only the documented removable units may be
-removed; OFF by default — see "Content-edit policy" below),
 `--cold-start-review {on,off}`
 (the independent discovery session; ON by default, `--no-cold-start-review` turns it off,
 `set-cold-start-review off` flips an existing root), `--submit-code {off,on}`
@@ -1041,16 +1255,9 @@ boxes.
 | `guided_review` | `r<r>_guided_review` | ONE frozen identification pass (`$paper-review`) — the GUIDED review (M1–M36 / J1–J5 + D0–D5) that feeds every revise session. **on by default**; `setup --no-guided-review` runs the cold-start review alone and records the guided classes as a named gap (see "The GUIDED review and `--no-guided-review`"). Recorded as the run kind `guided_review`, the id `r<r>_guided_review` and the area `guided_review/` |
 | `cold_start_review` | `r<r>_cold_start_review` | **on by default** for every full-scope round **with at least one revision arm** (`--revises 0` plans no review, so no cold-start session either) (`setup --cold-start-review off` / `--no-cold-start-review` / `set-cold-start-review off` disables): an INDEPENDENT, cold-context discovery session launched IN PARALLEL with the review and given the corpus only (no review, no finding list). It is GENERIC — any defect class may be filed — and wherever a defect can be shown by a computation the finding declares a re-runnable verifier; the orchestrator re-runs every declared verifier (a non-reproducing computation FAILS the attempt) and the findings ride in the frozen discovery list as `X-9xx` rows (reviser resolves, auditor disposes, integrator reconciles) |
 | `audit` | `r<r>_audit` | **on by default** (`setup --audit off` / `--no-audit` disables): an INDEPENDENT AUDITOR between the reviewer and the revisers — it disposes every frozen finding (confirm, or drop WITH evidence), attacks the reviewer's boilerplate `OK` closures without filing new findings (an observation goes to `audit/UNRESOLVED.md`), and hands the AUDITED list to the revision arms |
-| `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (`--revision-audit off` / `PAPER_REVISION_AUDIT=off` records the skip; in a concern-scoped major/minor revision it audits the revision's own delta against the repaired human concerns) |
+| `revise` | `r<r>_a2…a{1+N}` | reviewed-and-revised versions that consume the frozen review (or the audited list, when the auditor ran). **After its postcheck**, an independent REVISION AUDITOR writes `revision_audit/REPAIR_PLAN.json` (no edits), and a non-empty plan runs ONE bounded-repair session that re-validates and applies only confirmed rows, records `revised/REPAIR_LEDGER.json`, and re-passes the revise postcheck (mandatory in general and concern-scoped major/minor revisions) |
 | `integrate` | `r<r>_i1…iK` | "merge from the other versions": every pool member SELECTED by the round's `--integrators` mask reworked with the WHOLE pool as donors (the default mask 0xFFFFFFFF selects all K = 1+M+N members). It reconciles every frozen X-* id in its difference ledger — a dropped id is accounted for, never applied |
 | `judge` | `judge_t…_j…` | blind pairwise panels over the round's field (the id is an opaque token: it carries no round and no arm) |
-| `concerns` | `r<r>_concerns` | (major/minor) the scoped reconciliation: one session writes the concern ledger and the only `JF` finding list the revise arm consumes. It sees HUMAN feedback only |
-| `concern_audit` | `r<r>_concern_audit` | **on by default** (`--concern-audit off` skips the pair and records the skip): an INDEPENDENT session disposes every generated concern — `confirmed`, `defective` (with the exact current value, the replacement and a re-runnable basis) or `dropped` — against the HUMAN feedback and the base. It adds no concern; its observations go to `concern_audit/UNRESOLVED.md` |
-| `concern_repair` | `r<r>_concern_repair` | the ONE repair pass over the ledger + `JF` finding list: it re-validates every audit row (Rule 1B), applies only confirmed corrections/merges/removals, regenerates `SEED_COVERAGE.md` and the finding list, and records `concern_repair/REPAIR_LEDGER.json`. It never edits the manuscript |
-| `response_draft` | `r<r>_response_draft` | (resubmit/major/minor) the point-by-point response PLAN, written BEFORE the revision: the reviewer's verbatim quotation (typos/punctuation preserved) + the authors' intended answer + planned changes; `changes`/`new_data` stay empty. The reviser implements it |
-| `response` | `r<r>_response` | (resubmit/major/minor) the FINAL point-by-point response letter + `response_map.json`, reconciled with the final package after the revision: one block/row per repaired concern, every cited file/span verified, the reviewer's text verbatim |
-| `response_audit` | `r<r>_response_audit` | **on by default** (`--response-audit off` records the skip): an INDEPENDENT session disposes every response row and claim against the repaired ledger, the final package and the revision ledger — missing answer, unsupported claim, wrong citation/status, overclaim, inconsistency. A manuscript observation goes to `response_audit/UNRESOLVED.md` |
-| `response_repair` | `r<r>_response_repair` | the ONE repair pass over `response/` only: it re-validates each audit row, corrects/downgrades only confirmed defects, never edits the manuscript, and re-passes `postcheck_response` before the submission is assembled |
 
 Each run keeps its sandbox under `runs/<id>/` (`base/`, `guided_review/`, the stage's
 own output directory, `PROMPT.md`, `_pipeline_done.json`). Completion is a
@@ -1067,7 +1274,7 @@ Every corpus the pipeline handles carries one pristine input area and two
 | `non_revised/` (in the root) | the pristine copy of `--source` | read-only: re-hashed at the start of every `run`/`decide`, byte-verified in every sandbox, never written (the operator's `--source` is never touched at all) |
 | `raw_data/` (inside each corpus) | the raw data — figure and table sources, data tables, the analysis snapshot the author's own scripts regenerate; an older corpus may also keep feedback here | read-only: a package CARRIES it, and the pipeline puts the untouched original's copy back after every package-producing stage; NOT submission content |
 | `human_review_feedback/` (inside each corpus) | the REAL editors'/reviewers' comments from the previous submission (decision letters, referee reports), plus any previous response-to-reviewers as context; its child `original_submission/`, when present, is the manuscript version those reviewers actually saw | read-only and NOT submission content like raw_data; the journal modes build the concern ledger and the response letter from it, and a judge may read it (under `evidence/human_review_feedback/` in its view) to score how well a version ADDRESSES the human-raised concerns; `original_submission/` is evidence for resolving a concern and checking whether the current `base/` already answers it — never the submission, a sweep surface or a source of text |
-| `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point **only in the modes that admit the LLM stream** (`transfer`, `resubmit`, `llm`) | read-only and NOT submission content like the other evidence areas; those modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings. **Major/minor do not stage it** — a concern-scoped revision admits human reviewer demands only |
+| `llm_review_feedback/` (inside each corpus, optional) | a machine-generated review of the previous submission whose false positives were filtered out upstream (any file types); every remaining finding is a real concern with the same standing as a human reviewer's point | read-only and NOT submission content like the other evidence areas; the journal modes stage it under `feedback/llm/` and enumerate its findings into the concern ledger (origin kept in `source`/`author`; a row closed `not-applicable`/`disagree` needs the recorded rationale), and a judge may read it under `evidence/llm_review_feedback/` in its view to score how well a version ADDRESSES those findings |
 
 The names are CANONICAL and strict: the pipeline has one name per input area,
 and the removed legacy spellings (`non-revised/`, `raw_figs/`) are neither
@@ -1135,7 +1342,7 @@ partial selection leaves the chain incomplete, and the response letter +
 the chain is done.
 
 `transfer` and `init` additionally expose the conform stage: `--only conform`
-drives (or checks, with `--manual`) that stage alone and reports it
+drives (or checks, with `--agent manual`) that stage alone and reports it
 pending/done; the rounds stay pending until a later `run`.
 
 The selection items are comma-separated and combine as a **union**:
@@ -1145,9 +1352,7 @@ The selection items are comma-separated and combine as a **union**:
 * a **stage name** — the stage in every round: `rewrite`, `review`, `audit`,
   `revise`, `integrate`, `judge`, plus the aliases `w`, `a`/`a2`, `i`, `merge`,
   `j` (plurals work too); in a journal revision mode the chain's `feedback`,
-  `concerns`, `concern_audit`, `concern_repair`, `response_draft`, `response`,
-  `response_audit` and `response_repair` stages are selectable as well (`fb`,
-  `ca`, `cr`, `rd`, `resp`, `ra`, `rr`);
+  `concerns` and `response` stages are selectable as well (`fb`, `resp`);
 * **`ROUND:STAGE`** — one stage of one round (`2:merge`, `3:judge`;
   `.`/`/` separate as well, and `all` stands for every stage, e.g. `2:all`);
 * **one agent SESSION** — the session, not its whole stage: `rewriter2` (only
@@ -1207,10 +1412,7 @@ python paper_pipeline.py run --root ./paper_rounds --only r1_judge_w2_j1,r2_judg
 whose predecessor is not finished (round 2 consumes round 1's pinned champion)
 is reported as the unmet dependency it is, and nothing is started. A plain
 `run` continues whatever is still pending; `run-decide` accepts the same flag
-and then decides -- except that a non-`all` `--only` selection is a
-session-selection contract, so `run-decide --only <selection>` runs only that
-selection, prints that the decide phase was not started, and leaves `decide` to
-a later invocation (`--only all` is a plain run and keeps the decide phase). A session item the round's plan cannot satisfy (a typo like
+and then decides. A session item the round's plan cannot satisfy (a typo like
 `integrator9`, or an arm a round's `--integrators` mask leaves out) is refused
 before anything starts, naming the sessions that round does plan.
 
@@ -1261,7 +1463,7 @@ one session at a time:
 ```bash
 run --only r1_judge_w2_j1                    # one session: round 1, w2, judge 1
 run --only r2_judge_i1_j1                    # round 2's first integration arm
-run --only r1_judge_w2_j1,r1_judge_w2_j2     # two of w2's judges
+run --only r1_judge_w2_j1,r1_judge_w2_j2     # two of w2's three judges
 ```
 
 The selector is a **whitelist** (no selector = every session, the default):
@@ -1368,8 +1570,8 @@ modes skip the panel entirely and promote a named submission version:
   round's single review-audit-revised candidate (`a2`, the review → audit →
   revise → revision-audit output) is pinned and published as the round's
   winner. Use `--no-audit` (or `setup --audit off`) when the review should flow
-  straight to the reviser without the review auditor; use
-  `--revision-audit off` to skip the post-revise audit/repair chain.
+  straight to the reviser without the review auditor. The post-revise audit,
+  conditional bounded repair and independent final verification remain mandatory.
 * `--champion-select integrate` — NO judge panel: the integration arm of that
   revised candidate is promoted (`i<M+2>` in the pool `[a1, w1..wM, a2]`, so
   `i2` when M=0 and `i4` with the default two round-1 rewrites). If
@@ -1408,53 +1610,6 @@ the package is a provisional hand-off, never a signed panel verdict.
 `--package-winner` still works once every configured round is complete; it says
 plainly that it is packaging an unjudged champion.
 
-## `TOLERATED_FAIL` (`--tolerate-fail`): use the best failed trial when a stage exhausts its retries
-
-`--tolerate-fail` (paired with `--no-tolerate-fail`) is OFF by default. When it
-is on, a run that exhausts its retry budget does not terminate the invocation:
-the run's **best failed trial** is used as that stage's result.
-
-* **Which trial.** The candidates are the run's archived failed attempts
-  (`runs/<run>_try<N>_failed/`) plus its current failed sandbox. They are ordered
-  by the number of required output files the attempt produced in the stage's own
-  output area (`revised/`, `rewritten/`, `integrated/`, `guided_review/`,
-  `cold_start_review/`, `audit/`, `judge_review/`, `concerns/`, `response/`),
-  then by the fewest FAIL messages, then by the latest attempt. A trial is
-  usable only when it reached the stage's completion signal (the marker, or the
-  judge's scores file) and produced at least one output file; a trial that
-  stopped before the signal is not a candidate.
-* **What is used.** The chosen trial is moved into the run's active sandbox and
-  the run becomes `done` with a `tolerated_fail` record
-  (`trial`, `outputs`, `fail_messages`); its `postcheck.ok` and its attempt
-  archives stay as evidence. The stages that depend on it continue on that
-  output, so a collection harness gets the most complete attempt instead of
-  losing the row.
-* **It is never a clean result.** The round record carries
-  `tolerated_fail.failed_runs`, its `certified` is `false`, and `decide` adds a
-  gate problem: any decision whose round used a tolerated trial is
-  `PROVISIONAL` and is never certified. An auto-promoted round promotes the
-  trial it used (still auto-promoted and provisional); a judge round may score
-  the resulting package, but the verdict is not certified (rule 10).
-* **No usable trial means strict.** If every failed attempt produced no required
-  output, the run stays a hard `FAIL`; the round stays incomplete and `run`
-  exits 3 even with the flag. The flag never invents output.
-
-`setup` records the policy in `pipeline_config.json` only when the pair is
-passed; `run` can override it for one invocation. A root written by the earlier
-`--almost-fail` feature carries `almost_fail: on|off`; it is read as the same
-policy, and `decide` still recognizes its recorded base fallback for that old
-root. The console word is `TOLERATED_FAIL`; the run record's `status` is `done`
-(so downstream stages can run) and `postcheck.ok` remains `false`.
-
-```bash
-# collection mode: use the best failed trial when a stage exhausts its retries
-python paper_pipeline.py setup --source ./submission --root ./paper_rounds \
-    --champion-select revise --tolerate-fail
-python paper_pipeline.py run --root ./paper_rounds
-# override back to the strict path for one invocation
-python paper_pipeline.py run --root ./paper_rounds --no-tolerate-fail
-```
-
 ## Evidence is not submission text: `raw_data/` and the review-feedback areas
 
 A submission directory may carry **read-only evidence areas** beside its
@@ -1462,9 +1617,8 @@ manuscript files:
 
 * **`raw_data/`** — factual evidence (measurements, tables, figures' source
   data, protocols, notes). The stages READ it to check facts; it is never
-  treated as the manuscript, a cover letter or supplementary information. It is
-  stripped from the derived `journal_submission/`, but the published package
-  `final_clean_version_<root name>/` is the judged corpus and DOES carry it.
+  treated as the manuscript, a cover letter or supplementary information, and it
+  is never shipped in the published package.
 * **`human_review_feedback/`** — the REAL editors'/reviewers' comments (the
   decision letter, the reviewer reports, a previous response to reviewers). The
   four journal-feedback revision modes read it, and the blind judges may read the
@@ -1480,12 +1634,9 @@ manuscript files:
   it is never swept, counted or quoted as the authors' current prose.
 * **`llm_review_feedback/`** — an optional machine-generated review of the
   previous submission whose false-positive findings were filtered out upstream
-  (any file types). The modes that admit the LLM stream (`transfer`, `resubmit`,
-  `llm`) stage it beside the human feedback (`feedback/llm/…`) and enumerate
-  every remaining finding as a real concern with the same standing as a human
-  reviewer's point; a major/minor revision stages neither it nor a row derived
-  from it (only human reviewer demands may become concerns/findings). The blind
-  judges read it
+  (any file types). The journal modes stage it beside the human feedback
+  (`feedback/llm/…`) and enumerate every remaining finding as a real concern
+  with the same standing as a human reviewer's point; the blind judges read it
   under `evidence/llm_review_feedback/…` and judge how a version addresses it.
   A finding is never dismissed merely because a model wrote it, and a row the
   authors still believe is wrong is closed `not-applicable`/`disagree` with a
@@ -1646,7 +1797,7 @@ producer, and a claim resting only on one is `unable -- placeholder input`. The
 real partner of a DECLARED placeholder stays evidence (declaring the ACT copy
 must not silence the HG008 original).
 
-### Package self-consistency: PKG-11, PKG-12, PKG-14 to PKG-26
+### Package self-consistency: PKG-11 to PKG-24
 
 Every scan below runs on each produced package and on every published copy, and
 its rows are seeded in the guided-review/audit/revision evidence pack. The table-
@@ -1851,12 +2002,9 @@ codex mcp add docx-compare -- node /path/to/repo/mcp-docx-compare/index.js
 ```
 
 `install_agent_tooling.sh` performs the `npm ci` and the registration for every
-harness it finds -- one `[mcp_servers.<name>]` entry per server in Codex, the
-same two servers in every DeepSeek Harness profile's `cordis.patch.yml`, and in
-Claude Code both skills under `$CLAUDE_HOME/skills/` plus the two servers through
-`claude mcp add --scope user` (without the `claude` CLI it installs the skills
-and prints the exact `claude mcp add` commands) -- so the two commands above are
-the manual equivalent for a single server.
+harness it finds -- one `[mcp_servers.<name>]` entry per server in Codex, and
+the same two servers in every DeepSeek Harness profile's `cordis.patch.yml` --
+so the two commands above are the manual equivalent for a single server.
 
 Both shipped MCP servers (`mcp-docx-compare/`, `mcp-docx-converter/`) need that
 `npm ci` step before they can start: `node_modules/` is never vendored, so a
@@ -2178,7 +2326,7 @@ copied next to `PROMPT.md` in every session sandbox (including the judge's, whos
 prompt names the same command); it carries no per-run data, and the judge's copy
 is stamped with the view timestamp.
 
-### Zotero live-field parity + automatic repair (`zotero-check` / `zotero-refresh`) and package integrity (M31–M36, PKG-1, FMT-PDF1–7)
+### Zotero live-field parity + automatic repair (`zotero-check` / `zotero-refresh`) and package integrity (M31–M36, PKG-1, FMT-PDF1–4)
 
 A manuscript's citations are live Zotero fields: the numbers in the text and the
 order of the bibliography are CACHED results of the last citation-processor run,
@@ -2307,70 +2455,42 @@ than a second round. `setup --audit off` (or `--no-audit`) restores the two-step
 plan and keeps an existing root's recorded policy; it costs one session per round, not per
 candidate.
 
-## The revision audit (`--revision-audit on`): revise → **revision audit** → bounded repair
+## Mandatory independent audits after LLM writing
 
-After the revise stage's own postcheck passes, one independent
-**REVISION AUDITOR** session re-reads `base/` and `revised/` against the frozen
-findings, the review audit's dispositions and the revision ledger. It edits
-nothing and writes ONE product, `revision_audit/REPAIR_PLAN.json` (plus a
-readable `REPAIR_PLAN.md`): one row per defect it confirms IN THE REVISION
-(a correction missing, a fact removed, a wrong value, a non-inferable manual
-item, a missing low-priority re-verification row, or a defect the revision
-introduced). Every row carries the location, the wrong and correct text, and a
-basis another session can re-run; a pure deletion carries its removed text in
-`wrong` and an empty `correct`. An empty plan is a valid, complete audit. The
-`wrong` value must be LITERAL text of the file it names (the shortest verbatim
-fragment that contains the change); a descriptive value — a line number, a
-parenthetical, several separated quotes — cannot be found or applied by the
-repair, so the audit rejects it before the repair session starts instead of
-failing the repair after it has already edited the package.
+Every LLM-WRITE agent except **bounded repair, rewriter and integrator** must
+pass an independent audit before its output can be consumed or published.
+This is a binding requirement in **AGENTS.md Rule 1C**, not an optional setting.
+Read/report-only reviewer, concern-enumeration, auditor and judge sessions are
+not classified as writers merely because they produce reports.
 
-The audit's own `revision_audit/DELETED_PARAGRAPHS.md` is checked, not taken on
-trust: every deleted base paragraph is disposed `OK — <why no fact is lost>`,
-`manual-required`, or `fact removed — RP-xxx`, and an `OK` row whose numeric
-value or identifier appears nowhere in the delivered package's own prose fails
-the audit (a fact recorded only in the author hand-off is `manual-required`, not
-`OK`). The same fact survival rule runs at the revise/rewrite/integrate
-postcheck whenever a deletion is permitted — the strict no-deletion mode already
-reports every missing unit — so a base sentence that has no counterpart in the
-delivered package may not take a value or identifier with it. Removing the
-sentence is not how a wrong value, name, definition or claim is repaired (rule
-D8); a value that cannot be decided from the package is recorded as
-manual-required, never dropped silently.
+| Writer | Audit object | Bounded repair owns |
+|---|---|---|
+| Reviser, including major/minor | Original base, findings/concerns, revised files and edit ledger; resolution, preservation, scope and introduced regressions | The revised package within the admitted scope |
+| Response writer | Every concern, exact manuscript changes, quoted feedback, response claims, citations and response map | Response letter/map only; never the manuscript |
+| Conforming/template agent | Original source, actual venue/template requirements, conformed files and preserved scientific meaning | Conformed output only; never source/templates |
+| Venue-profile author (`add-venue`) | Staged profile/README/downloads, original mandate and authoritative journal evidence | Staged store only; never the published store |
 
-An identity value is the same kind of fact, and the same three postchecks now
-reject two spellings of one address in the submitted prose: when two occurrences
-share their local part and their domains differ by at most two characters, one
-is a typo, and the package's own authoritative identity statement decides which
-(the front matter is corrected to it). A pair that is genuinely two people is
-recorded `manual-required` for the author in `README-AUTHOR-TO-COMPLETE.md` /
-`MANUAL_STEPS.md` beside the documents, and that record clears the gate. Only
-the package root's hand-off files are read: a same-named file in `work/` or an
-evidence area is scratch, not an author record, and cannot clear it. A near-miss
-that only appears in bookkeeping — a manual list that quotes the old spelling —
-is not scanned. The prompt states the matching rule, with the caption/pointer
-case beside it: a
-caption and the body sentence that references the same display must agree about
-what it shows, the body's claim decides when they disagree, and a pointer whose
-target does not carry the claim is corrected to the right number, never deleted.
+A **new independent session** audits the writer's exact bytes and writes an
+evidenced repair plan. A non-empty plan triggers **one separate bounded-repair
+session** which independently revalidates every row and edits only confirmed
+items. The repaired artifact must pass independent read-only verification and
+the role's original code-side checks. There is no recursive repair chain:
+residual defects, missing evidence, malformed audit output or a failed repair
+block acceptance and require an explicit retry or author action.
 
-When the plan is non-empty, ONE **BOUNDED REPAIR** session re-validates every
-row against `revised/`, `base/` and the source hierarchy, applies only the rows
-it confirms, records its verdicts in `revised/REPAIR_LEDGER.json`, and updates
-the changelog/report/manual items. The audited bytes are preserved as
-`revised_prerepair/`, and the revise postcheck runs again on the final package;
-there is exactly one repair pass (a defect the post-repair verification still
-finds is recorded for the round's decision, never repaired in a loop). If the
-repair violates its own contract — it changes a file, or a span, that no
-confirmed plan row covers — its edit is rejected and `revised/` is restored from
-`revised_prerepair/` before the final postcheck, so the rejected bytes never
-become the arm's candidate or the published package. The
-chain is on by default; `--revision-audit off` (setup) or
-`PAPER_REVISION_AUDIT=off` (an existing root) records the skip and leaves that
-arm's revised version final for the arm before integration. It does not run in a
-concern-scoped major/minor revision
-(those edits are confined to the admitted concerns) or for a round that is
-already decided.
+The revision chain retains `revision_audit/REPAIR_PLAN.json` and
+`revised/REPAIR_LEDGER.json`. Major/minor revisions now run this chain against
+the admitted concerns and regressions caused by their edits; they still have
+no general review or competitive judge panel. Other authoring roles keep their
+separate audit, repair and verification sandboxes under `write_quality/`, with
+`RESULT.json` and per-session command, prompt digest and transcript metadata.
+The acceptance record is bound to the exact artifact digest; later changes
+invalidate it. Manual/external output and `add-venue --publish-only` cannot
+bypass the mandatory audit. Supply an agent command to perform it.
+
+`--revision-audit off` is no longer accepted by setup. Existing off settings
+and `PAPER_REVISION_AUDIT=off` cannot disable the mandatory gate. `--audit off`
+still skips only the earlier review-disposition auditor.
 
 ## The cold-start review (`setup --cold-start-review on`): a second, independent discovery pass
 
@@ -2404,12 +2524,9 @@ operator names):
   (`"verifier": {script, computed, shows}`); findings without a computation are evidence rows like
   any other finding;
 * **the orchestrator re-runs every declared verifier at postcheck time** and compares the last
-  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). The
-  verifier is agent-written code, so it runs in a read-only bubblewrap jail (private namespaces,
-  no network, no `$HOME`, the sandbox read-only at `/sandbox`, a writable `/tmp` only). A mismatch
-  (or a missing script / non-zero exit / empty output / timeout / unavailable jail) FAILS the
-  attempt — a computation the cold-start review cannot reproduce is a correctness blocker, not a
-  finding, and it is never run with host access;
+  stdout line with the declared `computed` value (`cold_start_review/REPRODUCTION.md`). A mismatch (or
+  a missing script / non-zero exit / empty output / timeout) FAILS the attempt — a computation the
+  cold-start review cannot reproduce is a correctness blocker, not a finding;
 * every finding is an **`X-9xx` row** (the reserved cold-start-review block) of the same standing as the
   discovery round's `X-*` findings: it is merged into the frozen
   `guided_review/round2/findings_extra.json` of the auditor and every reviser (the source review sandbox
@@ -2489,7 +2606,7 @@ call, a cost or latency budget), and neither the profile contract nor the paged 
 model or window it runs on.
 
 `--execution-profile {high,medium}` (default `high`) selects the instruction profile. It is NOT a
-reasoning-effort setting (`PAPER_AGENT_REASONING_EFFORT` is a different axis) and it changes no
+reasoning-effort setting (`PAPER_QWEN_REASONING_EFFORT` is a different axis) and it changes no
 postcheck.
 
 * **`high`** is the default and inlines every rule. A default root writes no new config key and
@@ -2515,16 +2632,6 @@ postcheck.
   file, package or donor set, or the re-validation read that re-opens a cited location before an
   edit, and write-economy guidance never demands a format-invalid partial deliverable.
 
-**To choose between them for a weak or small model, measure — do not assume.**
-`medium` shrinks the per-call payload but ADDS read turns (the session slices
-`INSTRUCTIONS/PROFILE_RULES.md`) and, on a long stage, more compaction and more
-chances to lose the thread; `high` inlines the same rules once and removes the
-slicing. A 2026-11-13 27B arm under `medium` compacted seven times before it
-reached its bookkeeping. The first experiment for such a model is therefore to
-re-run the same root with `--execution-profile high`: the rules, the postchecks
-and the staged sessions are identical (that is what rule 12 means), so the
-comparison is about payload shape, not about a weaker contract.
-
 **`medium` is normatively equivalent to `high`** (AGENTS.md rule 12), and the equivalence is tested,
 not assumed. The paged file carries the blocks byte-for-byte (only a level-2 heading may be demoted
 one level so it cannot end a section), in the order their pointers occur in the prompt, so a session that
@@ -2545,30 +2652,26 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 126 KB | 55 KB | 56% |
-| cold_start_review | 63 KB | 27 KB | 56% |
-| audit | 91 KB | 48 KB | 47% |
-| revise | 122 KB | 68 KB | 44% |
-| integrate | 113 KB | 60 KB | 47% |
-| rewrite | 104 KB | 61 KB | 42% |
-| judge | 105 KB | 74 KB | 29% |
-| revision_audit | 38 KB | 16 KB | 57% |
-| revision_repair | 36 KB | 11 KB | 70% |
+| review | 119 KB | 49 KB | 58% |
+| cold_start_review | 60 KB | 24 KB | 59% |
+| audit | 88 KB | 46 KB | 48% |
+| revise | 117 KB | 63 KB | 46% |
+| integrate | 116 KB | 64 KB | 45% |
+| rewrite | 109 KB | 60 KB | 45% |
+| judge | 103 KB | 73 KB | 29% |
+| revision_audit | 23 KB | 13 KB | 41% |
+| revision_repair | 22 KB | 9 KB | 57% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
 those prompts is the one frozen beside it. `sync-code` and `retry` preserve the recorded policy. A
 root created before this feature carries no key and runs `high`.
 
-## Content-edit policy (`--disable-insertions`, `--disable-deletions`, `--enable-soft-deletions`)
+## Content-edit policy (`--disable-insertions`, `--disable-deletions`)
 
-By default the pipeline behaves exactly as it always has at the UNIT level: a revision may add
-prose, remove prose, or rewrite a sentence in place. The shared fact-survival gate (D8) still
-runs whenever a deletion is permitted — including this default — so a deleted sentence may not
-take a numeric value or identifier with it (see the fact-survival section above; a value that
-must leave the manuscript is recorded as `manual-required`). A defect is normally repaired inside
-its existing unit, but the prompts also permit an editorial decision to drop duplicate, obsolete
-or unsupported text, provided that deletion carries no value the package cannot account for.
+By default the pipeline behaves exactly as it always has: a revision may add prose, remove prose,
+or rewrite a sentence in place. A defect is normally repaired inside its existing unit, but the
+prompts also permit an editorial decision to drop duplicate, obsolete or unsupported text.
 
 Some evaluation harnesses score a DELETED claim as no repair at all, even when the error is gone
 (their definition of "repair" is "the original claim is back", not "the package no longer contains
@@ -2625,36 +2728,6 @@ it for one invocation without rewriting the root. It is OFF by default and the
 off path is byte-identical to the pre-feature pipeline: the prompt block is the
 verbatim legacy function, the stage records and the postcheck messages are
 unchanged, and no key is written to `pipeline_config.json`.
-
-### Soft deletions (`--enable-soft-deletions`)
-
-The middle policy between the two above. It exists because some revisions
-genuinely require a removal — a duplicated sentence, a leaked prompt or
-instruction block, an unresolved placeholder, an internal working note — while
-a sentence that carries a claim does not: that defect is corrected in place,
-and deleting the sentence silently drops the claim.
-
-* insertions and deletions stay ENABLED (this is not `--disable-deletions`), so
-  the genuinely removable units can still go;
-* the revise/rewrite/integrate/bounded-repair prompts state that only the
-  documented removable units may disappear, and that a claim-bearing unit must
-  be corrected in place or recorded `manual-required` with the text left in the
-  package;
-* the postcheck enforces it on the delivered package: a missing unit is accepted
-  when it is a duplicate whose other copy survives, a unit whose content tokens
-  are fully present in one delivered sentence (a merge), a prompt/instruction/
-  placeholder artifact, or the orchestrator's own pointer removal; every other
-  missing unit fails the attempt and the retry asks for the in-place correction.
-
-It is a pair (`--enable-soft-deletions` /
-`--disable-soft-deletions`), accepted by `setup` and `run`, OFF by default,
-and recorded in `pipeline_config.json` only when it was passed. With the mode
-off, the default permissive path and the other two modes are byte-identical.
-
-Independently of the unit policy, the removal accounting still applies: a
-finding whose quoted sentence is removed may not be recorded as `fixed` in the
-revision ledger — the ledger says `manual-required` with the removed claim, so
-the author decides (the postcheck re-reads every finding's evidence sentence).
 
 ## The rewrite-parity checks (M25–M29 + J5): making review do the rewrite's job
 
@@ -3147,7 +3220,7 @@ The artifact *process* is shared as well; the differences are deliberate:
 | `scores.json` (signed comparison items with class + severity) | judge | only the panel scores |
 
 **How a round is decided (one ranking key, every arm on the same terms):**
-the **ordered per-cell defect census over the adaptive
+the **cumulative defect count over the adaptive
 severity_tier_category prefix** (the canonical cell order is
 `fatal_correctness_peer, fatal_correctness_own, …,
 minor_formatting_own`: fatal, critical, major and minor -- the SAME four severity
@@ -3156,10 +3229,10 @@ the cells accumulating
 every ranked version's reported defect counts, and STOP
 at the first prefix where the version with the FEWEST defects reaches the
 configured floor -- default 10, `setup --tiebreak-defect-floor N` /
-`set-tiebreak-defect-floor N` -- or when every cell is used; the ORDERED CENSUS
-at that prefix LEADS the ranking, compared cell by cell in canonical order, so a
-fatal defect does not tie with several minor ones -- the cumulative total chooses
-the prefix but is not the comparator), then `-median`, then `-mean`, `IQR`,
+`set-tiebreak-defect-floor N` -- or when every cell is used; the cumulative
+count at that prefix LEADS the ranking -- the number of defects the panel
+attributed to a version is the most direct improvement signal, while the flat
+median is coarse on a -4..+4 integer scale), then `-median`, then `-mean`, `IQR`,
 the provenance-free content digest; the run id is only a deterministic sort
 fallback, never a champion input. Retention is applied first: if the key's leader
 is not the incumbent and that leader ties the incumbent exactly on (median, mean,
@@ -3284,7 +3357,7 @@ a clean panel. Each round's judge wave is followed by ITS OWN audit (two
 rounds produce two audits; `decide` only back-fills a round that has no audit
 yet). The LLM conflict auditor is OFF by default: only the mechanical conflicts
 are written, and every row keeps `origin: mechanical`. `--conflict-agent
-{codex-lite|codex|claude|dsh|qwen|dots|manual}` / `--conflict-agent-cmd JSON` (or the audit-specific
+{codex-lite|codex|claude|dsh|qwen|dots}` / `--conflict-agent-cmd JSON` (or the audit-specific
 `PAPER_CONFLICT_AGENT_CMD`) turn the LLM pass on for that invocation; its
 semantic candidates are schema-checked and merged, never trusted blindly
 (`--no-conflict-agent` and `--conflict-agent manual` keep it off). The separate
@@ -3384,7 +3457,7 @@ Now every attempt is recorded and its evidence is preserved:
 
 | where | what it holds |
 |---|---|
-| `state.json` → `runs.<id>.attempts_log` | one entry per attempt of the run — a full stage attempt, a scoped repair, a continuation, or a re-verify (which runs no agent) — with number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `artifact-repair` / `continuation` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript. The retry budget is charged once per failed attempt and reported per invocation (`[attempt N/M; …]` on the console, `N of M attempt(s) spent` in the FAILED line); auxiliary sessions are reported beside it, and `status` shows the lifetime split as `FULL+AUX`. The error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below |
+| `state.json` → `runs.<id>.attempts_log` | one entry per attempt: number, source (`postcheck` / `process` / `adopted` / `recheck` / `re-verify` / `manual`), timestamps, duration, status, the postcheck's errors and warnings, the decision-artifact quality report, the marker's own summary, and the paths of the attempt's archive and transcript (one entry per attempt, bounded by the run's `--retries` budget; the error/warning lists are **complete** — no message-count cap, 4000 characters per message plus a 512 KiB total guard per list, see below) |
 | `runs/<run>_try<N>_failed/` | the FAILED TRY's whole sandbox, renamed there before the retry builds a fresh `runs/<run>/`: the deliverables exactly as the postcheck judged them, the corpus copies, the agent transcript and a self-describing `record.json` (which names the attempts whose work it holds — a stage attempt and, when the scoped repair ran in it, the repair session too). `prune` reclaims these with the round they belong to |
 | `runs/_logs/<run>.<attempt…>.log` | transcripts of attempts whose sandbox was reset by a `retry` or a revalidation (a sandbox kept as `_try<N>_failed` keeps its own `_agent.log` inside) |
 
@@ -3397,20 +3470,6 @@ per session. `status` and `DECISION_REPORT.md` list every failed attempt with it
 first problem and the paths above, and `prune` reclaims the kept sandboxes of the
 rounds it prunes — the attempt RECORDS stay in `state.json`, so the history
 remains readable and says that the kept sandbox is gone.
-
-**Retries and auxiliary sessions are counted separately.** `[attempt N/M]` on the
-console is the retry-budget ordinal of the CURRENT invocation (a fresh `run`
-re-grants the budget, so a resumed run starts at attempt 1 again), so it can
-never exceed `--retries`+1; a scoped repair, a continuation or a re-verify that
-ran in the same sandbox is named after the semicolon (`[attempt 3/3; 2
-re-verifications]`), and the end-of-invocation FAILED line reads
-`2 of 3 attempt(s) spent; …`. A failed scoped repair or continuation spends the
-slot of the attempt it serves, never an extra one — the repair policy treats it
-as that attempt's failure. `status` shows the lifetime split as `FULL+AUX`
-(`2+1` = two full launches and one auxiliary session). The 2026-11-12 root
-printed `[attempt 5/3]` for its third launch because the display counted the two
-re-verifies of a process that died after writing complete artifacts as retries;
-the budget itself had not been overrun.
 
 A defect message is part of this record: a repeated disposition is now quoted in
 full and names the rows it is about (`-- rows: <document> / <heading> / para n`),
@@ -3464,38 +3523,27 @@ one instead:
   `dsh` preset, `dsh --profile headless --json --session-id <session-id> -`,
   the exact persisted session whose id its `--json` event stream named — the
   harness adopts a session by exact id only, so there is no `--continue`
-  equivalent and no id means no continuation). When the backend has no CLI
-  resume form (a custom `--agent-cmd`/`PAPER_AGENT_CMD`) the stage is still
-  continued: `resume_gate` returns the stage's OWN command and the continuation
-  runs as a FRESH process in the SAME sandbox, so every artifact on disk
-  survives and only the chat transcript is rebuilt (`last_resume.mode =
-  "sandbox"`). An attempt that *finished* and was rejected on content is not
-  continued either — that is the retry/repair path's business;
+  equivalent and no id means no continuation). A custom
+  `--agent-cmd` has no known resume form and gets a fresh attempt as before; an
+  attempt that *finished* and was rejected on content is not continued either —
+  that is the retry/repair path's business;
 * the continuation prompt names what stopped and what the postcheck said, and
-  tells the session to finish from where it is, marker last. A CLI continuation
-  says the context is still the session's; a SANDBOX continuation says the
-  transcript is not carried over and points at the sandbox instead. A
-  continuation that clears the postcheck is recorded as the attempt that
-  finished the stage (`source: "continuation"`); one that does not is a failed
-  attempt like any other and the retry policy takes over;
+  tells the session to finish from where it is, marker last. A continuation that
+  clears the postcheck is recorded as the attempt that finished the stage
+  (`source: "continuation"`); one that does not is a failed attempt like any
+  other and the retry policy takes over;
 * the budget is **at most 2 continuations per session id** (`resume_attempts`),
   counted across attempts, and the console says so when it is spent (`no
   continuation -- 2 continuation(s) already spent on this session (limit 2)`).
   `RESUME_PROMPT.md` is written into the sandbox for the session and removed
   afterwards; the continuation never replaces the scoped artifact repair, it runs
   before it.
-* a provider `413 Payload Too Large` / context-length failure (and a session the
-  proxy stopped for looping) is never continued by RESUMING the CLI session:
-  `codex exec resume` resends the oversized context and failed again in
-  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` / `runaway`
-  and continues in the SAME SANDBOX with a fresh process — which is exactly the
-  fresh context such a failure needs, and keeps the artifacts the stage already
-  wrote. Every prompt also carries a context-budget rule, requiring bounded
-  reads and contact-sheet-first visual inspection (every page is still examined;
-  only the byte transfer is bounded). The classifier reads the END of the
-  transcript (a bounded tail of each stream, not its 16 MiB head) and ignores
-  source lines the session merely printed, so a long session is classified by
-  what actually stopped it.
+* a provider `413 Payload Too Large` / context-length failure is never
+  continued: resuming resends the oversized context and failed again in
+  `neohet-to15` and `cnb-to33`. It is recorded as `context_overflow` and the
+  retry budget goes straight to a fresh context. Every prompt now also carries a
+  context-budget rule, requiring bounded reads and contact-sheet-first visual
+  inspection (every page is still examined; only the byte transfer is bounded).
 
 ### `--strict-artifacts fix`: one scoped repair session instead of a full re-run
 
@@ -3512,19 +3560,8 @@ which files may change, and which evidence is pinned:
 |---|---|---|---|
 | `review` | the decision-artifact quality problems (empty cells, boilerplate closures, echoed OUTLINE summaries), the M1b long-form gate (undisposed residue rows — the class that failed the 2026-09-22 roots), a missing visual record | `guided_review/artifacts/` (the seeded tables **including `M1_acronyms.md`**), `guided_review/work/` | every table's row identity, all headers and column orders; `findings.json`/`md`, `round2/`, the other artifact files |
 | `audit` | `audit.json` missing/unparseable/duplicated/missing dispositions | `audit/` | every existing disposition and every `adds` row; **new dispositions must be `confirm`** (a drop hides a finding from the revisers and needs the auditor's own evidence) |
-| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the seeded revise ledger's empty verdict cells and the language-pass coverage cells, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs; every seeded row's identity |
+| `rewrite` / `revise` / `integrate` | an EMPTY/thin report or ledger the stage wrote (`REWRITE_REPORT.md`, `revision_report.json`, `DIFF_LEDGER.md`: blank cells, wrong level, missing `artifact` rows), the language-pass coverage rows, the visual record, the marker | the package's bookkeeping files the stage wrote (by name) and its existing `work/` files | every manuscript file of the package; the frozen review; the corpus inputs |
 | `judge` | a missing `checks` coverage map, `score`/`basis` that contradict the sheet's own ledger, bookkeeping ids, a missing grounding record | `scores.json`, `judge_review/` | `resolved`/`introduced` (the ledger IS the judgement), the comparison set, existing coverage entries; new coverage entries must be `unable` |
-
-**The revise arm starts with the two late deliverables EMPTY-BUT-SHAPED.** At
-materialization the pipeline seeds `revised/revision_report.json` with one row per
-frozen finding id (empty verdict/rationale/evidence) and
-`revised/work/R6_language.md` with the L1-L11 coverage rows (empty counts). The
-seed is a head start, never a pass: an empty verdict or an empty coverage cell is
-still a postcheck ERROR (and the scoped repair may complete the cells from the
-package's own evidence), while the completion marker is deliberately NOT seeded —
-a stage that stopped before it is UNFINISHED and is continued, not repaired. The
-reason is the 2026-11-13 arm that wrote the revised brief and stopped three
-bookkeeping files short: the failure was a one-line omission, not a missing review.
 
 **Variant B — a repair finishes the paperwork of work that happened, it never
 substitutes for the work.** A repair may only CHANGE files the stage itself
@@ -3659,7 +3696,7 @@ Two layers keep it from growing like that: `compact_state()` replaces the
 redundant bulk with the counts, the corpus digest and the path of the full file
 before every save (`runs.<judge>.judge_evidence` -> `reports/judge_evidence_<id>.json`,
 `runs.<id>.evidence_after` -> `runs/<id>/CODE_SCANS_after.json`, `runs.<id>.format_fix`
--> `runs/<id>/FORMAT_FIX_<id>.json`; those copies were 56 MB of that registry, and the
+-> `runs/<id>/FORMAT_FIX.json`; those copies were 56 MB of that registry, and the
 root's registry drops to ~6 MB on its next save), and every save keeps the
 previous registry as `state.json.prev` — a hard link, so it costs no bytes or
 I/O. When a registry really cannot be read, the message says WHICH way it is
@@ -3682,19 +3719,18 @@ its four integration runs never started.
 |---|---|
 | `paper_pipeline.py` | thin loader for the orchestrator; it executes the ordered `paper_pipeline_parts/` in its own globals (setup / run / run-decide / decide / retry / status / selfcheck / prune / redline / track) |
 | `paper_pipeline_parts/` | the orchestrator's implementation, split by domain (prelude, venues, journal modes, prompts, utilities, state/corpus, postchecks, stage quality, selection/driver, setup, reports, audits, conflicts/decide, redlines, tracking, PDF, retry, CLI) — every file is under 10,000 lines |
-| `agent-common/` | the required runtime submodule (`agent_common/model_runtime.py`, `llm_retry.py`, `llm_policy.json`, `model_catalog.json`, `dsh_events.py`); initialize it with `git submodule update --init --recursive` — the loader refuses to start without it |
 | `pairwise_scores.py` | builds a per-round directed score workbook from `reports/round*_raw_scores.csv`; uses each judge's `own` frame and never invents the opposite direction from the derived `received` row |
 | `paper_docx_format.py` | thin loader for the OOXML style/formatting scanner, fixer and blank-page checker |
 | `paper_docx_format_parts/` | the formatter's implementation (core XML/field primitives, text rules, layout/edit rules, report + CLI) — every file is under 10,000 lines |
 | `paper_redlines_adapter.py` | tracked-changes bridge (`python-redlines[docxodus]`) |
-| `paper_qwen_agent.py` / `paper_dots_agent.py` / `paper_model_agent.py` | provider adapters behind `--agent-model` (`qwen38-27b` / `dots3-note-preview`); all are frozen into a root by `setup` and carried by `sync-code` |
+| `paper_qwen_agent.py` / `paper_dots_agent.py` / `paper_model_agent.py` | provider adapters behind `--agent-model` and the legacy `--agent qwen`/`--agent dots`; all are frozen into a root by `setup` and carried by `sync-code` |
 | `AGENTS.md` | the agent-facing contract (rules the sessions and reviewers are held to) |
 | `revision_history/` | the dated working records — audit findings, revision plans, validation ledgers and the history log; repository bookkeeping, never submitted |
 | `revision_history/REMAINING_ISSUES_TRIAGE_2026-1009.md` | the 2026-10-09 human triage of the two audited final packages |
 | `revision_history/ZOTERO_REFRESH_FORENSICS_2026-1009.md` | the 2026-10-09 Zotero live-field forensics that M36/FMT-Z grew from |
 | `docx2pdf.sh` | Word→PDF conversion via PowerShell (WSL/Git Bash) |
 | `docxcompare.sh` | Word→redline comparison via PowerShell (WSL/Git Bash) |
-| `mcp-docx-converter/` | the `docx-converter` MCP tool (the MCP route to Word rendering; the agents' first choice is `docx2pdf.sh`) |
+| `mcp-docx-converter/` | the `docx-converter` MCP tool used as the first-choice renderer |
 | `mcp-docx-compare/` | the `docx-compare` MCP tool (Word's own compare engine, first choice for tracked changes) |
 | `paper-skills/` | the bundled review (`paper-review`) and revision (`paper-revise`) skills + prompts |
 | `install_dependencies.sh` | installs the conda env, Node MCP dependencies, agent skills/MCP rows and the external Zotero checkouts; writes checkout-relative `deps.env` + `activate-deps.sh` |
@@ -3761,7 +3797,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 304 suites (a few
+any failure. They are independent, so run them in parallel — 198 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash
@@ -3780,7 +3816,7 @@ need `python-docx` and will report it missing.)
 
 Each suite runs in its own `TMPDIR` and writes `<logs>/<suite>.log`; a suite that
 fails is re-run alone once, so a timing-sensitive suite that merely lost a race
-with the other suites is reported as `flaky` (named, exit 0) while a real failure
+with seven siblings is reported as `flaky` (named, exit 0) while a real failure
 keeps its `[FAIL]` lines and exit 1. The raw one-liner, if you prefer GNU parallel
 directly (`mkdir -p /tmp/paper-logs && export PAPER_TEST_RUNDIR=/tmp/paper-logs`):
 
@@ -3845,9 +3881,8 @@ compatibility for a root with no `venue`/`article_type` key.
 
 ## Backward-compatibility removals (2026-10-25)
 
-This tree deliberately keeps **no** compatibility aliases, with the single
-documented exception below. The breaking changes an older command line or root
-can hit:
+This tree deliberately keeps **no** compatibility aliases. The breaking changes
+an older command line or root can hit:
 
 * input areas have ONE canonical name each: `non_revised/` and `raw_data/`.
   `non-revised/` and `raw_figs/` are refused by `setup` and by every command
@@ -3859,10 +3894,6 @@ can hit:
 * the boolean `strict_artifacts` / `strict_dispositions` config keys are no
   longer read; the current key is the three-valued `artifact_policy`.
 * `set-revision-mode none` is removed; the mode is `continue`.
-* `--almost-fail` / `--no-almost-fail` are accepted as HIDDEN aliases of
-  `--tolerate-fail` / `--no-tolerate-fail` (the previous spelling of the same
-  policy; `setup` and `run` both accept them). The canonical spelling is
-  `--tolerate-fail`; the aliases are suppressed from `--help`.
 * a root without `judge_salt` is refused when a judge token is needed; there is
   no unsalted fallback.
 * `paper_pipeline.py` and `paper_docx_format.py` are now thin loaders over
@@ -3892,3 +3923,5 @@ Rules 1A and 1B.
 
 The full rule set is [AGENTS.md](AGENTS.md); it binds every code, prompt, test and
 documentation change in this tree.
+
+Workflow diagrams for all seven modes, with editable sources and vector PDF/SVG exports, are in [figures/workflows](figures/workflows/README.md). Implementation findings and validation are recorded in [the workflow audit change report](revision_history/2026-11-25-mandatory-write-audits.md).

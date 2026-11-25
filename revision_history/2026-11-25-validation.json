@@ -1,0 +1,830 @@
+{
+  "base_commit": "660d640b4a5bd73eb2dea3701651df8684493640",
+  "total_suites": 198,
+  "passed": 188,
+  "baseline_reproduced_environment_failures": 10,
+  "new_workflow_audit_test_count": 25,
+  "new_workflow_audit_suite": "passed",
+  "method": "195 completed suites from interrupted broad run plus four recovery reruns; latest result per suite",
+  "suite_results": {
+    "test_acronym_longform.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_adversary_gaps_2026_1008.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_agent_consistency_2026_0922.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_agent_model_harness_2026_1110.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_agent_security_trace.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_anonymized_judging.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_arm_levels_1_prompts.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_arm_levels_2_language.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_arm_levels_3_rubric_round.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_artifact_repair.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_atomic_prompts.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_attempt_history.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_audit_bugs.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_audit_gaps_2026_1007.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_bug_audit_2026_0919.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_candidates.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_candidates2.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_champion_select_2026_1025.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_change_requests_1_plan.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_change_requests_2_integration.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_change_requests_3_cli.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_change_requests_4_e2e_default.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_change_requests_5_e2e_custom.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_cold_start_review_2026_1012.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_contradictions_2026_1015b.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_counting_convention_2026_1024.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1010.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1011.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1012.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1013.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1014.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1015.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1016.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1017.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1017_serial_audit.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1018.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1018b.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1019b.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1024_counting_pkg9.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1024b.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_2026_1024c.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_round2_2026_1010.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_debug_round2_2026_1011.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_decide_antiregression.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_defect_audit.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_design_audit_2026_0919.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_difference_tracking_1_names.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_difference_tracking_2_pass.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_difference_tracking_3_pdfs.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_difference_tracking_4_e2e.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_difference_tracking_5_stage_hooks.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_discovery_parity_2026_1010.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_display_rules.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_document_recovery.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_compare.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_converter.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_format_1_scan_fix.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_format_2_rules.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_format_3_render_validate.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_docx_format_4_pipeline.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_docx_format_5_caption_blocks.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_dots_provider_2026_1110.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_dsh_backend.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_email_address_policy_2026_1027.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_evidence_pack.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_evidence_symlinks.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_execution_profile.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_final_clean_version.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261025_stage.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261026_stage.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261026_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261026_wave2.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261027_074031.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261027_120003.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261027_202052.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261027_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261027_wave2.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261028_120031.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261028_201142.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261028_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261029_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261030.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261030_201726.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261031_053155.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261031_180026.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261031_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261101_220000.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261101_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261102_004546.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261102_120000.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261103_021744.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261104_stage.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261105.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261105_eval.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261105_pr536.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261105_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261105_wave2.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261106.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261106_wave2.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261107_selfcheck_and_coverage.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261107_wave1.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261108.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_20261108_wave2.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_fix_bugs_20261111.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_2026_1025.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fix_bugs_2026_1025_verified.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_fixes.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_focused_audit_2026_1009.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_format_hygiene.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_general_audit_2026_1002.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_general_audit_fixes_2026_1002b.py": {
+      "status": "baseline_reproduced_environment_failure",
+      "exit_code": 1
+    },
+    "test_general_audit_fixes_2026_1002c.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_grading_scheme.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_hash_cache.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_hierarchy_reconciliation.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_human_review_feedback_area.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_identifier_correction_policy_2026_1027.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_input_area_names.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_install_dependencies.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_integrate_diagnostics.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_issue_census.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_only.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_1_major.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_2_minor_transfer.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_3_resubmit_guard.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_4_default_init.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_5_feedback.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_6_response_reset.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_7_scoped_prune.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_journal_revision_modes_8_review_split_init.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_judge_blinding.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_judge_conflicts.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_layout_integrity_2026_1019.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_length_limits.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_llm_review_feedback_area.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_llm_stochastic_failures.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_mandatory_write_audits.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_manu_sub_audit_2026_1017.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_manual_todo_classification_2026_1027.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_number_range_2026_1025.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_1_run_plan.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_2_session_selection.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_3_agent_ids.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_4_integrator_mask.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_5_judges_per_round.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_6_judge_sessions.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_7_judge_the_pinned_base.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_only_rounds_8_agents_command.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_package_hygiene_2026_1015.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_package_integrity_2026_1009.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_pairwise_scores.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_parallel_scheduling_1_dag.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_parallel_scheduling_2_order.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_parallel_scheduling_3_failures.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_parallel_scheduling_4_jobs_cap.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_parallel_scheduling_5_retry.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_pipeline.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_pipeline_audit_findings.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_pkg2_submission_surface_2026_1015.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_prefer_rewrite_over_deletion.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_prompt_contradictions_2026_1024.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_qwen_provider_2026_1019.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_ranking_core.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_raw_data_evidence_area.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_raw_data_readonly.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_redesign_v3.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_redline_fidelity.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_reference_integrity.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_repair_fixes_20261104.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_residual_audit_2026_0921.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_resume_continuation.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_review_handoff_2026_1015.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_revision_audit_2026_1026.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_revision_token.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_round2_regressions_2026_1019.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_round2_sweep_2026_1009.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_round_indices.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_skill_evidence_dirs.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_skip_hash.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_source_layout_2026_1025.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_1_signals.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_2_recovery.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_3_selfcheck.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_4_registry.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_5_recovery_e2e.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_signals_and_rebuild_6_revision_ledger.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_stage_subset.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_submission_code_area.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_trend.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_two_sided_checks.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_typo_policy_2026_1026.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_venue_config.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_venue_template_conformance.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_venue_templates.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_zotero_auto_refresh_2026_1011.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_zotero_field_continuity.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_zotero_integration.py": {
+      "status": "passed",
+      "exit_code": 0
+    },
+    "test_zotero_refresh_parity.py": {
+      "status": "passed",
+      "exit_code": 0
+    }
+  },
+  "runtime_part_sha256": {
+    "p00_prelude.py": "7bc96b5d758468c1baa58267cb03fd7a7306331e63b07d80b729cbfb6b2d214c",
+    "p01_venues.py": "623b8b22dba96284f3000adc2fa54dc2a23f14c6f8b1075c341edd9e0cf94bf4",
+    "p02_journal_modes.py": "29481cef1828ca1b4959373791d68a232c16b5247ebe952678dbdda61e8601fb",
+    "p03_prompts.py": "557113e643a72cc9f1abd77462dec60434b9fdaa81473d935e32d9fe55fa20f5",
+    "p04_utils.py": "cc5da83a4888aee97a4a38d0c033328aaffd325192a6f084a57557b2f883eb72",
+    "p05_state_corpus.py": "3ee5f7e04f4a4284bdd32bd1e0fa5af1fe3adc7869bf1b707a6d44fed20f2fa6",
+    "p06_postchecks.py": "f72366f594bccb4794950f75dfcc456cf29b237670c0ecdb9d28b68816ed9234",
+    "p07_stage_quality_journal.py": "08ec2ded5fa64dd38c568666a998e9273da5b4288548b6e20a1094e627f4092c",
+    "p08_selection_driver.py": "65a0cd4eea2cbfdf00a67ba700cf9d51cff712dd006eb68bf7b9694d2bd637fd",
+    "p09_setup.py": "1e4e4a69411c9a58c4ed3f43faeca5a4bc875058fabbdd909a796dd3064d71e2",
+    "p10_reports.py": "8b6f3f8cf6c6bf96f9775770ad9601c437b3570f39aaac5c62ccca7cfa8d9e93",
+    "p11_defect_audit.py": "87231096a08545e685b223bc2b6983e1d7633ebb96ed51160dd9e2605d20e155",
+    "p12_conflicts_decide.py": "b429d3c67dad33fa31fddebbe7c525850a983aa2731912223dcaf54dec4df523",
+    "p13_redlines.py": "76ec6a873113d163085f6451fff8708dd6814845afc3b7811a228467793189e5",
+    "p14_tracking.py": "0c25e3024c0aac197f15bfce4f1f471fa78b70f59fed191dca5e3d15ca2cded9",
+    "p15_pdf.py": "1f3bd5bd7f044850a9213244c66305d46b9cb8191df2156533977b67c475e16e",
+    "p16_retry.py": "75b6a4f318d549ac527f6f9dac45a7b767a64a339a98cec97fe49f0189b7f5f9",
+    "p17_cli.py": "5773adb808f7e519f93af152694c7197508fbc420a22c6e7a14026445487af71",
+    "p18_helpers.py": "c97f24185d86585d5fd8183c6f00570b3f6377ba38280987b18d60898598ba80",
+    "p19_profiles.py": "a27b1b0375c6d7ed2143731bc368985135577c9cdc6b3741a8d227a287f21966",
+    "p20_write_quality.py": "26796865523015290d2923bb0eaeef924f40e04cb9f90404416befbf61d2e1ef"
+  },
+  "final_structure_profile_rerun": {
+    "test_source_layout_2026_1025.py": "passed",
+    "test_execution_profile.py": "passed"
+  }
+}

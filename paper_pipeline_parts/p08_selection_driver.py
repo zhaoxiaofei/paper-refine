@@ -1,17 +1,9 @@
 # -*- coding: utf-8 -*-
-# Part 08/25 of the pipeline -- executed by the
+# Part 08/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
 from __future__ import annotations
-
-# The turn cap counts the harness's own turn-end events. `agent_common` is
-# importable from part 1 onward; the default agent (dsh, --json) is the one
-# that emits them.
-from agent_common.dsh_events import (
-    is_turn_end as _is_turn_end,
-    parse_event as _parse_event,
-)
 
 # =====================================================================
 # AGGREGATION (Section D -- pure deterministic code, no LLM arithmetic)
@@ -46,9 +38,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
         version it started from.
     """
     field_ids = list(field_ids)
-    k0 = len(field_ids)
-    slot_problems = set()          # versions whose panel has a dup/missing opponent
-    sheet_slots = {}               # (target, judge index) -> set(opponents seen)
     # `dedup` is the mode the round was DECIDED with when a decision is being
     # re-derived. `decide` passes the recorded value: reading today's config
     # here re-counted a past round under a mode the operator changed afterwards
@@ -66,11 +55,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     per_judges = {vid: (int(round_judges(ctx, r)) if not selection
                         else len({k for v, k in selection if v == str(vid)}))
                   for vid in field_ids}
-    # A selected session whose TARGET was deduplicated out of the field has no
-    # row in `per_judges`; the old expectation then became 0 for every version
-    # and a zero-score panel read as complete (F21). It is an unresolved gap.
-    selection_unresolved = sorted({str(v) for v, _k in selection}
-                                  - {str(v) for v in field_ids}) if selection else []
     diags = {"sheets_used": 0, "sheets_expected": sum(per_judges.values()),
              "scores_collected": 0, "unresolved": [], "incomplete_sheets": [],
              "superseded_sheets": [], "out_of_range_sheets": [],
@@ -124,15 +108,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     for rec in sorted(sheets, key=lambda x: (str(x.get("finished") or x.get("created") or ""),
                                              str(x.get("id")))):
         slot = (rec.get("target_id"), rec.get("judge_index"))
-        # A newer DONE record with no usable score sheet must not SUPERSEDE an
-        # earlier valid one: only a sheet that can contribute scores is a
-        # candidate for its slot (F055).
-        _sj = rec.get("scores")
-        if not isinstance(_sj, dict) or not (_sj.get("comparisons") or []):
-            diags.setdefault("unusable_newer_sheets", []).append(
-                f"{rec.get('id')}: no usable score sheet; an earlier sheet for "
-                f"{slot[0]} judge j{slot[1]} stays in force")
-            continue
         if slot in newest:
             old = newest[slot]
             diags["superseded_sheets"].append(
@@ -177,21 +152,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     f"{rec['id']} vs {label}: every frozen check is `unable`; the "
                     f"comparison is an abstention, not a judgment")
                 continue
-            # A duplicated opponent + an omitted one keeps `len(flat)` at the
-            # expected count: cardinality alone cannot see the missing
-            # comparison. Track the (target, judge, opponent) slot instead.
-            skey = (vid, rec.get("judge_index"))
-            seen_opps = sheet_slots.setdefault(skey, set())
-            if opp in seen_opps:
-                diags.setdefault("duplicate_comparisons", []).append(
-                    f"{rec['id']}: {vid} vs {opp} is reported twice; the duplicate "
-                    f"is ignored and the panel is incomplete")
-                # Only the SHEET's target is incomplete: the duplicate is this
-                # target's sheet defect and adds no score to either side, so the
-                # opponent's own directed counts stay exactly as expected (F095).
-                slot_problems.add(vid)
-                continue
-            seen_opps.add(opp)
             census_obs.append((rec.get("id"), vid, opp, comp))
             per[vid]["own"].setdefault(opp, []).append(int(score))
             per[opp]["received"].setdefault(vid, []).append(-int(score))
@@ -210,15 +170,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     "reason": (str(comp.get("reason")) if comp.get("reason") else "")[:200],
                 })
             diags["scores_collected"] += 1
-        # After the WHOLE sheet, not after each comparison: an opponent is
-        # missing only when no comparison in this sheet named it.
-        missing = ({o for o in field_ids if o != vid}
-                   - sheet_slots.get((vid, rec.get("judge_index")), set()))
-        if missing:
-            diags["incomplete_sheets"].append(
-                f"{rec['id']}: no comparison against {', '.join(sorted(missing))} "
-                f"for {vid}")
-            slot_problems.add(vid)
     k = len(field_ids)
     # Directed scores per version = judges * (|field|-1) own scores plus
     # (|field|-1) * judges negated received scores = 2 * judges * (|field|-1).
@@ -233,14 +184,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
                     + (enabled_total - per_judges.get(vid, 0))
                     for vid in field_ids}
     expected = 2 * judges * (k - 1)
-    # With a `run --only r1_judge_*` selector the enabled sessions define a
-    # SMALLER panel; recording the full configured expectation made the frozen
-    # record claim a panel that did not run (F169). Keep the scalar only when
-    # every version really has that many scores; otherwise record None and let
-    # the per-version map carry the truth.
-    selection_active = any(per_judges.get(vid, 0) != judges for vid in field_ids)
-    if selection_active:
-        expected = None
     # The round's base A1_r is content-identical to one of the field members
     # (the pristine original in round 1, the previous round's pin later on) and is
     # therefore deduplicated out of the field. That member's row IS the base's
@@ -293,9 +236,7 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             "digest": recorded_version_digest(ctx, r, vid),
             "n": len(flat),
             "expected_n": expected_for.get(vid, expected),
-            "complete": (len(flat) == expected_for.get(vid, expected)
-                         and vid not in slot_problems
-                         and not selection_unresolved),
+            "complete": len(flat) == expected_for.get(vid, expected),
             "median": float(statistics.median(flat)) if flat else None,
             "mean": float(statistics.fmean(flat)) if flat else None,
             "iqr": iqr_of(flat) if flat else None,
@@ -324,18 +265,12 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             # a human reads, and the sign count), never a ranking input -- the
             # pair is too small for one outlier session not to flip it.
             "vs_base_vals": sorted(int(x) for x in base_vals),
-            # J(V) + J(base): the same ENABLED per-version judge counts
-            # `vs_original_expected` uses, so a `--only` selection that skipped a
-            # judge session does not report a pair expectation the panel could
-            # never reach (a full panel is 2*judges).
-            "vs_base_expected": (0 if base_rep in (None, vid) else
-                                 per_judges.get(vid, judges)
-                                 + per_judges.get(base_rep, judges)),
+            "vs_base_expected": (0 if base_rep in (None, vid) else 2 * judges),
             "is_base": vid == base_rep,
             "own_counts": {opp: len(v) for opp, v in sorted(st["own"].items())},
             "received_counts": {opp: len(v) for opp, v in sorted(st["received"].items())},
             "judges_seen": st["judges"],
-            "judges_expected": per_judges.get(vid, judges),
+            "judges_expected": judges,
             # Advisory information only (see caption_gate): the orchestrator
             # reports caption lengths and hand-off placeholders, it never gates
             # or ranks anything on them.
@@ -349,10 +284,6 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
             diags["incomplete_sheets"].append(
                 f"{vid}: {len(flat)} of {expected_for.get(vid, expected)} directed "
                 f"scores collected")
-    for _vid in selection_unresolved:
-        diags["incomplete_sheets"].append(
-            f"{_vid}: a selected judge session targets a version that is not a field "
-            f"member, so its panel can never be complete")
     # Missing-sheet diagnostics, driven by the RECORDED sessions (a recomputed
     # token would miss legacy/unsalted ids and misreport whole panels as absent).
     for vid in field_ids:
@@ -387,23 +318,27 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
     ranges = [max(vals) - min(vals) for vid in field_ids
               for vals in (per[vid].get("own") or {}).values() if len(vals) >= 2]
     pq["within_direction_range_max"] = max(ranges) if ranges else 0
-    # F211: the panel-quality statistics use the SAME accepted comparisons the
-    # scoring loop used (`census_obs`), not a fresh scan of every comparison in
-    # an accepted sheet. An unissued label, an out-of-range score, an abstention
-    # or a duplicate opponent was rejected for scoring and must not shift the
-    # diagnostics either.
-    accepted_by_rec = {}
-    for _rid, _vid, _opp, _comp in census_obs:
-        accepted_by_rec.setdefault(_rid, []).append(_comp)
     for rec in accepted_recs:
-        comps = accepted_by_rec.get(rec.get("id")) or []
-        vals = [int(c["score"]) for c in comps if is_int(c.get("score"))]
+        # The SAME accepted roster scoring used: superseded, out-of-range and
+        # disabled sheets are already excluded above. Re-scanning every done
+        # sheet here let a superseded sheet change basis counts, calibration
+        # totals and judge means (F-053).
+        if not isinstance(rec.get("scores"), dict):
+            continue
+        vals = [c.get("score") for c in (rec["scores"].get("comparisons") or [])
+                if isinstance(c, dict) and is_int(c.get("score"))]
         if vals:
             pq["judge_means"][rec["id"]] = round(sum(vals) / len(vals), 3)
         # ---- graded-basis calibration (judge contract v2+) -----------------
-        n_comps = len(comps)
+        # How many sheets carry a checkable basis, what tiers they claim, and
+        # where an integer contradicts its own ledger. Reported, never used for
+        # eligibility: the score statistics above stay the ranking input.
+        n_comps = 0
         n_with_basis = 0
-        for c in comps:
+        for c in (rec["scores"].get("comparisons") or []):
+            if not isinstance(c, dict):
+                continue
+            n_comps += 1
             basis = str(c.get("basis") or "").strip().lower()
             if basis in BASIS_VALUES:
                 n_with_basis += 1
@@ -521,7 +456,7 @@ def candidate_tiebreak_inputs(ctx: Ctx, r: int, vid: str) -> tuple:
         for rel in MANUAL_STEPS_RELS:
             n = count_manual_steps(sb / rel)
             if n is not None:
-                manual = _valid_count(n)
+                manual = n
                 break
     return crit, writing, manual
 
@@ -542,6 +477,85 @@ def _valid_count(v):
     return int(v) if int(v) >= 0 else MISSING_TIEBREAK
 
 
+# ---- the champion selection key (2026-10-01 calibrations) ------------------
+# `fatal -> critical -> major -> minor -> median -> mean -> IQR -> digest`,
+# where the fatal -> ... -> minor stage is the ADAPTIVE DEFECT PREFIX below:
+#   * the DEFECT PREFIX LEADS (fourth calibration): the number of defects the
+#     panel attributed to a version is the most direct improvement signal, and
+#     the panel median is coarse on a small integer scale;
+#   * the median, the mean and the IQR are the panel statistics BELOW it;
+#   * the defect counts come from the round's issue census and are compared
+#     CELL BY CELL in canonical `severity_tier_category` order (the walk grows
+#     the prefix until the cleanest ranked version carries
+#     `tiebreak_defect_floor` defects or every cell is included): each cell is
+#     its own lexicographic rung, so a fatal defect never ties a minor one.
+#     The cells are counts, not rates -- every ranked version's opportunities
+#     are the same in a complete panel, so the exposure normalization
+#     (own/peer) is carried by the cell ORDER (peer before own);
+#   * the counts are the mentions each judge sheet filed (collapsed only per
+#     session+version, never matched across sheets by default), with the opt-in
+#     `dedup_mode` "location" available when the operator wants the
+#     structured-key merge;
+#   * the median, then the mean, break a tie ONLY when the whole ordered census
+#     is equal (the panel statistics are coarse on small integer scores);
+#     IQR/digest stay below it as the deterministic fallbacks, and the
+#     incumbent-retention rule (an exact median/mean/IQR tie keeps the base)
+#     is unchanged.
+# The adaptive defect-prefix tie-break (2026-10-01, fifth calibration):
+#   * cells are ordered `severity_tier_category`: fatal, then critical, then
+#     major, then minor, tier by tier in the scoring priority order, and within
+#     a (severity, tier) cell `peer` before `own`. 48 cells -- the SAME four
+#     severity rungs the census, the judge contract and the score model use, so
+#     every artifact speaks one vocabulary (an earlier 36-cell variant merged
+#     fatal+critical for the walk; it was reverted for consistency);
+#   * walking that order, the counts are accumulated for every ranked version and
+#     the walk STOPS at the first prefix where the version with the FEWEST
+#     defects already carries `tiebreak_defect_floor` of them (default 10, a
+#     CLI/config parameter), or when every cell is included;
+#   * the version's ordered per-cell census at that prefix is the leading key
+#     (fewer defects, and a worse severity earlier, is worse). The median is
+#     consulted ONLY when the whole census is equal, then the mean, IQR, digest
+#     and id.
+# Rationale: a per-cell count is tiny and fluctuates; accumulating cells in the
+# order the scoring semantics prioritises grows the evidence until the cleanest
+# candidate has enough counts (or there is nothing left to add), and the single
+# accumulated number is more reliable than the mean of small integer scores.
+# [(group name, the census severities it sums)], in the tie-break's rung order.
+# Every rung is ONE census severity: the lattice, the long-form census, the
+# judge contract and the score model all use the same four rungs.
+TIEBREAK_SEVERITY_GROUPS = (("fatal", ("fatal",)),
+                            ("critical", ("critical",)),
+                            ("major", ("major",)),
+                            ("minor", ("minor",)))
+# Convenience: the flat rung order (fatal, critical, major, minor) -- the walk
+# order, also used for the report table's severity columns.
+SEVERITY_TIE_ORDER = tuple(name for name, _sev in TIEBREAK_SEVERITY_GROUPS)
+TIEBREAK_SOURCES = ("peer", "own")
+# Historical name: the defect prefix now LEADS the ranking (it is not a
+# tie-break any more); this constant still governs how far the walk accumulates
+# before it stops, and the `--tiebreak-defect-floor` CLI/config name is kept for
+# compatibility with existing roots.
+DEFAULT_TIEBREAK_DEFECT_FLOOR = 10
+
+
+def tiebreak_cell_specs() -> list:
+    """[(severity group, tier, source)] in the canonical `severity_tier_category` order."""
+    return [(name, tier, src) for name, _sev in TIEBREAK_SEVERITY_GROUPS
+            for tier in BASIS_TIERS for src in TIEBREAK_SOURCES]
+
+
+def tiebreak_cell_names() -> list:
+    return [f"{name}_{tier}_{src}" for name, tier, src in tiebreak_cell_specs()]
+
+
+def tiebreak_group_severities(name) -> tuple:
+    """The census severities one tie-break rung sums (itself for major/minor)."""
+    for group_name, severities in TIEBREAK_SEVERITY_GROUPS:
+        if group_name == str(name):
+            return tuple(severities)
+    return ()
+
+
 def tiebreak_defect_floor_of(ctx) -> int:
     """The configured prefix floor (>= 0); DEFAULT_TIEBREAK_DEFECT_FLOOR when unset."""
     raw = (getattr(ctx, "cfg", None) or {}).get("tiebreak_defect_floor")
@@ -554,6 +568,52 @@ def tiebreak_defect_floor_of(ctx) -> int:
 
 def _census_for(vid, agg) -> dict:
     return ((agg or {}).get("issue_census") or {}).get(str(vid)) or {}
+
+
+def _census_row(vid, census) -> dict:
+    """One version's census row out of a bare `{vid: row}` map."""
+    return ((census or {}).get(str(vid)) or {})
+
+
+def issue_matrix_and_cumulative(census, versions) -> tuple:
+    """(cell names, per-version counts per cell, per-version prefix sums).
+
+    The counts are the census's EFFECTIVE defect counts (per source): the raw
+    mentions with dedup off (the default), the merged counts in the opt-in
+    `dedup_mode` "location". The two files this feeds and the selection read the
+    same numbers.
+    """
+    specs = tiebreak_cell_specs()
+    names = tiebreak_cell_names()
+    matrix = {}
+    for vid in versions:
+        tiers = (_census_row(vid, census).get("tiers") or {})
+        row = []
+        for name, tier, src in specs:
+            sevs = ((tiers.get(tier) or {}).get("severities") or {})
+            row.append(sum(int((sevs.get(sev) or {}).get(src) or 0)
+                           for sev in tiebreak_group_severities(name)))
+        matrix[str(vid)] = row
+    cumulative = {vid: list(itertools.accumulate(row)) for vid, row in matrix.items()}
+    return names, matrix, cumulative
+
+
+def tiebreak_prefix_cells(cumulative: dict, versions, floor: int) -> int:
+    """How many leading cells the tie-break uses (0 for an empty prefix).
+
+    The first prefix at which the version with the FEWEST defects reaches the
+    floor wins; if no prefix reaches it, every cell is used. A floor <= 0 is
+    reached by the EMPTY prefix, so no census cell leads (Rule 6).
+    """
+    if not cumulative or not versions:
+        return 0
+    if floor <= 0:
+        return 0
+    n_cells = len(next(iter(cumulative.values())))
+    for i in range(n_cells):
+        if min(int(cumulative[str(v)][i]) for v in versions) >= floor:
+            return i + 1
+    return n_cells
 
 
 def census_prefix_total(agg: dict, sel: dict, vid: str):
@@ -572,14 +632,8 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
         return None
     _, _, cumulative = issue_matrix_and_cumulative(census, [str(vid)])
     row = cumulative.get(str(vid)) or []
-    raw_cells = ((sel or {}).get("tiebreak") or {}).get("cells_used")
-    try:
-        cells = int(raw_cells) if raw_cells not in (None, "") else 0
-    except (TypeError, ValueError):
-        return None
-    if isinstance(raw_cells, bool) or cells < 1 or not row:
-        # A negative/non-numeric cells_used used to index from the end (or
-        # raise) and show the whole-census total instead of '-' (F151).
+    cells = int(((sel or {}).get("tiebreak") or {}).get("cells_used") or 0)
+    if not cells or not row:
         return None
     return int(row[min(cells, len(row)) - 1])
 
@@ -589,8 +643,41 @@ def champion_issue_summary(vid, agg) -> dict:
     return _issue_summary_from_census(vid, (agg or {}).get("issue_census") or {})
 
 
-def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
-                       fallback: bool = False) -> tuple:
+def _issue_summary_from_census(vid, census) -> dict:
+    """`champion_issue_summary` over a bare `{vid: row}` census map (no `agg`)."""
+    tiers = (_census_row(vid, census).get("tiers") or {})
+    out = {}
+    for sev in ("critical", "fatal", "major", "minor"):
+        own = sum(int((((tiers.get(t) or {}).get("severities") or {})
+                       .get(sev) or {}).get("own") or 0) for t in BASIS_TIERS)
+        peer = sum(int((((tiers.get(t) or {}).get("severities") or {})
+                        .get(sev) or {}).get("peer") or 0) for t in BASIS_TIERS)
+        out[sev] = {"own": own, "peer": peer}
+    return out
+
+
+def champion_sort_key(row: dict) -> tuple:
+    """defect census at the adaptive prefix -> median -> mean -> IQR -> digest.
+
+    The adaptive-prefix census LEADS the key: the per-cell counts, ordered
+    fatal, critical, major, minor, then by tier, preserve the severity and
+    tier of every defect. The cumulative count alone would tie a fatal defect
+    with a minor one; the census does not. The panel's median/mean/IQR and the
+    digest are the tie-breaks below it. A difference in the leading term is not
+    a tie.
+    """
+    census = row.get("defect_prefix_census")
+    if census is None:
+        census = (int(row.get("defect_prefix_total") or 0),)
+    med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
+    return (tuple(int(x) for x in census)
+            + (-(med if med is not None else -99.0),)
+            + (-(mean if mean is not None else -99.0),
+               (iqr if iqr is not None else 99.0),
+               str(row.get("digest") or "~")))
+
+
+def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None) -> tuple:
     """(aggregation, selection) for a round promoted WITHOUT a judge panel.
 
     The shapes are the ones `pin_champion` / `publish_winner` / `finalize_round`
@@ -630,25 +717,14 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
     label = {"revise": f"the review-audit-revised candidate {target}",
              "integrate": f"the integrated revised candidate {target}"}.get(
                  mode, f"candidate {target}")
-    if fallback:
-        label = (f"the round's base {target} (TOLERATED_FAIL fallback: the promised "
-                 f"auto-promoted candidate never finished)")
     trace = [f"auto-promoted by --champion-select {mode}: {label} was promoted directly; "
              f"NO judge panel scored the field, so no ranking key was consulted.",
              "the result is marked auto_promoted and the decision verdict is PROVISIONAL "
              "(not certified): an unjudged winner is an operator choice, not a panel result."]
-    if fallback:
-        trace.append("tolerate-fail was on and the promised candidate failed after its "
-                     "retry budget without a usable trial, so the round closed with its base "
-                     "instead of staying incomplete; this is a fallback result, not an "
-                     "improvement.")
-    ranking_row = {"id": target, "rep": target, "is_base": target == A1_ID,
+    ranking_row = {"id": target, "rep": target, "is_base": False,
                    "n": 0, "median": None, "mean": None, "iqr": None,
                    "vs_original": None, "vs_base": None, "vs_base_vals": [],
-                   # An unjudged round has NO defect census: 0 would read as a
-                   # perfect score. None renders '-' and champion_sort_key maps
-                   # a missing total to missing evidence, never zero (F208).
-                   "digest": digest, "defect_prefix_total": None,
+                   "digest": digest, "defect_prefix_total": 0,
                    "tiebreak_prefix_cells": 0,
                    "critical_remaining": MISSING_TIEBREAK,
                    "writing_remaining": MISSING_TIEBREAK,
@@ -661,20 +737,190 @@ def auto_round_payload(ctx: Ctx, r: int, vid: str = None, mode: str = None,
     return agg, sel
 
 
-def selection_with_tolerated(sel: dict, rrec: dict) -> dict:
-    """`sel` carrying the round's recorded tolerated run list, when it has one.
+def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
+                   floor: int, round_no: int) -> dict:
+    """Rank the round's candidates from RECORDED inputs only (Rule 6's purity).
 
-    `select_champion` derives a winner from the field and cannot know that a
-    stage exhausted its retries; the round record is the only source. Used by
-    `decide`'s re-derivation so decision.json keeps the tolerated run names
-    (F112).
+    Every input is plain data: the panel's per-version statistics (`stats`), the
+    round's fresh-arm ids (`candidates`), the field member whose content IS the
+    round's base (`base_rep`), the panel's issue census (`census`) and the defect
+    floor the round was decided with (`floor`). This function reads no `ctx`, no
+    live config and no file, so re-deriving a past round reproduces its champion
+    from the recorded inputs: a later config edit cannot move a past pin (F18
+    and F19 were exactly that class of bug).
+
+    Eligibility: a complete panel is required for every row, and a FRESH arm
+    must additionally clear the anti-regression gate against the pristine
+    original. The base row itself is the incumbent status quo -- the gate exists
+    to stop a NEW regression, and the no-progress fallback crowns the base even
+    when nothing clears the gate, so the base is judged on its panel alone.
+
+    The returned `ranking` rows carry the core columns only. `select_champion`
+    adds the REPORTED-only tiebreak inputs (critical_remaining /
+    writing_remaining / manual_steps), which never rank.
     """
-    tolerated = (rrec or {}).get("tolerated_fail") if isinstance(rrec, dict) else None
-    if not tolerated:
-        return sel
-    out = dict(sel)
-    out["tolerated_fail"] = dict(tolerated)
-    return out
+    trace = []
+    candidates = list(candidates or [])
+    missing = [c for c in candidates if c not in stats]
+    if missing:
+        trace.append(f"candidate(s) {missing} are not field members this round (their content was "
+                     f"deduplicated into another member, or the arm did not run) -> not eligible "
+                     f"to win")
+    # (id to crown, id of the row that carries its stats, is_base)
+    contenders = [(c, c, False) for c in candidates if c in stats]
+    # A candidate that deduplicated away is still represented in the field by
+    # the member it merged into; that member's row is already a contender of its
+    # own, so nothing is silently lost from the ranking.
+    if base_rep:
+        contenders.append((A1_ID, base_rep, True))
+        trace.append(f"the round's base A1_{round_no} is content-identical to field member "
+                     f"{base_rep!r}; that member's row is the base's row and competes, so the "
+                     f"round can never crown a version the panel ranks below the version it "
+                     f"started from")
+    else:
+        trace.append("the round's base has no row in this field (no digest match); the selection "
+                     "falls back to the fresh arms only")
+    eligible = []
+    for cid, row_id, is_base in contenders:
+        st = stats[row_id]
+        label = f"{cid} [base row {row_id}]" if is_base else cid
+        if not (st.get("n") or 0):
+            trace.append(f"{label}: no usable directed scores -> not eligible to win")
+            continue
+        if not st.get("complete"):
+            trace.append(f"{label}: PANEL INCOMPLETE ({st.get('n')} of {st.get('expected_n')} "
+                         f"directed scores collected) -> ineligible: a partial panel must not "
+                         f"decide a round")
+            continue
+        if not is_base and st.get("vs_original_complete") is False:
+            trace.append(f"{label}: ANTI-REGRESSION PANEL INCOMPLETE "
+                         f"({st.get('vs_original_n')} of {st.get('vs_original_expected')} scores "
+                         f"against the original) -> ineligible")
+            continue
+        if not is_base and not st.get("anti_regression_ok"):
+            trace.append(f"{label}: anti-regression gate FAILED (vs_original median "
+                         f"{st.get('vs_original')!r} < {VS_ORIGINAL_TOLERANCE:g}) -> ineligible")
+            continue
+        if st.get("caption_gate_ok") is False:
+            # Advisory only: reported, never a gate. This is the master prompt's
+            # treatment of its cover-letter word rule, applied to captions.
+            trace.append(f"{label}: {st.get('caption_note')} -> reported only; caption length "
+                         f"never affects eligibility")
+        if st.get("author_placeholders"):
+            trace.append(f"{label}: {st['author_placeholders']} pipeline hand-off placeholder(s) "
+                         f"for the author -> reported only; a place-holder is a manual item, "
+                         f"never a defect and never a score penalty")
+        eligible.append(cid)
+    if not eligible:
+        trace.append("no eligible rows: the champion falls back to A1_r (this round made no "
+                     "demonstrable, non-regressing progress). If the cause was an incomplete "
+                     "panel, re-run the judge stage (`retry --run <judge id>`) before trusting "
+                     "this fallback -- an incomplete panel is not evidence of no progress.")
+        return {"champion": A1_ID, "champion_rep": base_rep, "eligible": [], "ranking": [],
+                "trace": trace}
+    rows = []
+    for cid in eligible:
+        row_id = base_rep if cid == A1_ID and base_rep else cid
+        st = stats[row_id]
+        rows.append({"id": cid, "rep": row_id, "is_base": bool(cid == A1_ID and base_rep),
+                     "n": st["n"], "median": st["median"], "mean": st["mean"],
+                     "iqr": st["iqr"], "vs_original": st["vs_original"],
+                     "vs_base": st["vs_base"],
+                     "digest": st.get("digest"),
+                     "author_placeholders": st.get("author_placeholders"),
+                     "issues": _issue_summary_from_census(row_id, census),
+                     "captions": st.get("caption_note")})
+    # The adaptive defect prefix (the ranking's LEADING comparator): walk the
+    # canonical severity_tier_category order, accumulate the reported counts for
+    # every ranked version, and stop at the first prefix where the version with
+    # the FEWEST defects reaches the configured floor (or when every cell is
+    # used). The ordered per-cell census at that prefix leads the sort key (each
+    # cell a separate rung); the median (then the mean, IQR and digest) is
+    # the tie-break below it.
+    rep_ids = sorted({str(t["rep"]) for t in rows})
+    cell_names, _matrix, cumulative = issue_matrix_and_cumulative(census, rep_ids)
+    prefix_cells = tiebreak_prefix_cells(cumulative, rep_ids, floor)
+    for t in rows:
+        t["defect_prefix_total"] = (cumulative[str(t["rep"])][prefix_cells - 1]
+                                    if prefix_cells else 0)
+        # The leading key is the ordered census at the same prefix, not just
+        # its length: the per-cell counts preserve the defect's tier/severity.
+        t["defect_prefix_census"] = tuple(
+            int(x) for x in (_matrix.get(str(t["rep"])) or [])[:prefix_cells])
+        t["tiebreak_prefix_cells"] = prefix_cells
+    # Ranking key, in order (2026-10-01, fourth calibration), with each
+    # component's provenance:
+    #   defect_prefix_total   the cumulative defect count (per source, collapsed
+    #                         only per session+version) over the adaptive
+    #                         severity_tier_category
+    #                         prefix, ASCENDING: fewer defects is better. THE
+    #                         PREFIX LEADS the key: it is the most direct
+    #                         improvement signal, and the panel median is coarse.
+    #                         The prefix stops when the cleanest ranked version
+    #                         has `tiebreak_defect_floor` counts (default 10) or
+    #                         every cell is included.
+    #   -median               the field-wide panel statistic: the first
+    #                         TIE-BREAK when two versions carry the same prefix.
+    #   -mean                 consulted after the median (a total count is more
+    #                         reliable than the mean of small integer scores).
+    #   IQR, digest          deterministic fallbacks. The content digest is the
+    #                         LAST rung: a perfect tie is decided by the bytes,
+    #                         never by the arm's NAME (a2 < i1 < w1 would silently
+    #                         favour the revise arm), and Rule 6 names no id term.
+    #                         Content-identical candidates are one candidate
+    #                         (Rule 5), so equal digests are the same artifact.
+    # The self-reported critical_remaining/writing_remaining values are still
+    # REPORTED (and cross-checked against the frozen review) but no longer rank:
+    # the census is panel-derived, while those two are agent-authored.
+    # vs_base (the panel's head-to-head against the incumbent) is REPORTED, and
+    # the incumbent-retention rule below never lets a challenger the panel cannot
+    # distinguish from the base retire it -- but it is deliberately NOT a ranking
+    # key. Rationale (operator, 2026-09-21): that pair carries only 2*judges
+    # directed scores, so ONE outlier session flips its sign statistic, while the
+    # field-wide list carries 2*judges*(|field|-1) and is what the panel as a
+    # whole measured. The margin is read by a human in the report; it does not
+    # decide the round.
+    # MANUAL_STEPS.md is NOT a ranking key: its size measures how much work the
+    # pipeline hands to the author, so ranking on it would reward under-reporting.
+    rows.sort(key=champion_sort_key)
+    champ_row = rows[0]
+    base_row = next((t for t in rows if t["is_base"]), None)
+    if base_row is not None and champ_row is not base_row \
+            and (champ_row["median"], champ_row["mean"], champ_row["iqr"]) == \
+            (base_row["median"], base_row["mean"], base_row["iqr"]):
+        # An exact statistical tie is not evidence of improvement: the incumbent
+        # is retained rather than replaced by a version the panel cannot
+        # distinguish from it (never reward a version merely for being different).
+        # This is strictly a panel-statistic rule (median/mean/IQR) and it
+        # OVERRIDES the leading defect prefix on purpose: a challenger with a
+        # lower defect count but an identical (median, mean, IQR) does not retire
+        # the incumbent -- a better defect count separates CHALLENGERS, it does
+        # not retire an incumbent the panel cannot distinguish from them.
+        trace.append(f"{champ_row['id']} and the base tie exactly on (median, mean, IQR) -> "
+                     f"the incumbent base is retained; a challenger must be measurably better")
+        champ_row = base_row
+    trace.append(f"ranking key: (the ordered per-cell defect census over the first "
+                 f"{prefix_cells} cell(s) of the canonical severity_tier_category order "
+                 f"(fatal->critical->major->minor, tier order, peer before own; each cell is a "
+                 f"separate lexicographic rung; the walk stops when the cleanest ranked version "
+                 f"reaches the floor {floor} or all {len(cell_names)} cells are used) -- then "
+                 "-median, -mean, IQR, digest); the per-cell counts come from the panel's own "
+                 "census (the self-reported critical_remaining/writing_remaining values are "
+                 "reported but no longer rank), median/mean/IQR are the field-wide panel "
+                 "statistics below it, and the content digest is the provenance-free tie-break "
+                 "(an arm's NAME never decides a tie). "
+                 "An exact (median, mean, IQR) tie is applied as retention BEFORE the prefix "
+                 "and digest, so a different defect count separates challengers but "
+                 "does not retire a base the panel cannot distinguish from them. "
+                 "vs_base is reported but NOT a ranking key: its 2*judges directed scores are few "
+                 "enough that one outlier session flips the sign statistic, so the decision stays "
+                 "on the field-wide list. MANUAL_STEPS.md is reported but never ranked on; "
+                 "missing counts sentinel = +inf")
+    return {"champion": champ_row["id"], "champion_rep": champ_row["rep"],
+            "base_rep": base_rep, "eligible": eligible, "ranking": rows, "trace": trace,
+            "tiebreak": {"floor": floor, "cells_used": prefix_cells,
+                         "cell_order": cell_names[:prefix_cells],
+                         "cells_total": len(cell_names)}}
 
 
 def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
@@ -716,23 +962,8 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
             floor = max(0, int(floor))
         except (TypeError, ValueError):
             floor = tiebreak_defect_floor_of(ctx)
-    # Resolve a fresh arm that deduplicated into a field member so that member
-    # can compete in the arm's place (F005): `build_field`'s dropped map carries
-    # the representative. Only pay for the walk when a candidate has no stats
-    # row of its own; the ordinary full-panel round needs no resolution.
-    _representatives = {}
-    if any(c not in stats for c in candidates):
-        _field, _dropped = build_field(ctx, r)
-        _representatives = {str(d.get("id")): str(d.get("representative"))
-                            for d in (_dropped or [])
-                            if d.get("representative") and d.get("id") is not None}
-    if _representatives:
-        sel = derive_ranking(stats, candidates, base_rep,
-                             (agg or {}).get("issue_census") or {}, floor, r,
-                             representatives=_representatives)
-    else:
-        sel = derive_ranking(stats, candidates, base_rep,
-                             (agg or {}).get("issue_census") or {}, floor, r)
+    sel = derive_ranking(stats, candidates, base_rep,
+                         (agg or {}).get("issue_census") or {}, floor, r)
     for t in sel["ranking"]:
         crit, writing, manual = candidate_tiebreak_inputs(ctx, r, t["id"])
         t["critical_remaining"] = crit
@@ -743,21 +974,15 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
     if sel["ranking"]:
         prefix_cells = int((sel.get("tiebreak") or {}).get("cells_used") or 0)
         for i, t in enumerate(sel["ranking"], 1):
-            # A complete row can still carry a missing panel statistic (a legacy
-            # or partial stats provider); format through guards so the report
-            # adapter cannot abort after the champion was already derived.
-            _med, _iqr = t.get("median"), t.get("iqr")
-            _mean = (f"{t['mean']:.3f}" if isinstance(t.get("mean"), (int, float))
-                     else "n/a")
             sel["trace"].append(
-                f"  {i}. {t['id']}: median={_g(_med)} mean={_mean} "
+                f"  {i}. {t['id']}: median={t['median']:g} mean={t['mean']:.3f} "
                 f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
                 f"defects@{prefix_cells}={t['defect_prefix_total']} "
                 + "(cf/maj/min peer+own="
                 + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
                            for g in ("fatal", "critical", "major", "minor"))
                 + ") "
-                f"iqr={_g(_iqr)} critical_remaining={t['critical_remaining']} "
+                f"iqr={t['iqr']:g} critical_remaining={t['critical_remaining']} "
                 f"writing_remaining={t['writing_remaining']} "
                 f"manual_steps={t['manual_steps']} "
                 f"placeholders={t['author_placeholders'] or 0} "
@@ -800,14 +1025,13 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
     """The run's per-member summary table (header row, then one row per member).
 
     Every member gets its three evidence columns filled from the round's own
-    records: `defects@K` is the adaptive-prefix count the ranking reads, while
-    the severity totals are the WHOLE issue census (all cells, not the prefix),
-    so a row can legitimately show defects@K=2 beside totals summing to 30 --
-    they answer different questions. `writing*` falls back to the round's frozen
-    review for the rows that have no producing session to self-report it (the
-    pristine original, the round's base), then to the producing run's own marker
-    for an arm the ranking did not admit. A '-' therefore means "this root
-    genuinely has no record", not "this member was not ranked".
+    records: `defects@K` and the severity totals come from the panel's issue
+    census -- the SAME numbers the ranking reads, over the SAME adaptive prefix
+    -- and `writing*` falls back to the round's frozen review for the rows that
+    have no producing session to self-report it (the pristine original, the
+    round's base), then to the producing run's own marker for an arm the ranking
+    did not admit. A '-' therefore means "this root genuinely has no record",
+    not "this member was not ranked".
     """
     st = agg["stats"]
     ranking_by_id = {row["id"]: row for row in (sel.get("ranking") or [])}
@@ -825,10 +1049,7 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
              "note"]]
     census = (agg or {}).get("issue_census") or {}
     for e in field:
-        # A legacy/stale field list can name a member the aggregation has no
-        # stats row for; render the row as "no record" ('-') instead of
-        # aborting the report AFTER the round was pinned.
-        s = st.get(e["id"]) or {}
+        s = st[e["id"]]
         note = ""
         if e["id"] == champ_rep:
             note = "CHAMPION" if sel.get("champion") == e["id"] else \
@@ -836,19 +1057,11 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
         elif s.get("anti_regression_ok") is False:
             note = "ineligible (regressed vs original)"
         rank_row = ranking_by_id.get(e["id"]) or {}
-        in_census = str(e["id"]) in census
-        rank_issues = rank_row.get("issues") or {}
-        rank_nonzero = any(
-            (int((rank_issues.get(sev) or {}).get("own") or 0)
-             + int((rank_issues.get(sev) or {}).get("peer") or 0))
-            for sev in ("fatal", "critical", "major", "minor"))
-        if rank_issues and (in_census or rank_nonzero):
-            iss = rank_issues
-        elif in_census:
+        if rank_row.get("issues"):
+            iss = rank_row["issues"]
+        elif str(e["id"]) in census:
             iss = champion_issue_summary(e["id"], agg)
         else:
-            # An all-zero default dict is not a census: render '-' so "no
-            # defects recorded" and "no census exists" stay distinguishable.
             iss = {}
         if iss:
             def _iss(sev):
@@ -872,14 +1085,12 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
                 writing = candidate_tiebreak_inputs(ctx, r, e["id"])[1]
         rows.append([e["id"],
                      f"{prefix}" if prefix is not None else "-",
-                     f"{s['median']:g}" if s.get("median") is not None else "-",
+                     f"{s['median']:g}" if s["median"] is not None else "-",
                      f"{s['mean']:.2f}" if s.get("mean") is not None else "-",
-                     f"{s['iqr']:g}" if s.get("iqr") is not None else "-",
+                     f"{s['iqr']:g}" if s["iqr"] is not None else "-",
                      (str(s.get("digest") or "")[:12] or "-"),
-                     (f"{s['n']}/{s['expected_n']}"
-                      if s.get("n") is not None and s.get("expected_n") is not None
-                      else "-"),
-                     f"{s['vs_original']:g}" if s.get("vs_original") is not None else "-",
+                     f"{s['n']}/{s['expected_n']}",
+                     f"{s['vs_original']:g}" if s["vs_original"] is not None else "-",
                      f"{s['vs_base']:g}" if s.get("vs_base") is not None else "-",
                      severity_cell, _count_cell(writing),
                      f"{s.get('author_placeholders') or 0}", note])
@@ -889,13 +1100,8 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
 def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
     """Copy the round's champion into pinned/<r>_<champion_id>/ and register it.
 
-    The pinned set grows monotonically with ONE pin record per round -- the id
-    is `r<round>_<champion>`, so the chain names the round that produced each
-    champion, and a round that re-crowns its base keeps the same bytes under the
-    new round's id. Content deduplication happens in the FIELD (`build_field`
-    drops a later member whose documents are identical to an earlier one), which
-    is what Rule 5's "content-identical candidates are one candidate" needs: a
-    second pin is a round record, not a second candidate.
+    The pinned set grows monotonically and is deduplicated by content digest,
+    so it may be smaller than the number of rounds -- that is correct.
     The documents/ directory is swapped in atomically so a retried round can
     never leave a mix of old and new pinned content on disk.
     """
@@ -913,19 +1119,10 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
             f"{', '.join(str(s) for s, _p, _e in corpus_sources(ctx, r, champ_id)) or 'no source'})")
     digest = manifest_digest(manifest)
     recorded = recorded_version_digest(ctx, r, champ_id)
-    if not recorded and champ_id == A1_ID:
-        # A round base is materialized from its source pin (or the original)
-        # and the a1 run records that source digest; a root created before
-        # corpus_digest existed still carries it. Use it rather than skipping
-        # the identity comparison entirely.
-        recorded = ((ctx.run(rid_for_fresh(r, A1_ID)) or {}).get("base_source_digest"))
-    if not recorded:
-        die(f"refusing to pin '{champ_id}': the version has no recorded corpus digest; "
-            f"re-run the round or repair the record")
-    if digest != recorded:
+    if recorded and digest != recorded:
         die(f"internal inconsistency: the pinned copy of '{champ_id}' hashes to {digest[:12]} "
             f"but its run recorded {str(recorded)[:12]}")
-    if docs.is_dir() and manifest_digest(corpus_dir_manifest(docs)) == digest:
+    if docs.is_dir() and corpus_tree_digest(docs) == digest:
         rmtree_force(tmp)          # idempotent resume: identical already
     else:
         if docs.exists():
@@ -948,28 +1145,6 @@ def pin_champion(ctx: Ctx, r: int, champ_id: str, agg: dict) -> dict:
             "captions": cap_info,
             "placeholders": placeholder_info_for(ctx, r, champ_id)}
     write_json_atomic(dst / "meta.json", meta)
-    # A round has ONE pin (the docstring's contract). Re-deciding the round with
-    # a DIFFERENT champion used to append a second pin for the same round while
-    # `build_field` adds every pin with round < r, so the superseded version
-    # re-entered later fields and could win again (F096). Drop every other pin
-    # for this round from the registry and archive its directory under
-    # pins/_superseded/ (evidence is kept, never deleted).
-    superseded_pins = [p for p in (ctx.state.get("pinned") or [])
-                       if p.get("id") != pid and int(p.get("round") or 0) == int(r)]
-    if superseded_pins:
-        for old in superseded_pins:
-            old_id = str(old.get("id") or "")
-            if _safe_state_segment(old_id):
-                old_dir = ctx.pins_dir / old_id
-                if old_dir.is_dir():
-                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-                    superseded = unique_path(
-                        ctx.pins_dir / "_superseded" / f"{old_id}.{stamp}")
-                    superseded.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(old_dir), str(superseded))
-        superseded_ids = {str(p.get("id") or "") for p in superseded_pins}
-        ctx.state["pinned"] = [p for p in (ctx.state.get("pinned") or [])
-                               if str(p.get("id") or "") not in superseded_ids]
     cur = find_pin(ctx, pid)
     if cur is None:
         ctx.state["pinned"].append(meta)
@@ -1007,13 +1182,10 @@ def publish_winner(ctx: Ctx, r: int, champ_id: str, pin: dict, agg: dict) -> dic
         die(f"refusing to publish a round {r} winner: the champion '{champ_id}' has an empty "
             f"corpus")
     digest = manifest_digest(manifest)
-    if not pin.get("digest"):
-        die(f"refusing to publish a round {r} winner: the pin records no corpus digest; "
-            f"re-run the round or repair the record")
-    if digest != pin["digest"]:
+    if pin.get("digest") and digest != pin["digest"]:
         die(f"internal inconsistency: the round {r} winner copy hashes to {digest[:12]} but its "
             f"pin recorded {str(pin.get('digest'))[:12]}")
-    if dst.is_dir() and manifest_digest(corpus_dir_manifest(dst)) == digest:
+    if dst.is_dir() and corpus_tree_digest(dst) == digest:
         rmtree_force(tmp)                      # idempotent resume: identical already
     else:
         if dst.exists():
@@ -1067,47 +1239,6 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
     integrated = round_integrated_run_ids(ctx, r, m, n)
     csel = str(sel.get("champion_select") or round_champion_select(ctx, r))
     auto_promoted = bool(sel.get("auto_promoted"))
-    # Freeze the floor the ranking ACTUALLY used: `select_champion` accepts an
-    # explicit floor, and a config change between selection and finalize must
-    # not be recorded in its place -- `decide` re-derives with the recorded
-    # value, so a wrong freeze re-ranks a past round.
-    used_floor = (sel.get("tiebreak") or {}).get("floor")
-    if used_floor is None:
-        used_floor = tiebreak_defect_floor_of(ctx)
-    # Keep this round's review deliverables (finding list, discovery output) so the
-    # next round can carry them forward and the operator keeps them after a prune.
-    # Done BEFORE the record is frozen: the archive is best-effort (it must never
-    # fail the round), but a failure is a real loss of the next review's required
-    # prior-round input, so it is recorded on the round record instead of being a
-    # console line only.
-    review_archive_error = None
-    try:
-        archive_review_outputs(ctx, r)
-    except Exception as e:                                      # noqa: BLE001
-        review_archive_error = str(e)
-        print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
-    # Scan EVERY run of this round, not only the round_run_plan: the judge
-    # wave (and the journal response on the last round) runs outside the plan
-    # and can itself be tolerated. Missing it here would let a panel certify a
-    # round whose judge used a failed trial. A stale record whose run has since
-    # been retried successfully is removed.
-    _tol_runs = [rec["id"] for rec in ctx.runs(round_no=r)
-                 if rec.get("tolerated_fail") and rec.get("status") == "done"]
-    if _tol_runs:
-        rrec["tolerated_fail"] = {
-            "mode": "on", "failed_runs": _tol_runs,
-            "note": ("stage(s) exhausted their retries; the best failed trial (most "
-                     "required output files, then fewest FAIL messages) was used -- "
-                     "PROVISIONAL, never certified"),
-        }
-    else:
-        rrec.pop("tolerated_fail", None)
-    if rrec.get("tolerated_fail"):
-        # The decision must carry the tolerated stages (a best failed trial was
-        # used) so `decide` can refuse certification and the round JSON/report
-        # name what was salvaged instead of presenting a clean round.
-        sel = dict(sel)
-        sel["tolerated_fail"] = dict(rrec["tolerated_fail"])
     rrec.update({
         "status": "done", "completed": utcnow(),
         "plan": {"rewrites": m, "revises": n, "pool": round_pool_ids(m, n),
@@ -1122,8 +1253,7 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         "stats": agg["stats"], "diagnostics": agg["diagnostics"], "selection": sel,
         "base_id": agg.get("base_id"), "base_rep": agg.get("base_rep"),
         "auto_promoted": auto_promoted, "judged": not auto_promoted,
-        "certified": (False if auto_promoted or rrec.get("tolerated_fail")
-                      else rrec.get("certified")),
+        "certified": False if auto_promoted else rrec.get("certified"),
         "champion": sel["champion"],
         "champion_rep": sel.get("champion_rep") or sel["champion"],
         "champion_run": (rid_for_fresh(r, sel["champion"]) if is_fresh_vid(sel["champion"])
@@ -1136,18 +1266,20 @@ def finalize_round(ctx: Ctx, r: int, field: list, dropped: list, agg: dict,
         # The ranking key's two MUTABLE inputs are frozen on the record: a later
         # `set-tiebreak-defect-floor`/`set-dedup-mode --force` must not change
         # what `decide` re-derives for this round (F18/F19).
-        "tiebreak_defect_floor": used_floor,
+        "tiebreak_defect_floor": tiebreak_defect_floor_of(ctx),
         "dedup_mode": agg.get("dedup_mode") or dedup_mode_of(ctx),
         "anti_regression_rule": agg.get("anti_regression_rule")
         or vs_original_rule_of(ctx),
         "pipeline_version": VERSION,
-        # None when the review deliverables were archived; otherwise the reason
-        # they were NOT, so the loss is visible in the record `status`/`decide`
-        # read (the archive itself stays best-effort).
-        "review_archive_error": review_archive_error,
     })
     write_json_atomic(ctx.reports_dir / f"round{r}.json",
                       {"round_record": rrec, "aggregation": agg, "selection": sel})
+    # Keep this round's review deliverables (finding list, discovery output) so the
+    # next round can carry them forward and the operator keeps them after a prune.
+    try:
+        archive_review_outputs(ctx, r)
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[run] round {r} WARNING: could not archive the review outputs: {e}")
     ctx.log("round-done", f"round{r}", f"champion={sel['champion']} pin={pin['id']}")
     return rrec
 
@@ -1179,7 +1311,6 @@ def sweep_artifacts(ctx: Ctx, cmd: list = None, timeout: int = 0) -> list:
         if not completion_signal_exists(ctx, rec):
             continue
         bump_attempt(rec)
-        bump_stage_attempt(rec)
         postcheck(ctx, rec, source="adopted (completion signal already on disk)")
         if rec["status"] != "done" and cmd:
             problems = repairable_artifact_failure(ctx, rec)
@@ -1204,22 +1335,6 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
     """
     R = ctx.rounds_count()
     touched = []
-    # F137: a certified decision and its published final_clean_version are the
-    # answer for the OLD chain. Once a round is invalidated their pins/rounds no
-    # longer exist, so archive them instead of leaving certified bytes on disk
-    # until a later `decide` happens to overwrite them.
-    _stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    _decision = ctx.reports_dir / "decision.json"
-    _clean_artifacts = sorted(ctx.root.glob("final_clean_version*"))
-    if _decision.exists() or _clean_artifacts:
-        _aside = unique_path(superseded_dir_of(ctx) / f"decision_artifacts.{_stamp}")
-        _aside.mkdir(parents=True, exist_ok=True)
-        if _decision.exists():
-            with contextlib.suppress(OSError):
-                shutil.move(str(_decision), str(_aside / _decision.name))
-        for _p in _clean_artifacts:
-            with contextlib.suppress(OSError):
-                shutil.move(str(_p), str(_aside / _p.name))
     for rr in range(int(r), int(R) + 1):
         rec = ctx.round_rec(rr)
         # A round that is being rebuilt must not leave a stale "winner" sitting
@@ -1240,8 +1355,7 @@ def invalidate_from_round(ctx: Ctx, r: int, reason: str) -> list:
                   "field", "field_entries", "field_dropped", "stats", "selection", "diagnostics",
                   "completed", "winner_dir", "winner_digest", "tiebreak_inputs", "panel_gaps",
                   "base_id", "base_rep", "plan", "pipeline_version",
-                  "judges_enabled", "auto_promoted", "judged", "certified",
-                  "review_archive_error"):
+                  "judges_enabled", "auto_promoted", "judged", "certified"):
             rec.pop(k, None)
         for run_rec in ctx.runs(round_no=rr):
             touched.append(run_rec["id"])
@@ -1474,12 +1588,6 @@ def resolve_agent_model_cmd(harness: str, model: str, agent_cmd_arg: str,
     return argv
 
 
-# How long the `dsh --help` capability probe may boot before its process tree is
-# killed (F139). A module constant (not a literal) so the probe's timeout path
-# is testable without a 180 s wait.
-DSH_PROBE_TIMEOUT_SECONDS = 180
-
-
 def _probe_dsh_headless(exe: str) -> str:
     """Read the installed harness's own headless help ('' = it declares the contract).
 
@@ -1491,38 +1599,12 @@ def _probe_dsh_headless(exe: str) -> str:
     read -- reports '' (see dsh_harness_problem).
     """
     try:
-        # The probe is a TOOL run: give it its own process group and kill that
-        # group on the timeout, exactly like every other tool call. Without it
-        # `subprocess.run` killed only the direct `dsh` process and the Node
-        # worker/MCP children it spawned survived the 180 s timeout, holding
-        # $DSH_HOME locks/logs (F139). The timeout is recorded instead of
-        # silently reading as "the build declares no contract".
-        proc = subprocess.Popen([exe, "--profile", "headless", "--help"],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True,
-                                encoding="utf-8", errors="replace",
-                                **_tool_popen_kwargs())
-        try:
-            out, _ = proc.communicate(timeout=DSH_PROBE_TIMEOUT_SECONDS)
-        except subprocess.TimeoutExpired:
-            # killpg reaches the children that stayed in the probe's group; a
-            # helper that called setsid escaped it, so the subtree is collected
-            # first (same walk the agent sessions use) and killed before the
-            # group is signalled.
-            for pid_ in reversed(_descendant_pids(proc.pid)):
-                with contextlib.suppress(OSError):
-                    os.kill(pid_, signal.SIGKILL)
-            _kill_process_group(proc)
-            with contextlib.suppress(Exception):
-                proc.communicate(timeout=5)
-            print(f"  [warn] the `dsh` headless capability probe timed out after "
-                  f"{DSH_PROBE_TIMEOUT_SECONDS} s; its process tree was killed and the "
-                  f"capability check is skipped (the sessions will speak for themselves)",
-                  flush=True)
-            return ""
-        text = out or ""
+        proc = subprocess.run([exe, "--profile", "headless", "--help"],
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              text=True, encoding="utf-8", errors="replace", timeout=180)
     except Exception:                                                # noqa: BLE001
         return ""
+    text = proc.stdout or ""
     # The harness is a Node >= 22 application (`node:util` parseEnv): under an
     # older `node` on PATH it dies at import, and the box's own node may well be
     # the older one while the harness was installed by a newer one. That crash
@@ -1535,7 +1617,7 @@ def _probe_dsh_headless(exe: str) -> str:
                 "import uses `node:util` parseEnv).\n"
                 "       Install AND run it under the same newer node (`nvm use 22` && "
                 "`npm i -g @deepseek-ai/dsh@alpha`, then run the pipeline with node 22 first "
-                "on PATH), or run the stages on another backend (--manual, "
+                "on PATH), or run the stages on another backend (--agent codex|claude|manual, "
                 "or --agent-cmd)")
     # The other half of the same mistake: the harness IS started by a newer node
     # than the one it was installed for, so its native binding does not match
@@ -1547,7 +1629,7 @@ def _probe_dsh_headless(exe: str) -> str:
                 "binding found ...`), so it cannot boot.\n"
                 "       Reinstall it under the node the pipeline will use (`nvm use 22` && "
                 "`npm i -g @deepseek-ai/dsh@alpha`), or run the stages on another backend "
-                "(--manual, or --agent-cmd)")
+                "(--agent codex|claude|manual, or --agent-cmd)")
     if "headless" not in text.lower():
         return ""                        # not the app this preset speaks to: say nothing
     if "--json" in text and "stdin" in text:
@@ -1566,7 +1648,7 @@ def _probe_dsh_headless(exe: str) -> str:
             "session of this backend would fail with a usage error.\n"
             "       Upgrade it (`npm i -g @deepseek-ai/dsh@alpha`; the contract is "
             "verified against dsh 0.2.1-alpha.4 and 0.2.0-rc.2), run the stages on another "
-            "backend (--manual), or point --agent-cmd at your own CLI")
+            "backend (--agent codex|claude|manual), or point --agent-cmd at your own CLI")
 
 
 _HARNESS_PROBE_CACHE = {}
@@ -1627,200 +1709,30 @@ def _coerce_text(s) -> str:
     return str(s)
 
 
-# One source of truth: the CLI/documented default. The attempt runner reads the
-# environment first (`run --max-turns` writes it); this is only the fallback.
-DEFAULT_MAX_TURNS = DEFAULTS["max_turns"]
-
-
-def pipeline_max_turns() -> int:
-    """The per-session model-turn cap (PAPER_PIPELINE_MAX_TURNS, default 3000).
-
-    `run --max-turns` writes the value into the environment before any session
-    starts, so the attempt runner reads one source of truth. A long-horizon
-    stage legitimately runs hundreds or thousands of turns; the cap exists to
-    stop a LOOP, not to shorten a healthy session. 0 disables it.
-    """
-    raw = (os.environ.get("PAPER_PIPELINE_MAX_TURNS") or "").strip()
-    try:
-        value = int(raw) if raw else DEFAULT_MAX_TURNS
-    except (TypeError, ValueError):
-        value = DEFAULT_MAX_TURNS
-    return value if value > 0 else 0
-
-
-class _TurnCounter:
-    """Count the harness's turn-end events and stop the session at the cap.
-
-    A harness that streams NDJSON (`dsh --json`, the default agent) emits one
-    `turn_end`/`status: turn_end` event per model turn. The counter parses those
-    events from stdout and kills the whole process tree once the session has
-    used more than `cap` turns: a varied loop is otherwise bounded only by the
-    stage timeout. A harness without a per-turn signal leaves `count` at 0, and
-    the attempt record states the cap was not enforced for that stream.
-    """
-
-    def __init__(self, cap: int, kill) -> None:
-        self.cap = cap
-        self.kill = kill
-        self.count = 0
-        self.hit = False
-        self._buf = ""
-
-    def feed(self, chunk: str) -> None:
-        if self.hit or self.cap <= 0 or not chunk:
-            return
-        self._buf += chunk
-        # A line that never ends must not grow the buffer without bound.
-        if len(self._buf) > 1_000_000:
-            self._buf = self._buf[-65536:]
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            event = _parse_event(line)
-            if event is None:
-                continue
-            if not _is_turn_end(event):
-                continue
-            self.count += 1
-            if self.count > self.cap:
-                self.hit = True
-                self.kill()
-                return
-
-
-class _StreamCapture:
-    """A live view of one pipe reader's captured output (F30).
-
-    A timed-out descendant that left the agent's process group can keep the
-    stdout/stderr pipe open, so its reader thread stays blocked and the attempt
-    record ended up EMPTY with no truncation marker -- the failure evidence was
-    lost. The reader publishes its growing buffer as it reads, so the caller can
-    snapshot what arrived even when the reader never returns.
-    """
-
-    def __init__(self):
-        self.chunks: list = []
-        self.size = 0
-        self.tail_chunks: list = []
-        self.tail_cap = 0
-        self.done = None
-
-    def snapshot(self) -> tuple:
-        """(kept text, total characters read, tail text) of what has arrived."""
-        if self.done is not None:
-            return self.done
-        tail = ("".join(list(self.tail_chunks))[-self.tail_cap:]
-                if self.tail_cap > 0 else "")
-        return ("".join(list(self.chunks)), self.size, tail)
-
-
-def _stream_result(capture) -> tuple:
-    """The (kept, total, tail) triple of one captured pipe, live or finished."""
-    if capture is None:
-        return ("", 0, "")
-    if isinstance(capture, _StreamCapture):
-        return capture.snapshot()
-    return capture
-
-
-def _read_stream_capped(stream, cap: int, on_chunk=None, tail_cap: int = 0,
-                        capture=None) -> tuple:
-    """(kept text, total characters read, tail text) for one agent pipe.
+def _read_stream_capped(stream, cap: int) -> tuple:
+    """(kept text, total characters read) for one agent pipe.
 
     The overflow is DISCARDED as it arrives (the child is not blocked on a full
     pipe) and the caller is told the total so it can record the truncation. The
     agent's stdout/stderr used to be buffered whole by `communicate()`, so a
     verbose or looping agent could OOM the orchestrator or fill the root's disk
     with its transcript (F39).
-
-    `tail_cap` additionally keeps the LAST `tail_cap` characters. The head is
-    what the transcript log gets (the CLI banner and the session id live
-    there); the TAIL is what the failure classifier gets, because a provider
-    error, a guard sentence and the CLI's dying words are at the END. Reading
-    only the head made the diagnosis depend on where in a >16 MiB transcript a
-    phrase happened to land: two identical failures of a 39 MB and a 9 MB
-    session were classified differently.
     """
     kept, size = [], 0
-    tail: list = []
-    tail_len = 0
-    if capture is not None:
-        # Share the live lists: the reader appends to them, so a snapshot taken
-        # from another thread sees every chunk read so far.
-        capture.chunks = kept
-        capture.tail_chunks = tail
-        capture.tail_cap = tail_cap
     try:
         while True:
             chunk = stream.read(65536)
             if not chunk:
                 break
-            if on_chunk is not None:
-                # A counter must never break the transcript read itself.
-                with contextlib.suppress(Exception):
-                    on_chunk(chunk)
             if size < cap:
                 kept.append(chunk[:cap - size])
-            if tail_cap > 0:
-                tail.append(chunk)
-                tail_len += len(chunk)
-                while len(tail) > 1 and tail_len - len(tail[0]) >= tail_cap:
-                    tail_len -= len(tail.pop(0))
             size += len(chunk)
-            if capture is not None:
-                capture.size = size
     except (OSError, ValueError):
         pass
     finally:
         with contextlib.suppress(OSError, ValueError):
             stream.close()
-    result = ("".join(kept), size, ("".join(tail)[-tail_cap:] if tail_cap > 0 else ""))
-    if capture is not None:
-        capture.done = result
-    return result
-
-
-def _proc_children(pid: int) -> list:
-    """Best-effort live child PIDs of `pid` (POSIX /proc; [] where unavailable)."""
-    kids = []
-    try:
-        entries = os.listdir("/proc")
-    except OSError:
-        return kids
-    for ent in entries:
-        if not ent.isdigit():
-            continue
-        try:
-            with open(f"/proc/{ent}/stat", "rb") as fh:
-                data = fh.read(4096).decode("utf-8", "replace")
-        except OSError:
-            continue
-        # The `comm` field may contain spaces and parentheses, so parse the
-        # fields AFTER its closing parenthesis: state, ppid, ...
-        rest = data.rsplit(")", 1)[-1].split()
-        if len(rest) >= 2 and rest[1].isdigit() and int(rest[1]) == pid:
-            kids.append(int(ent))
-    return kids
-
-
-def _descendant_pids(root_pid: int) -> list:
-    """Live descendants of `root_pid`, parents before children (F30).
-
-    A descendant that calls setsid leaves the session's process GROUP, so the
-    group kill below cannot reach it, and it can keep the agent's stdout/stderr
-    pipe open for as long as it lives. The PPID chain still names it until its
-    parent dies, so the whole subtree is collected BEFORE any signal is sent and
-    SIGKILLed first. Best effort: no /proc, no walk (the group kill still runs).
-    """
-    out, queue, seen = [], [int(root_pid)], {int(root_pid)}
-    while queue:
-        cur = queue.pop(0)
-        for kid in _proc_children(cur):
-            if kid in seen:
-                continue
-            seen.add(kid)
-            out.append(kid)
-            queue.append(kid)
-    return out
+    return "".join(kept), size
 
 
 def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
@@ -1851,14 +1763,6 @@ def _terminate_agent_tree(proc: subprocess.Popen, grace: float = 5.0) -> None:
             # its PID is also the group id, so this still names the surviving
             # descendants (F11).
             pgid = proc.pid
-    # A descendant that called setsid left the group: collect it first, while
-    # its PPID chain still names it, and SIGKILL it before the group is
-    # signalled (F30). Killing the children first also keeps them from being
-    # reparented before the group signal lands.
-    escaped = _descendant_pids(proc.pid) if pgid else []
-    for pid_ in reversed(escaped):
-        with contextlib.suppress(OSError):
-            os.kill(pid_, signal.SIGKILL)
     try:
         if pgid:
             os.killpg(pgid, signal.SIGTERM)
@@ -2047,12 +1951,6 @@ def agent_session_env(sb: Path) -> dict:
     otherwise leave open by default.
     """
     env = dict(os.environ)
-    # An explicit --reasoning-effort reaches Claude Code through this variable
-    # for every preset (the legacy preset and the adapters' claude route); the
-    # other harnesses read the same variable from the shared runtime instead.
-    _effort = _model_runtime.reasoning_effort_override()
-    if _effort:
-        env["CLAUDE_CODE_EFFORT_LEVEL"] = _effort
     sandbox = str(Path(sb).resolve())
     roots = [p for p in (env.get("DOCX_MCP_ALLOWED_ROOTS") or "").split(os.pathsep) if p]
     if sandbox not in roots:
@@ -2072,59 +1970,7 @@ def agent_session_env(sb: Path) -> dict:
     return env
 
 
-def _serve_selfcheck(sb: Path, rec: dict, stop: threading.Event) -> None:
-    """Answer the sandbox's pre-flight requests from the ORCHESTRATOR.
-
-    The sandbox holds a client only (`SELFCHECK_CLIENT_REL`), never the driver:
-    the verdict is computed here, by the same in-process postcheck code the
-    orchestrator already runs. The client's own fields are ignored -- the stage
-    and run id come from `rec`, so a crafted request cannot probe another run.
-    The request/result files are ordinary sandbox files, so this works inside a
-    jail with no root mount, and standalone with no extra setup.
-    """
-    box = sb / SELFCHECK_TOOL_DIR / ".mailbox"
-    request = box / "request.json"
-    result = box / "result.json"
-    seen = ""
-    while not stop.wait(0.4):
-        try:
-            # Open ONCE with O_NOFOLLOW and fstat/read that same descriptor: the
-            # old is_file/is_symlink/stat then read_text() let an agent swap the
-            # path for a symlink or a huge file between the check and the read.
-            with _open_regular_no_follow(request) as fh:
-                if os.fstat(fh.fileno()).st_size > 8192:
-                    # Rename the oversized request aside: `continue` re-opened
-                    # the same file forever and never answered (F099).
-                    with contextlib.suppress(OSError):
-                        os.replace(request, box / f"request.oversized-{time.time_ns()}")
-                    continue
-                raw = fh.read(8193).decode("utf-8", "replace")
-        except OSError:
-            continue
-        try:
-            payload = json.loads(raw)
-        except ValueError:
-            continue
-        request_id = str((payload or {}).get("id") or "") if isinstance(payload, dict) else ""
-        if not request_id or request_id == seen:
-            continue
-        seen = request_id
-        try:
-            ok, errs, warns = sandbox_selfcheck(
-                sb, str(rec.get("kind") or ""), str(rec.get("id") or ""),
-                int(rec.get("round") or 0))
-        except Exception as e:                                   # noqa: BLE001
-            ok, errs, warns = False, [f"the pre-flight raised {type(e).__name__}: {e}"], []
-        body = {"id": request_id, "ok": bool(ok),
-                "errors": [str(e) for e in errs][:200],
-                "warnings": [str(w) for w in warns][:200]}
-        try:
-            write_text_atomic(result, json.dumps(body, ensure_ascii=False))
-        except OSError:
-            pass
-
-
-def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
+def _execute_attempt_raw(sb: Path, rec: dict, cmd: list, timeout: int,
                         prompt_name: str = PROMPT_FILE, log_name: str = "_agent.log",
                         archive_marker: bool = True) -> dict:
     """Run one agent session in `sb` and return {rc, dur, error, log}.
@@ -2152,27 +1998,9 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
                 "error": (f"{prompt_name} could not be read (a symlink/non-regular file, "
                           f"unreadable, or over the byte budget); the attempt was not launched")}
     rec["prompt_sha256"] = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
-    # Snapshot the orchestrator's own previous-attempt record BEFORE the agent
-    # launches. The sandbox is agent-writable, so reading it after the child
-    # returns let an agent append its own error text and make the classifier
-    # exclude the genuine failure line (F106).
-    previous_errors = read_text_bounded(sb / "PREVIOUS_ATTEMPT_ERRORS.md")
-    max_turns = pipeline_max_turns()
-    rec["max_turns"] = max_turns
-    turn_counter = None
-    turn_cap_hit = False
     if archive_marker:
-        # A previous attempt's marker must never be mistaken for this attempt's
-        # result. When it could not be archived or removed, refuse to launch:
-        # the stale marker would be read as THIS attempt's completion (F057).
-        stale_failures = archive_stale_marker(sb, rec["id"])
-        if stale_failures:
-            return {"rc": None, "dur": 0.0, "log": str(logf),
-                    "failure_kind": "stale_marker",
-                    "error": ("the previous attempt's completion marker could not be "
-                              "archived or removed (" + "; ".join(stale_failures)
-                              + "); refusing to launch an attempt that could be scored "
-                                "on stale evidence")}
+        # A previous attempt's marker must never be mistaken for this attempt's result.
+        archive_stale_marker(sb, rec["id"])
     t0 = time.time()
     # The header is WRITTEN after the agent returns (the log is appended once), so
     # it must carry the time the attempt actually started -- it used to print
@@ -2181,7 +2009,6 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     started_at = utcnow()
     rec["last_attempt_started"] = started_at
     rc, out, err, exc = None, "", "", None
-    out_tail = err_tail = ""
     truncation = ""
     try:
         # Popen + a process GROUP, not subprocess.run: a timeout must kill the
@@ -2202,15 +2029,8 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     except Exception as e:  # noqa: BLE001
         proc = None
         rc, exc = None, f"execution error: {e}"
-    service_stop = threading.Event()
     if proc is not None:
         _register_active_agent(proc)
-        if max_turns:
-            turn_counter = _TurnCounter(max_turns, lambda: _terminate_agent_tree(proc))
-        # The sandbox's pre-flight client is answered from here, out of process:
-        # no pipeline code has to be readable inside the sandbox.
-        threading.Thread(target=_serve_selfcheck, args=(sb, rec, service_stop),
-                         daemon=True, name="selfcheck-service").start()
         # Stream both pipes through capped readers instead of `communicate()`:
         # the whole transcript used to be held in memory before it was appended
         # to _agent.log (F39).
@@ -2228,20 +2048,12 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         feeder = threading.Thread(target=_feed, daemon=True)
         feeder.start()
         readers.append(feeder)
-        pipe_readers = []
         for key, stream in (("out", proc.stdout), ("err", proc.stderr)):
-            pipe_capture = _StreamCapture()
-            captured[key] = pipe_capture
-
-            def _pump(stream=stream, key=key, pipe_capture=pipe_capture):
-                pipe_capture.done = _read_stream_capped(
-                    stream, MAX_TOOL_OUTPUT_BYTES,
-                    turn_counter.feed if (key == "out" and turn_counter is not None) else None,
-                    tail_cap=EVIDENCE_TAIL_BYTES, capture=pipe_capture)
+            def _pump(stream=stream, key=key):
+                captured[key] = _read_stream_capped(stream, MAX_TOOL_OUTPUT_BYTES)
             reader = threading.Thread(target=_pump, daemon=True)
             reader.start()
             readers.append(reader)
-            pipe_readers.append(reader)
         try:
             try:
                 rc, exc = proc.wait(timeout=(timeout or None)), None
@@ -2251,50 +2063,20 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
             except Exception as e:  # noqa: BLE001
                 _terminate_agent_tree(proc)
                 rc, exc = None, f"execution error: {e}"
-            # ONE shared wait budget, not a full join per reader: a descendant
-            # that escaped the process group can hold the pipe open, and two
-            # 15 s joins turned a 1 s timeout into a 31 s stall (F30). The
-            # readers publish what they read, so the transcript survives even
-            # when a reader cannot return.
-            deadline = time.monotonic() + 5.0
             for reader in readers:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    break
-                reader.join(remaining)
+                reader.join(15)
         finally:
-            service_stop.set()
             _unregister_active_agent(proc)
-        out, out_total, out_tail = _stream_result(captured.get("out"))
-        err, err_total, err_tail = _stream_result(captured.get("err"))
-        if any(reader.is_alive() for reader in pipe_readers):
-            truncation += ("\n[TRANSCRIPT INCOMPLETE: the agent's stdout/stderr pipe was "
-                           "still held open after the timeout (a descendant escaped the "
-                           "process group); the transcript below is what had arrived when "
-                           "the wait budget expired]\n")
+        out, out_total = captured.get("out", ("", 0))
+        err, err_total = captured.get("err", ("", 0))
         dropped = []
         if out_total > len(out):
             dropped.append(f"stdout {out_total} chars -> {len(out)}")
         if err_total > len(err):
             dropped.append(f"stderr {err_total} chars -> {len(err)}")
         if dropped:
-            # APPEND, never assign: an attempt can both overflow the output cap
-            # and have its pipe held open by an escaped descendant, and
-            # overwriting the note above dropped the incomplete-pipe diagnosis
-            # (F010) -- the transcript then looked like an ordinary cap.
-            truncation += ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
-                           f"stream: " + ", ".join(dropped) + "]\n")
-    turn_cap_hit = bool(turn_counter is not None and turn_counter.hit)
-    rec["turn_cap_hit"] = turn_cap_hit
-    # Whether this stream carried a per-turn signal at all: a silent or
-    # single-shot harness has no turn_end event, so the cap cannot be counted
-    # here (the attempt record says so instead of claiming enforcement).
-    rec["turn_cap_enforced"] = bool(turn_counter is not None
-                                    and turn_counter.count > 0)
-    if turn_cap_hit and exc is None:
-        exc = (f"the agent session hit the {max_turns}-turn cap "
-               f"(PAPER_PIPELINE_MAX_TURNS={max_turns}); it is looping instead of "
-               f"finishing the stage")
+            truncation = ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
+                          f"stream: " + ", ".join(dropped) + "]\n")
     dur = time.time() - t0
     # The transcript is the audit trail the operator reads after a failure, and
     # an agent can print anything (including a provider key) before it is
@@ -2307,20 +2089,12 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     try:
         append_text_no_follow(logf,
                               f"\n===== attempt {next_attempt_number(rec)} start {started_at} =====\n"
-                              f"cmd: {safe_cmd}{truncation}\n"
-                              f"max_turns: {max_turns}\n--- stdout ---\n{safe_out}\n"
+                              f"cmd: {safe_cmd}{truncation}\n--- stdout ---\n{safe_out}\n"
                               f"--- stderr ---\n{safe_err}\n"
                               f"===== rc={rc} dur={dur:.1f}s error={safe_exc} =====\n")
     except OSError:
         pass
     failure_kind = ""
-    # The prompt and the previous-attempt record are the ORCHESTRATOR's own
-    # words, not provider evidence: a retry prompt quotes the prior failure
-    # verbatim, and the record it points the agent at repeats it. An agent that
-    # echoes or quotes either one used to make every retry look like a fresh
-    # overflow, and to report the PREVIOUS attempt's guard sentence as the one
-    # that stopped this one (see `agent_failure_kind`, `agent_runaway_reason`).
-    agent_exclude = (prompt, previous_errors)
     if rc not in (0, None):
         # BOTH streams, unconditionally: a CLI that puts the provider's 413 on
         # stdout and an unrelated warning on stderr used to be classified as ""
@@ -2328,24 +2102,11 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         # then resumed the same oversized session. The patterns are anchored to
         # error-shaped lines, so scanning stdout does not flag a manuscript that
         # merely mentions "payload too large".
-        failure_kind = agent_failure_kind(out_tail, err_tail, exclude=agent_exclude)
+        failure_kind = agent_failure_kind(out, err)
     if failure_kind == "context_overflow":
         exc = ("the agent request exceeded the provider's payload/context limit "
                "(HTTP 413 / request too large); a continuation would resend the same "
                "oversized context, so a fresh attempt is required")
-    elif failure_kind == "runaway":
-        # The proxy stopped the session itself; keep its sentence, because it
-        # names which cap tripped (turns, compactions, a repeated call).
-        exc = agent_runaway_reason(err_tail, exclude=agent_exclude) or (
-            "the agent session was stopped for looping instead of finishing the "
-            "stage; a fresh attempt is required")
-    if turn_cap_hit:
-        # The ORCHESTRATOR stopped this session: the harness may have printed no
-        # guard line, so the verdict is set from the counter, not from stderr.
-        failure_kind = "runaway"
-        exc = (f"the agent session hit the {max_turns}-turn cap "
-               f"(PAPER_PIPELINE_MAX_TURNS={max_turns}); it is looping instead of "
-               f"finishing the stage")
     # The same redaction applies to the error the run record and the console
     # keep: a process failure can quote a command line or a provider response.
     if exc is not None:
@@ -2376,26 +2137,12 @@ def apply_results(ctx: Ctx, results: dict) -> None:
         res = results[rid]
         rec = ctx.run(rid)
         bump_attempt(rec)
-        bump_stage_attempt(rec)
         rec["started"] = rec["started"] or utcnow()
         rec["last_duration"] = round(res.get("dur") or 0.0, 1)
         if res.get("error") or res.get("rc") not in (0,):
-            # A fresh failed attempt supersedes an earlier tolerated result:
-            # the run is no longer "done with a promoted trial", so a later
-            # tolerance decision must be made from this invocation's trials.
-            if rec.get("tolerated_fail"):
-                rec.pop("tolerated_fail", None)
-                _post = dict(rec.get("postcheck") or {})
-                _post.pop("tolerated", None)
-                rec["postcheck"] = _post
             rec["status"] = "failed"
             rec["last_error"] = (res.get("error") or f"agent exited rc={res.get('rc')}")[:600]
             rec["last_failure_kind"] = str(res.get("failure_kind") or "")
-            # A process-level failure never reached a postcheck: the previous
-            # attempt's postcheck errors are stale and made
-            # resume_unfinished_reason misclassify this as a content rejection
-            # (no continuation offered).
-            rec.pop("postcheck", None)
             # The process died mid-session: its CLI session id is still in the
             # transcript, and a continuation may finish the work it started.
             sid = capture_agent_session_id(ctx, rec)
@@ -2405,72 +2152,20 @@ def apply_results(ctx: Ctx, results: dict) -> None:
             # attempt exactly like a failed one: record it, so the operator can
             # still see why it ended and where its artifacts/transcript went.
             record_attempt(ctx, rec, False, [rec["last_error"]], [], source="process")
-            print_failure(rid, [rec["last_error"]], note="the agent process failed", ctx=ctx)
+            print_failure(rid, [rec["last_error"]], note="the agent process failed")
         else:
             rec["last_failure_kind"] = ""
             postcheck(ctx, rec)
             if rec["status"] == "done":
-                # A run that was tolerated in an earlier invocation and has now
-                # passed a fresh attempt is no longer a tolerated result: drop
-                # the marker so the round is not left provisional forever.
-                if rec.get("tolerated_fail"):
-                    rec.pop("tolerated_fail", None)
-                    _post = dict(rec.get("postcheck") or {})
-                    _post.pop("tolerated", None)
-                    rec["postcheck"] = _post
                 print(f"  [ok]   {rid} done ({fmt_dur(res.get('dur'))})"
                        + (f"  warnings: {'; '.join(rec['postcheck']['warnings'])[:120]}"
                           if rec["postcheck"]["warnings"] else ""))
             else:
-                print_failure(rid, rec["postcheck"]["errors"], ctx=ctx)
+                print_failure(rid, rec["postcheck"]["errors"])
         ctx.save_state()
 
 
-def attempt_start_suffix(rec: dict, budget: int, used: int) -> str:
-    """The launch line's ` [attempt 2/3; 1 re-verification]` tag (empty for the first).
-
-    `used` is how many retry attempts THIS INVOCATION has already spent on the
-    run -- the caller reads it from the live budget (`budget - attempts_left`);
-    the ordinal is `used + 1`. The budget is granted per invocation (a fresh
-    `run` re-grants it), so the tag must not use the run's cumulative counters:
-    a resumed run with four lifetime sessions is still on attempt 1 of its new
-    budget. A scoped repair, a CONTINUATION or a re-verify is part of the
-    attempt it serves, so it is named after the semicolon instead of adding a
-    number (before the split, 2026-11-12 r1_a2_revise printed "[attempt 5/3]"
-    for its third launch).
-    """
-    full_no = int(used) + 1
-    if full_no <= 1:
-        return ""
-    aux = auxiliary_session_summary(rec)
-    return f" [attempt {full_no}/{budget}" + (f"; {aux}" if aux else "") + "]"
-
-
-def failed_run_cell(rid: str, rec: dict, budget: int, spent: int) -> str:
-    """One run's entry in the end-of-invocation FAILED summary.
-
-    `spent` is the retry budget this invocation has actually consumed
-    (`budget - attempts_left`), never the run's cumulative session count: the
-    budget is granted per invocation, so a resumed run starts again at 0. A
-    failed scoped repair/continuation spends the slot of the attempt it serves
-    (it does not add one), and every auxiliary session is named beside it
-    instead of being counted as a retry (which used to print "attempt 5/3").
-    """
-    rec = rec or {}
-    bits = [f"{int(spent)} of {budget} attempt(s) spent"]
-    # The run's lifetime full launches are the same number in the ordinary case;
-    # name them only when a resumed invocation or an out-of-budget stop makes
-    # them differ, so the line never hides an attempt that actually ran.
-    full = stage_attempt_count(rec)
-    if full and full != int(spent):
-        bits.append(f"{full} full launch(es)")
-    aux = auxiliary_session_summary(rec)
-    if aux:
-        bits.append(aux)
-    return f"{rid} (" + "; ".join(bits) + ")"
-
-
-def print_failure(rid: str, errors, note: str = "", ctx=None) -> None:
+def print_failure(rid: str, errors, note: str = "") -> None:
     """EVERY problem of one failed attempt, one per line, in full.
 
     The old line joined the postcheck's messages and cut the result at 140
@@ -2481,8 +2176,7 @@ def print_failure(rid: str, errors, note: str = "", ctx=None) -> None:
     archive hold.
     """
     msgs = [str(e) for e in (errors or [])]
-    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)"
-          + (f" -- {note}" if note else ""))
+    print(f"  [FAIL] {rid}: {len(msgs)} problem(s)" + (f" -- {note}" if note else ""))
     for m in msgs:
         print(f"        - {m}")
 
@@ -2533,7 +2227,6 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
         while not completion_signal_exists(ctx, rec):
             if timeout and (time.time() - t0) > timeout:
                 bump_attempt(rec)
-                bump_stage_attempt(rec)
                 rec["status"] = "failed"
                 rec["last_error"] = f"manual wait exceeded {timeout}s"
                 record_attempt(ctx, rec, False, [rec["last_error"]], [], source="manual-timeout")
@@ -2560,12 +2253,11 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
                     # unchanged, so the old order overwrote the previous
                     # attempt's history and left the retry budget unmoved.
                     bump_attempt(rec)
-                    bump_stage_attempt(rec)
                     record_attempt(ctx, rec, False, bad, [], source="malformed-output")
                     ctx.log("malformed-output", rec["id"], "; ".join(bad)[:300])
                     ctx.save_state()
-                    print(f"  [FAIL] {rec['id']}: malformed structured output "
-                          f"(unchanged for one poll interval): {bad[0][:120]}")
+                    print(f"  [FAIL] {rec['id']}: malformed structured output (unchanged for one "
+                          f"poll interval): {bad[0][:120]}")
                     print("         The prompt is re-issued by the retry loop; nothing was adopted "
                           "from this attempt.")
                     return
@@ -2575,11 +2267,10 @@ def manual_run_one(ctx: Ctx, rec: dict, poll: int, timeout: int) -> None:
             time.sleep(max(2, poll))
     except KeyboardInterrupt:
         ctx.save_state()
-        print("\n[manual] interrupted; state saved. Re-run `run --manual` to continue "
+        print("\n[manual] interrupted; state saved. Re-run `run --agent manual` to continue "
               "(staging is respected: prompts are only printed once their dependencies exist).")
         sys.exit(130)
     bump_attempt(rec)
-    bump_stage_attempt(rec)
     postcheck(ctx, rec, source="manual (operator-supplied completion signal)")
     ctx.save_state()
     print(f"  [{'ok' if rec['status'] == 'done' else 'FAIL'}] {rec['id']}: "
@@ -2600,22 +2291,19 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
     an incomplete panel must never decide a round.
 
     The retry budget is PER INVOCATION: a fresh `run` grants every failed run
-    another retries+1 attempts (the loop bound below enforces it), while
-    rec["stage_attempts"] keeps the cumulative full-launch history the status
-    table shows and rec["attempts"] the lifetime total of every recorded
-    session for the audit (scoped repairs, CONTINUATIONS and re-verifies
-    included; they are reported beside the budget, never as extra retries).
-    Rationale:
-    an operator who re-runs `run` after inspecting a failure is explicitly
-    asking to try again; using the lifetime counter as the gate made the second
-    `run` a no-op that exited immediately with the old error, which reads like a
-    hang. `retry --run <ID>` remains the explicit single-run reset.
+    another retries+1 attempts (the loop bound below enforces it), while the
+    persistent rec["attempts"] counter keeps recording the lifetime total for
+    the audit. Rationale: an operator who re-runs `run` after inspecting a
+    failure is explicitly asking to try again; using the lifetime counter as the
+    gate made the second `run` a no-op that exited immediately with the old
+    error, which reads like a hang. `retry --run <ID>` remains the explicit
+    single-run reset.
     """
     ids = [i for i in ids if ctx.run(i) is not None]
     if not ids:
         return True, False
     max_rounds = max(1, int(retries) + 1)
-    # Failures observed in THIS invocation, per run. The lifetime
+    # Failures observed in THIS invocation, per run. The persistent
     # rec["attempts"] counter also covers earlier invocations (and a freshly
     # rebuilt sandbox inherits it), so using it for the backoff would make a
     # rebuilt run wait before its FIRST attempt.
@@ -2647,7 +2335,6 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     print(f"  [info] {rid}: process-level failure but artifacts exist -> "
                           f"re-verifying")
                     bump_attempt(rec)
-                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                 elif manual:
@@ -2656,17 +2343,12 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     # the failure is reported, and the operator decides whether to
                     # reset it (`retry --run <ID>`), repair it, or abandon it.
                     print(f"  [manual] {rid}: attempt FAILED and is preserved (nothing was "
-                          f"deleted). `run` does NOT re-verify a failed attempt, so inspect "
-                          f"the sandbox and reset it with `retry --run {rid}` to re-run the "
-                          f"postcheck, or abandon the attempt.")
+                          f"deleted). Inspect the sandbox, then either fix the artifacts and "
+                          f"re-run `run`, or reset the attempt with `retry --run {rid}`.")
                     ctx.save_state()
                     continue
                 elif failures_in_phase.get(rid, 0) > retries:
-                    # Every retry is spent. The collection policy uses the best
-                    # failed trial instead of terminating; without a usable
-                    # trial (or with the policy off) the run stays failed.
-                    if manual or not use_best_failed_trial(ctx, rec):
-                        continue
+                    continue
                 else:
                     try:
                         rebuild_sandbox(ctx, rec)
@@ -2704,14 +2386,8 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                                         "checked_at": utcnow()}
                     if failures_in_phase.get(rid, 0) > retries:
                         rec["status"] = "failed"
-                        if use_best_failed_trial(ctx, rec):
-                            ctx.save_state()
-                            continue
-                        aux = auxiliary_session_summary(rec)
                         print(f"        no attempts left in this invocation "
-                              f"({failures_in_phase.get(rid, 0)} attempt(s) spent, "
-                              f"budget {max_rounds}"
-                              + (f"; {aux}" if aux else "") + "); leaving it failed")
+                              f"({rec.get('attempts')} lifetime); leaving it failed")
                         ctx.save_state()
                         continue
                     print("        treating it as a failed attempt: rebuilding the sandbox and "
@@ -2744,7 +2420,7 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     rec = ctx.run(rid)
                     sb = ctx.sandbox_of(rec)
                     print(f"[manual] {rid}: paste {sb / 'PROMPT.md'} (cwd = {sb.resolve()}); "
-                          f"then re-run `run --manual`")
+                          f"then re-run `run --agent manual`")
                 return False, True
             for rid in to_execute:
                 manual_run_one(ctx, ctx.run(rid), poll, timeout)
@@ -2771,9 +2447,8 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                 # 1) A STOPPED session (a stalled turn, a CLI timeout) is CONTINUED
                 # with its own context -- real work, not paperwork -- before
                 # anything else is tried.
-                argv, key, why, mode = resume_gate(ctx, rec, cmd)
-                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout,
-                                                   mode=mode):
+                argv, key, why = resume_gate(ctx, rec, cmd)
+                if argv and run_resume_session_now(ctx, rec, argv, key, why, timeout):
                     if ctx.run(rid)["status"] == "done":
                         continue
                 # 2) Before spending the next retry (and rebuilding the sandbox the
@@ -2786,15 +2461,6 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
                     if ctx.run(rid)["status"] == "done":
                         continue
                 failures_in_phase[rid] = failures_in_phase.get(rid, 0) + 1
-    if not manual:
-        for rid in ids:
-            _rec = ctx.run(rid)
-            if (_rec["status"] == "failed"
-                    and failures_in_phase.get(rid, 0) >= max_rounds):
-                # Only after the whole retry budget is spent: a failed
-                # re-verification or a rebuild that could not run yet must
-                # not be turned into a tolerated result prematurely.
-                use_best_failed_trial(ctx, _rec)
     remaining = [rid for rid in ids if ctx.run(rid)["status"] != "done"]
     if remaining:
         paused = [rid for rid in remaining if ctx.run(rid)["status"] == "pending"
@@ -2804,14 +2470,11 @@ def run_phase(ctx: Ctx, ids: list, *, cmd, timeout: int, jobs: int, retries: int
             print(f"  [{label}] PAUSED (not failed): {paused} already contain agent output but "
                   f"no completion marker.")
         if hard:
-            # Same rule as the round scheduler: name the budget THIS invocation
-            # actually spent, because a run can stop for a reason outside its
-            # retry budget. A failed repair/continuation spends the slot of the
-            # attempt it serves (never an extra one) and its count is named
-            # beside the budget, not folded into it.
-            print(f"  [{label}] FAIL: " + ", ".join(
-                failed_run_cell(rid, ctx.run(rid), max_rounds,
-                                failures_in_phase.get(rid, 0)) for rid in hard))
+            # Same rule as the round scheduler: name each run's OWN attempt
+            # count, because a run can stop for a reason outside its budget.
+            print(f"  [{label}] FAILED: " + ", ".join(
+                f"{rid} ({int(ctx.run(rid).get('attempts') or 0)} attempt(s), "
+                f"budget {max_rounds})" for rid in hard))
             for rid in hard[:6]:
                 err = clip_error_line(ctx.run(rid).get("last_error") or "")
                 if err:
@@ -2866,35 +2529,11 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
         if scoped:
             # A major/minor revision runs NO general review: the concerns run
             # produces the ledger AND the only finding list the single revise
-            # session sees. That one session is checked by an INDEPENDENT
-            # concern audit, and its dispositions are applied by ONE repair
-            # pass before any reviser sees the list.
+            # session sees.
             entries.append({"id": rid_concerns(r), "kind": "concerns", "vid": None,
                             "deps": [rid_a1(r)], "stage": "concerns",
                             "materialize": (lambda c: materialize_concerns(c, r))})
             review_deps = [rid_concerns(r)]
-            if concern_audit_of(ctx) == "on":
-                entries.append({"id": rid_concern_audit(r), "kind": "concern_audit",
-                                "vid": None, "deps": [rid_concerns(r)],
-                                "stage": "concern_audit",
-                                "materialize": (lambda c: materialize_concern_audit(c, r))})
-                entries.append({"id": rid_concern_repair(r), "kind": "concern_repair",
-                                "vid": None,
-                                "deps": [rid_concerns(r), rid_concern_audit(r)],
-                                "stage": "concern_repair",
-                                "materialize": (lambda c: materialize_concern_repair(c, r))})
-                review_deps = [rid_concern_repair(r)]
-            if journal_needs_response(ctx):
-                # The point-by-point response is written FIRST: it fixes the
-                # reviewer's verbatim quotation and the authors' intended answer
-                # before the manuscript changes. The reviser implements that
-                # plan; the final `response` stage reconciles it with the
-                # package after the revision.
-                entries.append({"id": rid_response_draft(r), "kind": "response_draft",
-                                "vid": None, "deps": list(review_deps),
-                                "stage": "response_draft",
-                                "materialize": (lambda c: materialize_response_draft(c, r))})
-                review_deps = [rid_response_draft(r)]
         else:
             # THE GUIDED REVIEW (the round's general checklist pass). With
             # `--no-guided-review` this stage is not planned at all: the probe
@@ -2943,16 +2582,6 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "deps": [rid_a1(r)] + list(review_deps), "stage": "audit",
                             "materialize": (lambda c: materialize_audit(c, r))})
             review_deps.append(rid_audit(r))
-        if (not scoped and n and journal_has_feedback(ctx) and journal_needs_response(ctx)):
-            # resubmit: the point-by-point response is written FIRST, after the
-            # review/audit and before the revise arms, then reconciled with the
-            # package after the round.
-            entries.append({"id": rid_response_draft(r), "kind": "response_draft",
-                            "vid": None,
-                            "deps": [rid_a1(r), rid_feedback(r)] + list(review_deps),
-                            "stage": "response_draft",
-                            "materialize": (lambda c: materialize_response_draft(c, r))})
-            review_deps.append(rid_response_draft(r))
         for j in range(1, n + 1):
             vid = revise_vid(j)
             entries.append({"id": rid_for_fresh(r, vid), "kind": "revise", "vid": vid,
@@ -2961,19 +2590,8 @@ def round_run_plan(ctx: Ctx, r: int) -> list:
                             "materialize": (lambda c, v=vid: materialize_revise(c, r, v))})
     if scoped and journal_needs_response(ctx):
         entries.append({"id": rid_response(r), "kind": "response", "vid": None,
-                        "deps": [rid_for_fresh(r, revise_vid(1)), rid_response_draft(r)],
-                        "stage": "response",
+                        "deps": [rid_for_fresh(r, revise_vid(1))], "stage": "response",
                         "materialize": (lambda c: materialize_response(c, r))})
-        if response_audit_of(ctx) == "on":
-            entries.append({"id": rid_response_audit(r), "kind": "response_audit",
-                            "vid": None, "deps": [rid_response(r)],
-                            "stage": "response_audit",
-                            "materialize": (lambda c: materialize_response_audit(c, r))})
-            entries.append({"id": rid_response_repair(r), "kind": "response_repair",
-                            "vid": None,
-                            "deps": [rid_response(r), rid_response_audit(r)],
-                            "stage": "response_repair",
-                            "materialize": (lambda c: materialize_response_repair(c, r))})
     mask = 0 if scoped else round_integrators(ctx, r)
     arms = integrator_arms(m, n, mask)
     for k in arms:
@@ -2991,11 +2609,8 @@ REVISION_REPAIR_PROMPT_FILE = "REVISION_REPAIR_PROMPT.md"
 
 
 def revision_audit_of(ctx) -> str:
-    """`on` unless the root or the operator turned the revision audit off."""
-    raw = str(os.environ.get("PAPER_REVISION_AUDIT")
-              or (getattr(ctx, "cfg", None) or {}).get("revision_audit")
-              or "on").strip().lower()
-    return "off" if raw in {"off", "0", "no", "false", "none"} else "on"
+    """Post-write auditing is mandatory; legacy opt-outs cannot bypass it."""
+    return "on"
 
 
 def _revision_plan_rows(sb: Path):
@@ -3022,7 +2637,7 @@ def _revision_plan_rows(sb: Path):
         if not isinstance(row, dict):
             return None
         rid = str(row.get("id") or "").strip()
-        rel = _package_rel_under_revised(str(row.get("file") or ""))
+        rel = str(row.get("file") or "").strip()
         if not rid or rid in seen or not rel:
             return None
         # A row must DESCRIBE the repair it authorizes. The prompt's contract is
@@ -3072,24 +2687,6 @@ def _unsafe_package_rel(rel: str) -> bool:
     """True when a plan row's `file` is not a path inside the revised package."""
     return bool(rel.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", rel)
                 or ".." in Path(rel).parts)
-
-
-def _package_rel_under_revised(value: str) -> str:
-    """A repair plan row's `file` as a path RELATIVE to `revised/`.
-
-    The auditor describes the package it audited, so it naturally writes
-    `revised/manuscript.md`; the repair session and the application audit both
-    name the same file `manuscript.md`. The audit compares the plan's rows with
-    the manifests of `revised/`, so an un-normalized `revised/` prefix made
-    every such row fail the coverage check with "changed without a confirmed
-    plan row naming it" even though the row named exactly that file. Both
-    spellings are accepted here; the stored row is always package-relative.
-    """
-    text = strip_leading_dot_slash(str(value or "").replace("\\", "/").strip())
-    prefix = (REVISED_DIR + "/").lower()
-    while text.lower().startswith(prefix):
-        text = text[len(REVISED_DIR) + 1:].lstrip("/")
-    return text
 
 
 def _revision_repair_ledger(sb: Path, rows: list, with_ids: bool = False):
@@ -3214,12 +2811,7 @@ def _repair_file_text(path: Path):
         if path.suffix.lower() not in _REPAIR_TEXT_EXTS \
                 and path.suffix.lower() != ".docx":
             return None
-        # Agent-written package content: read it through the bounded reader so
-        # an oversized file, a planted FIFO or a symlink swap cannot exhaust
-        # memory or read outside the sandbox (F44). `errors="strict"` keeps the
-        # old contract that a binary package is opaque (None), not mojibake.
-        return read_text_bounded(path, errors="strict",
-                                 limit=PACKAGE_TEXT_BYTES_LIMIT)
+        return path.read_bytes().decode("utf-8")
     except (OSError, UnicodeDecodeError, RuntimeError, NotImplementedError):
         return None
 
@@ -3627,137 +3219,6 @@ def _repair_bookkeeping_rel(rel: str) -> bool:
             or is_author_to_complete_readme_name(name))
 
 
-def repair_plan_literal_problems(sb: Path, rows: list) -> list:
-    """Plan rows whose `wrong` is not literal text of the file they name.
-
-    The bounded repair re-reads `wrong` as literal text: a descriptive value (a
-    line number, a parenthetical, several separated quotes) cannot be found in
-    the file, so the repair fails AFTER editing the package -- and the failure
-    used to blame the applied edits instead of the plan. Catching it at the
-    audit keeps the failure where the operator can fix it, and keeps a
-    descriptive row from being "verified" only because the check could not find
-    its text.
-
-    The comparison MUST be the repair's own reader and normaliser
-    (`_repair_file_text` / `_repair_text_norm`): a real DOCX is a deflated zip
-    whose paragraph text is not in its raw bytes, `.py` indentation is syntax
-    (not collapsible whitespace), and an opaque file has no text at all. Reading
-    the raw bytes here rejected every valid DOCX/`.py` row and every opaque
-    file before the repair could even try them.
-    """
-    problems = []
-    for row in rows or ():
-        rel = strip_leading_dot_slash(str(row.get("file") or ""))
-        wrong = str(row.get("wrong") or "")
-        if not rel or not wrong.strip():
-            continue
-        path = Path(sb) / REVISED_DIR / rel
-        text = _repair_file_text(path)
-        if text is None:
-            if not path.exists():
-                # A row that quotes `wrong` in a file that is absent cannot be
-                # repaired: the plan is invalid, not "opaque" (F207).
-                problems.append(
-                    f"{row.get('id') or '?'} names {rel}, which does not exist in "
-                    f"{REVISED_DIR}/; a replacement/deletion row must name a file the "
-                    f"pre-repair package carries.")
-            continue                   # opaque: the repair's span audit decides
-        if _repair_text_norm(rel, wrong) in _repair_text_norm(rel, text):
-            continue
-        problems.append(
-            f"{row.get('id') or '?'} `wrong` is not literal text of {rel}: {wrong[:100]!r}. "
-            f"Quote the shortest VERBATIM fragment of the file (the location and the "
-            f"reasoning belong in `location`/`basis`/`edit`); a description cannot be found "
-            f"or applied by the bounded repair.")
-    return problems
-
-
-def _snapshot_revised_prerepair(sb: Path) -> str:
-    """Snapshot revised/ to revised_prerepair/ WITHOUT following nested links.
-
-    `shutil.copytree(..., symlinks=False)` followed a nested `revised/sub ->
-    /outside` link and copied outside content into the audited baseline, and a
-    planted `revised_prerepair` symlink was accepted by the old `pre.exists()`
-    guard (copytree then copied the outside tree back into revised/ on a
-    rollback). The snapshot must be a REAL directory, and nested links must stay
-    links: copy_into still refuses them, so outside bytes never become package
-    content (F12). Returns "" on success or a failure reason.
-    """
-    sb = Path(sb)
-    pre = sb / "revised_prerepair"
-    if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
-        rmtree_force(pre)
-    if pre.is_symlink() or (pre.exists() and not pre.is_dir()):
-        return "revised_prerepair/ is a symlink or not a directory"
-    if not pre.exists():
-        rev = sb / REVISED_DIR
-        # is_dir() FOLLOWS a symlink: a `revised -> /outside` root made copytree
-        # copy the outside tree into the audited baseline, which a later restore
-        # then made package content (F43). The root must be a real directory
-        # inside this sandbox, whatever it points at.
-        if rev.is_symlink() or not rev.is_dir():
-            return f"{REVISED_DIR}/ is a symlink, missing or not a directory"
-        try:
-            rev.resolve().relative_to(sb.resolve())
-        except (OSError, ValueError):
-            return f"{REVISED_DIR}/ resolves outside the sandbox"
-        shutil.copytree(rev, pre, symlinks=True)
-    return ""
-
-
-def _restore_revised_from_prerepair(sb: Path) -> str:
-    """Put the audited pre-repair package back; return "" or a failure reason.
-
-    A bounded repair that violated its own contract ("applies only the
-    confirmed rows") is not the role's product (rule 1), so its bytes must not
-    become the arm's candidate (rule 5). The pre-repair package was already
-    audited and accepted, so restoring it is the safe outcome; the stage
-    postcheck then decides the restored bytes exactly as it decides any other
-    package. The run record (`rec["revision_repair"]`) still carries the
-    failure; the rejected repair's own `revised/REPAIR_LEDGER.json` is replaced
-    by the snapshot together with the rest of the rejected bytes.
-
-    The swap never deletes the only copy: the current package is renamed aside
-    first, the staged snapshot is renamed into place, and the old package is
-    removed only after the new one exists (a failed rename puts it back).
-    """
-    pre = Path(sb) / "revised_prerepair"
-    cur = Path(sb) / REVISED_DIR
-    if pre.is_symlink() or not pre.is_dir():
-        return "the pre-repair snapshot revised_prerepair/ is a symlink or not a directory"
-    stage = Path(sb) / (REVISED_DIR + ".restore-tmp")
-    parked = Path(sb) / (REVISED_DIR + ".restore-old")
-    try:
-        rmtree_force(stage)
-        rmtree_force(parked)
-        shutil.copytree(pre, stage, symlinks=True)
-    except OSError as exc:
-        rmtree_force(stage)
-        return f"the snapshot could not be staged ({type(exc).__name__}: {exc})"
-    try:
-        if cur.exists() or cur.is_symlink():
-            cur.rename(parked)
-        stage.rename(cur)
-    except OSError as exc:
-        # Put the package we moved aside back: the arm must never be left with
-        # no package because the swap failed.
-        try:
-            if parked.exists() and not cur.exists():
-                parked.rename(cur)
-        except OSError:
-            pass
-        try:
-            rmtree_force(stage)
-        except OSError:
-            pass
-        return f"the staged restore could not be put in place ({type(exc).__name__}: {exc})"
-    try:
-        rmtree_force(parked)
-    except OSError:
-        pass                              # the restored package is in place; cleanup only
-    return ""
-
-
 def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: set,
                                with_reasons: bool = False):
     """Files changed by the bounded repair that no CONFIRMED plan row covers.
@@ -3816,12 +3277,6 @@ def _revised_repair_violations(pre: Path, cur: Path, rows: list, confirmed_ids: 
             continue
         _text = _repair_file_text(cur / rel)
         if _text is None:
-            if not _before_q and _after_q and not (cur / rel).exists():
-                # A pure insertion into a NEW file must have created it; the
-                # old code skipped a missing file as "opaque" and accepted the
-                # row as a no-op (F207).
-                bad.setdefault(rel, "the confirmed insertion was not applied: the file "
-                                    "was never created")
             continue
         _tn = _repair_norm(_text)
         if not _before_q and _after_q:
@@ -4012,8 +3467,8 @@ def revision_chain_pending(rec: dict) -> bool:
         post-repair postcheck never ran (`revision_chain == "complete"` is the
         marker written after that postcheck).
 
-    A terminal skip (audit off, concern-scoped revision, decided round,
-    already-consumed downstream bytes) and a completed chain do not re-enter.
+    Legacy skips owe the mandatory audit. A completed, independently verified
+    chain does not re-enter.
     """
     if rec.get("kind") != "revise" or rec.get("status") != "done":
         return False
@@ -4022,22 +3477,13 @@ def revision_chain_pending(rec: dict) -> bool:
         return True
     status = str(audit.get("status") or "")
     if status == "skipped":
-        return "manual mode" in str(audit.get("reason") or "")
+        return True
     if status == "failed":
         return True
     if status == "done":
-        if int(audit.get("rows") or 0) == 0:
-            return False
-        return rec.get("revision_chain") != "complete"
+        return (rec.get("revision_chain") != "complete"
+                or not rec.get("write_quality"))
     return True
-
-
-# The attempt-identity fields `_execute_attempt_in` writes onto the run record.
-# An auxiliary session runs through the same executor, so all of them are
-# snapshotted and restored around it (F122).
-_AUX_SESSION_IDENTITY_FIELDS = ("agent_command", "prompt_file", "prompt_sha256",
-                                "agent_model", "max_turns", "turn_cap_hit",
-                                "turn_cap_enforced", "last_attempt_started")
 
 
 def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
@@ -4048,15 +3494,6 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     are part of the accepted revise attempt, so the attempt's start (and the
     history row `postcheck` later writes) must keep the revise session's own
     values, and the audit/repair durations live in their own records.
-
-    The SAME rule covers the rest of the attempt's identity (F122):
-    `_execute_attempt_in` also writes `agent_command`, `prompt_file`,
-    `prompt_sha256`, `agent_model`, `max_turns` and the turn flags, so after a
-    revision audit the done revise record claimed it had received
-    `REVISION_AUDIT_PROMPT.md` with the audit's digest, command and model. The
-    accepted attempt's identity is snapshotted before the auxiliary session and
-    restored after it, so the run record still identifies the bytes that
-    produced `revised/`.
 
     The PARENT's completion marker is restored after the aux session. The
     sandbox root has one `_pipeline_done.json` (`MARKER_FILE`) and the aux
@@ -4072,29 +3509,22 @@ def _run_aux_session(sb: Path, rec: dict, cmd: list, timeout: int,
     disposed deletion table, the repair ledger), not from re-labelling the
     parent's marker.
     """
-    # The fields `_execute_attempt_in` writes onto `rec`: the attempt's identity
-    # (F122). Snapshot presence AND value so a field the stage never set is
-    # removed again instead of inheriting the aux session's value.
-    saved_identity = {k: rec[k] for k in _AUX_SESSION_IDENTITY_FIELDS if k in rec}
+    started = rec.get("last_attempt_started")
     marker = sb / MARKER_FILE
     saved_marker = None
-    if marker.is_file() and not marker.is_symlink():
+    if marker.is_file():
         try:
-            # No-follow, bounded read: a planted symlink must not republish an
-            # outside file as this sandbox's completion marker.
-            saved_marker = read_regular_file(marker, MAX_PAYLOAD_BYTES)
+            saved_marker = marker.read_bytes()
         except OSError:
             saved_marker = None
     result = None
     try:
-        result = _execute_attempt_in(sb, rec, cmd, timeout, prompt_file, log_name, False)
+        result = _execute_attempt_in(sb, rec, _write_fresh_command(cmd), timeout,
+                                     prompt_file, log_name, False)
         return result
     finally:
-        for _field in _AUX_SESSION_IDENTITY_FIELDS:
-            if _field in saved_identity:
-                rec[_field] = saved_identity[_field]
-            else:
-                rec.pop(_field, None)
+        if started is not None:
+            rec["last_attempt_started"] = started
         restore_error = ""
         try:
             if saved_marker is not None:
@@ -4136,13 +3566,11 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     the audit reads `base/` and `revised/` and writes only
     `revision_audit/REPAIR_PLAN.json`; the repair session re-validates every row,
     edits `revised/` only, and the stage's own postcheck is re-run on the final
-    package. A skipped (`--revision-audit off`), empty or inapplicable plan
-    leaves `revised/` as the final revised version and says why.
-
-    Two guards keep the chain off a judged artifact: a round that is already
-    decided is never audited/repaired (its champion and pin are that digest's
-    bytes, rule 5), and a concern-scoped (major/minor) revision has no general
-    guided-review/audit to consume -- its edits are limited to the admitted concerns.
+    package. Empty plans need no repair. Independent final verification binds
+    acceptance to the exact final bytes, including in major/minor modes, whose
+    audit and repair stay inside the admitted concerns and edit regressions.
+    Already judged/consumed artifacts are never mutated retroactively; legacy
+    missing audits block downstream acceptance until the round is retried.
     """
     if rec.get("kind") != "revise":
         return
@@ -4157,60 +3585,25 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         ctx.save_state()
         _prev_audit = {}
     if _prev_audit.get("status") == "skipped":
-        return
+        rec.pop("revision_audit", None)
+        rec.pop("revision_chain", None)
+        _prev_audit = {}
     if _prev_audit.get("status") == "done":
         if int(_prev_audit.get("rows") or 0) == 0:
-            rec["revision_chain"] = "complete"
-            ctx.save_state()
+            finish_revision_verification(ctx, rec, cmd, timeout)
             return
-        _repair_rec = rec.get("revision_repair") or {}
-        if _repair_rec.get("status") in ("done", "failed"):
+        if (rec.get("revision_repair") or {}).get("status") in ("done", "failed"):
             # The repair finished (or failed) before a crash but the chain's own
-            # postcheck may not have run: finish it now, once. The stage postcheck
-            # decides whether the package is valid, but a FAILED repair's package
-            # must be the audited pre-repair one, never the rejected edits.
-            # `revision_chain` is the done marker, so a crash during this postcheck
-            # is retried instead of re-auditing.
-            if _repair_rec.get("status") == "failed" and not _repair_rec.get("rolled_back"):
-                # The crash may have landed between recording the failure and
-                # restoring the audited bytes. Postchecking the rejected edits
-                # would let them become the arm's candidate (rule 5), so finish
-                # the rollback first -- and refuse to touch a snapshot whose
-                # digest no longer matches (it may have been tampered with).
-                if _repair_rec.get("rollback_unsafe"):
-                    rec["status"] = "failed"
-                    rec["last_error"] = (
-                        "the failed bounded repair's baseline is untrusted; refusing to "
-                        "postcheck the rejected edits")
-                    ctx.save_state()
-                    return
-                _sb = ctx.sandbox_of(rec)
-                _pre = _sb / "revised_prerepair"
-                _expected_pre = rec.get("revision_prerepair_digest")
-                _actual_pre = (manifest_digest(
-                    hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
-                    if _pre.is_dir() and not _pre.is_symlink() else "")
-                if not _expected_pre or _actual_pre != _expected_pre:
-                    rec["status"] = "failed"
-                    rec["last_error"] = (
-                        "the failed bounded repair's baseline revised_prerepair/ cannot be "
-                        "trusted (digest missing or changed); refusing to postcheck the "
-                        "rejected edits")
-                    ctx.save_state()
-                    return
-                _rollback_error = _restore_revised_from_prerepair(_sb)
-                _repair_rec["rolled_back"] = not _rollback_error
-                if _rollback_error:
-                    _repair_rec["rollback_error"] = _rollback_error
-                    rec["status"] = "failed"
-                    rec["last_error"] = (f"the rejected repair's edits could not be rolled "
-                                         f"back ({_rollback_error}); refusing to postcheck them")
-                    ctx.save_state()
-                    return
+            # postcheck may not have run: finish it now, once. A failed repair
+            # blocks acceptance even when the files look structurally valid.
+            # The independent final verifier must still pass on resumed bytes.
             postcheck(ctx, rec, source="revision-audit")
-            rec["revision_chain"] = ("complete" if rec.get("status") == "done"
-                                     else "failed")
-            ctx.save_state()
+            if rec.get("status") == "done" and (rec.get("revision_repair") or {}).get("status") == "done":
+                finish_revision_verification(ctx, rec, cmd, timeout)
+            else:
+                rec["status"] = "failed"
+                rec["revision_chain"] = "failed"
+                ctx.save_state()
             return
         # Audit done, repair unfinished: the interrupted pass may have left
         # PARTIAL edits in revised/. The pre-repair snapshot is the only trusted
@@ -4218,7 +3611,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         # rollback image and auditing (and accepting) the half-edited package.
         _sb = ctx.sandbox_of(rec)
         _pre = _sb / "revised_prerepair"
-        if _pre.is_dir() and not _pre.is_symlink():
+        if _pre.is_dir():
             _expected_pre = rec.get("revision_prerepair_digest")
             _actual_pre = manifest_digest(
                 hash_manifest(_pre, on_error="<unreadable>", follow_dir_links=True))
@@ -4230,8 +3623,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                 ctx.save_state()
                 print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error']}")
                 return
-            rmtree_force(_sb / REVISED_DIR)
-            shutil.copytree(_pre, _sb / REVISED_DIR, symlinks=True)
+            shutil.rmtree(_sb / REVISED_DIR, ignore_errors=True)
+            shutil.copytree(_pre, _sb / REVISED_DIR)
         elif rec.get("revision_prerepair_digest"):
             rec["status"] = "failed"
             rec["last_error"] = ("the interrupted repair's baseline revised_prerepair/ is "
@@ -4258,11 +3651,6 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         record_revision_chain_skip(
             ctx, rec, "the round is already decided; a judged candidate is never changed")
         return
-    # A concern-scoped revision IS audited: its object is the revision's own
-    # delta plus the REPAIRED human-concern findings, so it needs no general
-    # review. The prompt gains a scoped block below; the bounded repair stays
-    # inside the admitted concerns because `postcheck_revise` re-runs the scope
-    # guard after it.
     _downstream = [x["id"] for x in ctx.runs(round_no=r)
                    if x.get("status") == "done" and x.get("kind") in ("integrate", "judge")]
     if _downstream:
@@ -4270,9 +3658,6 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
             ctx, rec, "integration/judge run(s) already consumed revised/ this round ("
                       + ", ".join(_downstream[:4]) + "); their bytes are not changed after "
                       "the fact -- retry the round if the audit is required")
-        return
-    if revision_audit_of(ctx) != "on":
-        record_revision_chain_skip(ctx, rec, "revision audit off")
         return
     sb = ctx.sandbox_of(rec)
     if not sb.is_dir() or not (sb / REVISED_DIR).is_dir():
@@ -4287,10 +3672,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                  "revision_audit/DELETED_PARAGRAPHS.md",
                  "revised/REPAIR_LEDGER.json", "revised/REPAIR_LEDGER.md"):
         (sb / _rel).unlink(missing_ok=True)
-    # `shutil.rmtree(..., ignore_errors=True)` refuses a SYMLINK and suppresses
-    # the refusal, so a planted `revised_prerepair -> /outside` survived the
-    # reset; rmtree_force unlinks the link itself and never descends it (F12).
-    rmtree_force(sb / "revised_prerepair")
+    shutil.rmtree(sb / "revised_prerepair", ignore_errors=True)
     # Seed the deletion audit from base -> revised. The auditor must dispose
     # every row: a deleted paragraph that carried a fact is exactly the
     # "FACT REMOVED" class this stage exists to catch, and leaving the seed
@@ -4300,40 +3682,27 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     # row that restored it would reintroduce the dangling reference. Exempt
     # exactly the recorded (document, sentence) removals, including the rest of
     # a paragraph that also survives.
-    _deleted_skipped = []
     _deleted_rows = deletion_audit_rows(
         sb / "base", sb / REVISED_DIR,
-        exempt_removed=pipeline_removed_sentences(rec, with_document=True),
-        skipped=_deleted_skipped)
-    if _deleted_skipped:
-        # A submitted file the audit could not read is not an empty document:
-        # seeding no row for it makes a corrupt DOCX read as "nothing was
-        # deleted", so fail the attempt instead of certifying a partial audit.
-        rec["status"] = "failed"
-        rec["last_error"] = (
-            "the deletion audit could not read submitted file(s): "
-            + ", ".join(sorted(set(_deleted_skipped))[:6])
-            + (" ..." if len(set(_deleted_skipped)) > 6 else "")
-            + "; the audit seed would be incomplete -- repair or remove them")[:600]
-        ctx.save_state()
-        print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error'][:240]}")
-        return
+        exempt_removed=pipeline_removed_sentences(rec, with_document=True))
     write_text_atomic(sb / "revision_audit" / "DELETED_PARAGRAPHS.md",
                       deletion_audit_markdown(_deleted_rows))
     _audit_ins, _audit_del = content_edit_policy_allowed(ctx, rec)
     _audit_prefer = prefer_rewrite_allowed(ctx, rec)
-    _audit_removable = soft_deletions_allowed(ctx, rec)
-    _journal_audit_block = (journal_revision_audit_block(ctx)
-                            if journal_is_scoped(ctx) else "")
     write_text_atomic(sb / REVISION_AUDIT_PROMPT_FILE,
                       revision_audit_prompt(sb, rec["id"], r,
                                             execution_profile=execution_profile_of(ctx),
                                             insertions_allowed=_audit_ins,
                                             deletions_allowed=_audit_del,
-                                            prefer_rewrite=_audit_prefer,
-                                            soft_deletions=_audit_removable,
-                                            author_to_complete=author_to_complete_mode_of(ctx),
-                                            journal_block=_journal_audit_block))
+                                            prefer_rewrite=_audit_prefer))
+    if journal_is_scoped(ctx):
+        scope = ("\nMANDATORY CONCERN-SCOPED AUDIT: this is a major/minor revision. "
+                 "Read concerns/JF_concerns.json and the JF findings. Verify every admitted "
+                 "concern's resolution, authorized edit scope, factual preservation and "
+                 "regressions introduced by those edits. Do not re-review unrelated content, "
+                 "expand the admitted concerns or plan an unrelated repair.\n")
+        prompt_path = sb / REVISION_AUDIT_PROMPT_FILE
+        write_text_atomic(prompt_path, scope + prompt_path.read_text(encoding="utf-8"))
     # The revision audit is documented READ-ONLY on every input its prompt
     # names -- base/, revised/, guided_review/, audit/, raw_data/ and code/ -- and may
     # write only revision_audit/REPAIR_PLAN.json. Snapshot each area so a
@@ -4343,7 +3712,7 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     # matching the sandbox's guided_review/ directory, so an audit could edit
     # the frozen review and still pass.
     _guarded_dirs = ("base", GUIDED_REVIEW_DIR, "audit", "raw_data", "code",
-                     REVISED_DIR)
+                     "concerns", "feedback", REVISED_DIR)
 
     def _readonly_snapshot() -> dict:
         return {name: (manifest_digest(hash_manifest(sb / name, follow_dir_links=True))
@@ -4356,7 +3725,6 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                            "_revision_audit.log")
     (sb / REVISION_AUDIT_PROMPT_FILE).unlink(missing_ok=True)
     rows = _revision_plan_rows(sb)
-    _plan_literal = repair_plan_literal_problems(sb, rows or [])
     _plan_ids = [str(r.get("id") or "") for r in (rows or []) if isinstance(r, dict)]
     deletion_problems = deletion_audit_problems(
         sb, expected_rows=len(_deleted_rows),
@@ -4371,9 +3739,6 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     elif rows is None:
         audit_rec["error"] = ("no valid revision_audit/REPAIR_PLAN.json (every row needs a "
                               "unique id and a package-relative file)")
-    elif _plan_literal:
-        audit_rec["error"] = ("the repair plan quotes text the file does not carry: "
-                              + _plan_literal[0][:400])
     elif deletion_problems:
         audit_rec["error"] = ("the deletion audit is incomplete: "
                               + deletion_problems[0][:400])
@@ -4403,17 +3768,12 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
         return
     print(f"  [revision-audit] {rec['id']}: {len(rows)} confirmed repair row(s)")
     if not rows:
+        finish_revision_verification(ctx, rec, cmd, timeout)
         return
     # Preserve the audited bytes: the repair produces the final revised version.
-    _snapshot_error = _snapshot_revised_prerepair(sb)
-    if _snapshot_error:
-        rec["status"] = "failed"
-        rec["last_error"] = (f"the pre-repair snapshot could not be taken: "
-                             f"{_snapshot_error}")[:600]
-        ctx.save_state()
-        print(f"  [revision-audit] {rec['id']}: FAILED — {rec['last_error'][:240]}")
-        return
     pre = sb / "revised_prerepair"
+    if not pre.exists():
+        shutil.copytree(sb / REVISED_DIR, pre)
     # The snapshot lives inside the agent-writable sandbox. Keep its digest in
     # the run record (outside the sandbox) so a repair cannot rewrite BOTH the
     # baseline and the package to make the pre/post guard see no change (F07).
@@ -4422,15 +3782,19 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
     ctx.save_state()
     _edit_ins, _edit_del = content_edit_policy_allowed(ctx, rec)
     _edit_prefer = prefer_rewrite_allowed(ctx, rec)
-    _edit_removable = soft_deletions_allowed(ctx, rec)
     write_text_atomic(sb / REVISION_REPAIR_PROMPT_FILE,
                       revision_repair_prompt(sb, rec["id"], r, len(rows),
                                              execution_profile=execution_profile_of(ctx),
                                              insertions_allowed=_edit_ins,
                                              deletions_allowed=_edit_del,
-                                             prefer_rewrite=_edit_prefer,
-                                             soft_deletions=_edit_removable,
-                                             author_to_complete=author_to_complete_mode_of(ctx)))
+                                             prefer_rewrite=_edit_prefer))
+    if journal_is_scoped(ctx):
+        prompt_path = sb / REVISION_REPAIR_PROMPT_FILE
+        write_text_atomic(prompt_path,
+                          "MANDATORY SCOPE: repair only admitted JF concern resolutions and "
+                          "regressions introduced by their edits; never expand the concern "
+                          "ledger or edit unrelated content.\n" +
+                          prompt_path.read_text(encoding="utf-8"))
     print(f"  [revision-repair] {rec['id']}: one bounded repair pass")
     res2 = _run_aux_session(sb, rec, cmd, timeout, REVISION_REPAIR_PROMPT_FILE,
                             "_revision_repair.log")
@@ -4465,13 +3829,10 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                     repair_rec["status"] = "failed"
                     repair_rec["error"] = (
                         "the pre-repair baseline revised_prerepair/ was modified during "
-                        "the repair; the applied-change audit is untrustworthy, so the "
-                        "rejected edits cannot be rolled back and must not be published")
-                    # Restoring from a tampered baseline would ship the tamper.
-                    repair_rec["rollback_unsafe"] = True
+                        "the repair; the applied-change audit is untrustworthy")
                     rec["revision_repair"] = repair_rec
                     ctx.save_state()
-                    unplanned = None
+                    unplanned = {"revised_prerepair/": "baseline digest changed"}
                 else:
                     unplanned = _revised_repair_violations(pre, sb / REVISED_DIR, rows,
                                                            confirmed_ids, with_reasons=True)
@@ -4482,45 +3843,35 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                         "plan rows cover: "
                         + "; ".join(f"{_rel} ({_why})" if _why else _rel
                                     for _rel, _why in list(unplanned.items())[:6]))
-                elif repair_rec["status"] == "done":
+                else:
                     repair_rec["ledger"] = counts
     rec["revision_repair"] = repair_rec
     ctx.save_state()
     if repair_rec["status"] != "done":
-        # A repair that broke its contract leaves edited bytes behind. The package
-        # the postcheck decides must be the last VERIFIED one, so restore the
-        # audited pre-repair package instead of publishing the rejected edits
-        # (rule 5). When that restore is impossible -- a tampered baseline, or a
-        # missing/stale snapshot -- the rejected bytes cannot be told apart from
-        # valid ones, so the arm fails instead of being postchecked and possibly
-        # accepted.
-        if repair_rec.get("rollback_unsafe"):
-            repair_rec["rolled_back"] = False
-            rec["status"] = "failed"
-            rec["last_error"] = str(repair_rec.get("error") or
-                                    "the bounded repair's bytes cannot be rolled back")
-            print(f"  [revision-repair] {rec['id']}: FAILED — "
-                  f"{str(repair_rec['error'])[:240]}")
-            rec["revision_chain"] = "failed"
-            ctx.save_state()
-            return
-        _rollback_error = _restore_revised_from_prerepair(sb)
-        repair_rec["rolled_back"] = not _rollback_error
-        if _rollback_error:
-            repair_rec["rollback_error"] = _rollback_error
-            rec["status"] = "failed"
-            rec["last_error"] = (f"the rejected repair's edits could not be rolled back "
-                                 f"({_rollback_error}); refusing to publish them")
-            print(f"  [revision-repair] {rec['id']}: FAILED — {rec['last_error'][:240]}")
-            rec["revision_chain"] = "failed"
-            ctx.save_state()
-            return
-        print(f"  [revision-repair] {rec['id']}: FAILED — {str(repair_rec['error'])[:240]}")
-        print(f"  [revision-repair] {rec['id']}: rolled {REVISED_DIR}/ back to the "
-              f"audited pre-repair package (revised_prerepair/)")
-    # The SAME postcheck decides the final revised version.
+        rec["status"] = "failed"
+        rec["revision_chain"] = "failed"
+        rec["last_error"] = "mandatory bounded repair failed: " + str(repair_rec["error"])
+        ctx.save_state()
+        print(f"  [revision-repair] {rec['id']}: FAILED — {repair_rec['error'][:240]}")
+        return
     postcheck(ctx, rec, source="revision-audit")
-    rec["revision_chain"] = ("complete" if rec.get("status") == "done" else "failed")
+    if rec.get("status") == "done":
+        finish_revision_verification(ctx, rec, cmd, timeout)
+    else:
+        rec["revision_chain"] = "failed"
+        ctx.save_state()
+
+
+def finish_revision_verification(ctx, rec: dict, cmd: list, timeout: int) -> None:
+    """Independent read-only verification; never another repair loop."""
+    try:
+        audit_write_output(ctx.sandbox_of(rec), rec, cmd, timeout,
+                           output_rel=REVISED_DIR, verify_only=True)
+        rec["revision_chain"] = "complete"
+    except (OSError, ValueError, TypeError) as exc:
+        rec["status"] = "failed"
+        rec["revision_chain"] = "failed"
+        rec["last_error"] = str(exc)[:600]
     ctx.save_state()
 
 
@@ -4542,11 +3893,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
     and each run keeps the per-invocation retry budget and the exponential
     backoff of `run_phase` (so a lost session still cannot shrink the panel).
     Returns (all_done, paused_for_manual) exactly like `run_phase`.
-
-    A run whose retries are exhausted is handled by `use_best_failed_trial`
-    when --tolerate-fail is on: its best failed trial becomes the run's result
-    and the scheduler continues (PROVISIONAL, never certified). With the policy
-    off, or no usable trial, a still-failed run leaves the round incomplete.
     """
     plan = round_run_plan(ctx, r)
     # FAIL FAST on a plan this build cannot finish. A run kind with no
@@ -4643,7 +3989,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if state == "signal":
                 signal_rec = ctx.run(e["id"])
                 bump_attempt(signal_rec)
-                bump_stage_attempt(signal_rec)
                 postcheck(ctx, signal_rec, source="recheck (marker already on disk)")
                 ctx.save_state()
                 if signal_rec.get("status") == "done" \
@@ -4661,7 +4006,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             if nowait:
                 print(f"[manual] {e['id']} (round {r}, {e['stage']}): paste "
                       f"{sb / 'PROMPT.md'} (cwd = {sb.resolve()}); then re-run "
-                      f"`run --manual`")
+                      f"`run --agent manual`")
                 continue
             print(f"[manual] {e['id']} (round {r}, {e['stage']}): waiting for the completion "
                   f"signal; paste {sb / 'PROMPT.md'} with cwd = {sb.resolve()}")
@@ -4702,15 +4047,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         """
         failures[rid] += 1
         attempts_left[rid] -= 1
-        spent = max_attempts - attempts_left[rid]
         if attempts_left[rid] <= 0:
-            # All retries are spent. With --tolerate-fail the best failed
-            # trial (most required output files, then fewest FAIL messages)
-            # becomes this stage's result and the pipeline continues on it;
-            # without a usable trial, or with the policy off, the run is a
-            # hard FAIL exactly as before.
-            if not manual and use_best_failed_trial(ctx, rec):
-                return
             failed_hard.append(rid)
             return
         delay = backoff_delay(retry_backoff, failures[rid], retry_backoff_max)
@@ -4720,18 +4057,12 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
         if delay:
             not_before[rid] = time.time() + delay
         kept = failed_sandbox_dir(ctx, rec)
-        # Read the sandbox's attempt(s) BEFORE the rebuild renames it away, and
-        # name the RETRY ordinal from THIS invocation's budget (not the run's
-        # lifetime sessions): the kept sandbox may hold a full attempt plus the
-        # continuation/re-verify that ran in it, and none of those is a retry.
-        inside = sandbox_attempts(rec) or [attempt_number(rec)]
         try:
             rebuild_sandbox(ctx, rec)
             rec["status"] = "pending"
             if kept.is_dir():
-                print(f"  [retry] {rid}: attempt {spent}/{max_attempts} kept in "
-                      f"{kept.relative_to(ctx.root)} (record session(s) "
-                      f"{', '.join(str(a) for a in inside)}; its transcript is under "
+                print(f"  [retry] {rid}: attempt {attempt_number(rec)} kept in "
+                      f"{kept.relative_to(ctx.root)} (its transcript is under "
                       f"{Path(LOGS_DIRNAME)}/)")
         except DepsNotMet as exc:
             print(f"  [info] {rid}: {exc}")
@@ -4744,8 +4075,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             rec["last_error"] = (str(rec.get("last_error") or "")
                                  + f" | sandbox rebuild failed: {exc}")[:600].lstrip(" |")
             ctx.log("rebuild-failed", rid, str(exc)[:300])
-            if not manual and use_best_failed_trial(ctx, rec):
-                return
             failed_hard.append(rid)
 
     with ThreadPoolExecutor(max_workers=max(1, int(jobs))) as ex:
@@ -4787,7 +4116,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if state == "signal":
                     rec = ctx.run(rid)
                     bump_attempt(rec)
-                    bump_stage_attempt(rec)
                     postcheck(ctx, rec, source="recheck (marker already on disk)")
                     ctx.save_state()
                     if rec["status"] == "done" and revision_chain_pending(rec):
@@ -4800,7 +4128,7 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                                                          problems, cmd, timeout):
                             continue
                         print_failure(rid, (rec.get("postcheck") or {}).get("errors", []),
-                                      note="the completion signal was already on disk", ctx=ctx)
+                                      note="the completion signal was already on disk")
                         register_failure(rid, rec)
                     continue
                 if state == "dirty":
@@ -4818,8 +4146,8 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                     continue
                 rec = ctx.run(rid)
                 print(f"  [{label}] starting {rid} ({e['stage']})"
-                      + attempt_start_suffix(rec, max_attempts,
-                                             max_attempts - attempts_left[rid]))
+                      + (f" [attempt {rec['attempts'] + 1}/{max_attempts}]"
+                         if rec["attempts"] else ""))
                 fut = ex.submit(_execute_attempt_in, ctx.sandbox_of(rec), rec, cmd, timeout)
                 running[fut] = rid
             # 2. wait for a completion (or a short tick to re-check backoff timers)
@@ -4885,7 +4213,6 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                 if rec["status"] == "failed" and not (rec.get("postcheck") or {}).get("errors") \
                         and likely_complete_artifacts(ctx, rec):
                     bump_attempt(rec)
-                    bump_reverification(rec)
                     postcheck(ctx, rec, source="re-verify (process failed, artifacts complete)")
                     ctx.save_state()
                     if rec["status"] == "done":
@@ -4897,10 +4224,10 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
                             continue
                 # ... then a repairable artifact-quality failure before the retry
                 # burns the attempt and rebuilds the sandbox it would repair.
-                argv, key, why, mode = resume_gate(ctx, rec, cmd)
+                argv, key, why = resume_gate(ctx, rec, cmd)
                 if argv and len(running) < max(1, int(jobs)) \
                         and start_resume_session(ctx, ex, running, resume_flight, rec,
-                                                 argv, key, why, timeout, mode=mode):
+                                                 argv, key, why, timeout):
                     continue
                 problems = repairable_artifact_failure(ctx, rec)
                 if problems and len(running) < max(1, int(jobs)) \
@@ -4919,19 +4246,15 @@ def run_round_runs(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: i
             never_started = [rid for rid in hard if not (ctx.run(rid) or {}).get("attempts")]
             tried = [rid for rid in hard if rid not in never_started]
             if tried:
-                # The budget THIS invocation spent, never the run's lifetime
-                # count and never the whole budget: a run that failed for a
-                # reason OUTSIDE its retry budget (a sandbox that could not be
-                # rebuilt, an internal error) may have spent only one slot, and
-                # reporting "FAILED after 3 attempt(s)" for a run with one sends
-                # the operator hunting for attempts that never happened
-                # (2026-09-23: r1_audit). The budget is per invocation, so a
-                # resumed run starts again at 0; scoped repairs, CONTINUATIONS
-                # and re-verifies are named beside it, not added to it.
-                print(f"  [{label}] FAIL: " + ", ".join(
-                    failed_run_cell(rid, ctx.run(rid), max_attempts,
-                                    max_attempts - attempts_left[rid])
-                    for rid in tried))
+                # Each run's OWN attempt count, never the invocation's budget: a
+                # run that failed for a reason OUTSIDE its retry budget (a
+                # sandbox that could not be rebuilt, an internal error) never
+                # spent it, and reporting "FAILED after 3 attempt(s)" for a run
+                # with one attempt sends the operator hunting for two attempts
+                # that never happened (2026-09-23: r1_audit).
+                print(f"  [{label}] FAILED: " + ", ".join(
+                    f"{rid} ({int((ctx.run(rid) or {}).get('attempts') or 0)} attempt(s), "
+                    f"budget {max_attempts})" for rid in tried))
             if never_started:
                 print(f"  [{label}] never started (an upstream run is not done): "
                       + ", ".join(never_started))
@@ -5010,7 +4333,7 @@ def round_tracking(ctx: Ctx, r: int, enabled: bool,
         fb_n = sum(1 for v in versions for c in v["comparisons"]
                    if c.get("ok") and not c.get("tool"))
         bad_n = sum(1 for v in versions for c in v["comparisons"]
-                    if not c.get("ok") and not c.get("skipped"))
+                    if not c.get("ok"))
         tools = sorted({c["tool"] for v in versions for c in v["comparisons"]
                         if c.get("ok") and c.get("tool")})
         print(f"[run] round {r} difference tracking: {ok_n} tracked copy(ies)"
@@ -5055,7 +4378,6 @@ def _apply_judge_selection(rrec: dict, only, judge_step: bool, r: int, ctx: Ctx)
             rrec["judges_enabled"] = _sel
 
 
-
 def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                 manual: bool, nowait: bool, poll: int,
                 judge_cmd=None, judge_manual: bool = None, judge_timeout=None,
@@ -5097,15 +4419,6 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
     print()
     print(f"[run] ==================== ROUND {r}/{R} ====================")
     rrec = ctx.round_rec(r)
-    # A re-drive recomputes the tolerated record from the runs it actually
-    # drives; a stale record/verdict from an earlier invocation must not keep
-    # the round provisional after the failed run was retried successfully.
-    rrec.pop("tolerated_fail", None)
-    # The legacy spelling of the same record: decide reads either one, so a
-    # re-drive that cleared only the new key left an old round PROVISIONAL
-    # after its failed stage had been retried successfully (F104).
-    rrec.pop("almost_fail", None)
-    rrec.pop("certified", None)
     rrec["status"] = "active"
     rrec["started"] = rrec.get("started") or utcnow()
     # `run --only r1_judge_w2_j1` (and its roundless form `w2_j1`) selects WHICH
@@ -5179,27 +4492,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
               "Resume with `run` (or reset one run with `retry`).")
         raise
     if not ok:
-        # A paused round (manual --no-wait, or an agent still writing) is NOT a
-        # failure, and a run whose retries were exhausted without a usable trial
-        # is a hard FAIL: the round stays incomplete.
         return False, paused
-    # With --tolerate-fail an exhausted stage was replaced by its best failed
-    # trial (the run is `done` and carries the record); the round must say so,
-    # because its decision is PROVISIONAL and must never be certified.
-    _tf_failed = [e["id"] for e in round_run_plan(ctx, r)
-                  if (ctx.run(e["id"]) or {}).get("tolerated_fail")
-                  and (ctx.run(e["id"]) or {}).get("status") == "done"]
-    _tolerated_fail = ({"mode": "on", "failed_runs": _tf_failed,
-                        "note": ("stage(s) exhausted their retries; the best failed trial "
-                                 "(most required output files, then fewest FAIL messages) "
-                                 "was used -- PROVISIONAL, never certified")}
-                       if _tf_failed else None)
-    if _tolerated_fail:
-        rrec["tolerated_fail"] = dict(_tolerated_fail)
-        rrec["certified"] = False
-        print(f"[run] r{r} {TOLERATED_FAIL_STATUS}: {', '.join(_tf_failed)} exhausted its "
-              f"retries; the best failed trial was used and the round continues "
-              f"(PROVISIONAL, never certified).")
 
     if journal_is_scoped(ctx):
         # A major/minor revision has no judge panel and no champion choice: the
@@ -5217,6 +4510,12 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                   f"({', '.join(plan_missing[:4])}{' ...' if len(plan_missing) > 4 else ''}); "
                   f"the round stays incomplete until they run")
             return False, False
+        for entry in round_run_plan(ctx, r):
+            record = ctx.run(entry["id"]) or {}
+            problem = required_writer_problem(ctx, record)
+            if problem:
+                print(f"[run] r{r}: publication blocked: {entry['id']}: {problem}")
+                return False, False
         rec2 = ctx.run(rid_for_fresh(r, a2)) or {}
         if rec2.get("status") != "done":
             print(f"[run] r{r}: the scoped revision run is not done "
@@ -5242,15 +4541,6 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             rmtree_force(win_tmp)
         win_tmp.mkdir(parents=True, exist_ok=True)
         build_corpus_dir(ctx, r, a2, win_tmp)
-        # The copy must be the bytes the revision recorded, not merely whatever
-        # build_corpus_dir happened to copy: the normal path verifies the pin
-        # digest and this path used to record the digest of its own copy (F209).
-        win_manifest = corpus_dir_manifest(win_tmp)
-        win_digest = manifest_digest(win_manifest)
-        _recorded = recorded_version_digest(ctx, r, a2)
-        if _recorded and win_digest != _recorded:
-            die(f"internal inconsistency: the round {r} winner copy of '{a2}' hashes to "
-                f"{win_digest[:12]} but its run recorded {str(_recorded)[:12]}")
         if win_dst.exists():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             aside = unique_path(superseded_dir_of(ctx) / f"{win_dst.name}.{stamp}")
@@ -5258,7 +4548,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
             shutil.move(str(win_dst), str(aside))
         os.replace(win_tmp, win_dst)
         rrec["winner_dir"] = win_dst.name
-        rrec["winner_digest"] = win_digest
+        rrec["winner_digest"] = corpus_tree_digest(win_dst)
         rrec["journal_mode"] = journal_mode_of(ctx)
         rrec["scoped"] = True
         rrec["field"] = [A1_ID, a2]
@@ -5298,9 +4588,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
                   f"stays incomplete. Fix that run (`retry --run "
                   f"{rid_for_fresh(r, auto_target)}`) and re-run.")
             return False, False
-        agg, sel = auto_round_payload(ctx, r, auto_target, csel, fallback=False)
-        if _tolerated_fail:
-            sel["tolerated_fail"] = dict(_tolerated_fail)
+        agg, sel = auto_round_payload(ctx, r, auto_target, csel)
         rrec = ctx.round_rec(r)
         rrec["auto_promoted"] = True
         rrec["judged"] = False
@@ -5312,8 +4600,7 @@ def drive_round(ctx: Ctx, r: int, *, cmd, timeout: int, jobs: int, retries: int,
         ctx.save_state()
         print()
         print(f"[run] r{r} champion: {auto_target} "
-              f"(--champion-select {csel}; NO judge panel, NOT CERTIFIED -- provisional)"
-              + (" [TOLERATED_FAIL stage used]" if _tolerated_fail else ""))
+              f"(--champion-select {csel}; NO judge panel, NOT CERTIFIED -- provisional)")
         print(f"[run] round {r} champion: {auto_target} "
               f"(pinned at {PIN_DIRNAME}/{pin['id']}, digest {pin['digest'][:12]})")
         print(f"[run] round {r} winner published at {winner['directory']}/ "

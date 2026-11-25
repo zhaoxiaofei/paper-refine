@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 13/25 of the pipeline -- executed by the
+# Part 13/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -25,10 +25,6 @@ from __future__ import annotations
 
 REDLINE_DIRNAME = "redlines"
 REDLINE_AUTHOR = "paper_pipeline"
-# The same deadline the subprocess backends use (`_run_redline_cmd`). The
-# in-process docxodus engine gets it too, so a hung native call cannot block
-# the redline/tracking pass and the whole run (F192).
-INPROC_REDLINE_TIMEOUT = 900
 # The python-redlines adapter ships in the repo root next to the orchestrator;
 # `setup` copies it into the root with `paper_docx_format.py` so the tracking
 # stage's second backend is available where the run actually executes. A root
@@ -46,13 +42,8 @@ REDLINE_COMPARE_BACKEND = "docx-compare (Word CompareDocuments via MCP)"
 TRACKABLE_EXTS = (".docx", ".tex", ".bib")
 
 
-def list_track_files(sources: list, exts=TRACKABLE_EXTS, problems: list = None) -> list:
-    """[{rel, path, key, digest, ext}] for the trackable files of one corpus view.
-
-    `problems`, when a list, receives `{rel, error}` for every trackable file that
-    could not be read: the caller records the real reason in its manifest instead
-    of attributing the missing document to the OTHER side (F173).
-    """
+def list_track_files(sources: list, exts=TRACKABLE_EXTS) -> list:
+    """[{rel, path, key, digest, ext}] for the trackable files of one corpus view."""
     out = []
     overrides = corpus_source_overrides(sources)
     for i, (src, prefix, excluded) in enumerate(sources):
@@ -67,10 +58,7 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS, problems: list = None) 
                     or _is_aux_doc(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
-            if excluded and excluded_corpus_component(rel, excluded):
-                # The corpus identity excludes `work/` (and the other scratch
-                # names) at ANY depth; testing only the first component tracked
-                # `supp/work/scratch.docx` in a corpus that omits it.
+            if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             if is_evidence_rel(rel):
                 # The EVIDENCE areas are read-only inputs, not submission
@@ -83,18 +71,8 @@ def list_track_files(sources: list, exts=TRACKABLE_EXTS, problems: list = None) 
             full = prefix + rel
             if full in overrides[i]:
                 continue
-            try:
-                digest = sha256_file(p)
-            except OSError as e:
-                # A damaged/unreadable package document must not abort the whole
-                # track/redline pass: skip it and record the gap.
-                print(f"warning: skipped unreadable trackable file {p}: {e}",
-                      file=sys.stderr)
-                if problems is not None:
-                    problems.append({"rel": full, "error": str(e)})
-                continue
             out.append({"rel": full, "path": p, "key": _doc_key(full),
-                        "digest": digest, "ext": p.suffix.lower()})
+                        "digest": sha256_file(p), "ext": p.suffix.lower()})
     return out
 
 
@@ -103,18 +81,14 @@ def list_docx_files(sources: list) -> list:
     return list_track_files(sources, exts=(".docx",))
 
 
-def match_track_pairs(base_sources: list, cand_sources: list, ext: str,
-                      base_problems: list = None, cand_problems: list = None) -> tuple:
+def match_track_pairs(base_sources: list, cand_sources: list, ext: str) -> tuple:
     """(pairs, unmatched_base, unmatched_candidate) -- 1:1, content-aware.
 
     Only documents of the SAME extension are ever paired: a `.docx` revision of
     a `.tex` source is a different document, not a tracked change.
     """
-    # Pass the extension filter INTO the reader: the old call read/digested every
-    # trackable file once per extension and appended the same unreadable error
-    # each time, producing duplicate skip rows and repeated warnings (F052).
-    base = list_track_files(base_sources, exts=(ext,), problems=base_problems)
-    cand = list_track_files(cand_sources, exts=(ext,), problems=cand_problems)
+    base = [f for f in list_track_files(base_sources) if f["ext"] == ext]
+    cand = [f for f in list_track_files(cand_sources) if f["ext"] == ext]
     pool, used = list(enumerate(cand)), set()
 
     def take(match):
@@ -144,11 +118,9 @@ def match_track_pairs(base_sources: list, cand_sources: list, ext: str,
     return pairs, unmatched, [c["rel"] for i, c in pool if i not in used]
 
 
-def match_docx_pairs(base_sources: list, cand_sources: list,
-                     base_problems: list = None, cand_problems: list = None) -> tuple:
+def match_docx_pairs(base_sources: list, cand_sources: list) -> tuple:
     """(pairs, unmatched_base, unmatched_candidate) for `.docx` -- 1:1, content-aware."""
-    return match_track_pairs(base_sources, cand_sources, ".docx",
-                             base_problems=base_problems, cand_problems=cand_problems)
+    return match_track_pairs(base_sources, cand_sources, ".docx")
 
 
 def redline_adapter_path() -> Path:
@@ -162,43 +134,13 @@ def redline_adapter_path() -> Path:
     return Path(__file__).resolve().with_name(REDLINE_ADAPTER_NAME)
 
 
-def _inproc_call_with_timeout(fn, timeout: int) -> tuple:
-    """(value, error) for `fn()` run in a daemon worker, bounded by `timeout`.
-
-    The in-process docxodus engine spawns its own .NET child; a hung engine
-    used to block the redline pass, the tracking pass and the whole `run`
-    forever, while every subprocess backend is bounded by
-    `_run_redline_cmd(..., timeout=900)` and killed by process group. The
-    worker thread gives this backend the same deadline. A timed-out call is
-    abandoned (daemon, so interpreter shutdown does not wait for it) and
-    reported as a failed attempt; the caller then falls through to the next
-    backend instead of hanging.
-    """
-    box = {}
-
-    def run() -> None:
-        try:
-            box["value"] = fn()
-        except BaseException as exc:                              # noqa: BLE001
-            box["error"] = exc
-
-    worker = threading.Thread(target=run, name="redline-engine", daemon=True)
-    worker.start()
-    worker.join(timeout)
-    if worker.is_alive():
-        return None, f"timeout after {timeout}s"
-    return box.get("value"), box.get("error")
-
-
 def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
-    """Run `python-redlines` in THIS process, but in a bounded daemon worker.
+    """Run `python-redlines` in THIS process (no adapter file needed).
 
     The docxodus engine extracts a binary lazily; a read-only user cache (a
     sandboxed home) makes the first call fail, so the engine is retried against
     a writable temp cache -- the same two-step the adapter performs, minus the
     file-path dependency that silently skipped this backend on every root.
-    Every engine call carries a deadline (the subprocess backends' 900 s); a
-    timeout is a failed attempt, never an unbounded hang.
     """
     try:
         import python_redlines as mod                             # noqa: PLC0415
@@ -211,31 +153,15 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
         if cls is None:
             continue
         tmp_cache = None
-        timed_out = False
         for use_tmp in (False, True):
             if use_tmp and tmp_cache is None:
-                try:
-                    tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
-                except OSError as e:
-                    attempts.append(f"{eng_name}: cannot create a temp cache: {e}")
-                    continue
-
-            def call(cls=cls, use_tmp=use_tmp, tmp_cache=tmp_cache):
-                engine = cls(tmp_cache) if use_tmp else cls()
-                return engine.run_redline(REDLINE_AUTHOR, str(base), str(revised))
-
-            payload, error = _inproc_call_with_timeout(call, INPROC_REDLINE_TIMEOUT)
-            if isinstance(error, str):
-                # The timeout sentinel: do not retry the same hung engine with a
-                # writable cache (that would double the deadline), and do not
-                # rmtree a cache the abandoned worker may still be reading.
-                attempts.append(f"{eng_name}: {error}")
-                timed_out = True
-                break
-            if error is not None:
-                attempts.append(f"{eng_name}: {type(error).__name__}: {error}")
+                tmp_cache = tempfile.mkdtemp(prefix="paper-redlines-")
+            try:
+                data, _stdout, _stderr = (cls(tmp_cache) if use_tmp else cls()).run_redline(
+                    REDLINE_AUTHOR, str(base), str(revised))
+            except Exception as e:                                # noqa: BLE001
+                attempts.append(f"{eng_name}: {type(e).__name__}: {e}")
                 continue
-            data, _stdout, _stderr = payload
             if data:
                 try:
                     out.parent.mkdir(parents=True, exist_ok=True)
@@ -252,9 +178,8 @@ def _redlines_inproc(base: Path, revised: Path, out: Path) -> dict:
                     shutil.rmtree(tmp_cache, ignore_errors=True)
                 return {"backend": "python-redlines[docxodus]", "cmd": ["in-process", eng_name],
                         "rc": 0, "ok": True,
-                        "detail": f"python-redlines:{eng_name}.run_redline (in process, "
-                                  f"bounded worker)"}
-        if tmp_cache and not timed_out:
+                        "detail": f"python-redlines:{eng_name}.run_redline (in process)"}
+        if tmp_cache:
             shutil.rmtree(tmp_cache, ignore_errors=True)
     return {"backend": "python-redlines[docxodus]", "ok": False, "rc": None,
             "detail": "; ".join(attempts)[:300] or "no supported engine class"}
@@ -305,20 +230,38 @@ def _kill_redline_tree(proc) -> None:
 
 def _run_redline_cmd(argv: list, out: Path, timeout: int = 900) -> dict:
     try:
-        # `run_bounded` drains both streams through capped reader threads and
-        # kills the whole process GROUP the moment the cap is crossed. The old
-        # temp-file capture grew without limit until the child exited and only
-        # checked the budget afterwards, so a flood filled the disk first
-        # (F58; p18's helper carries the same fix).
-        rc, out_bytes, err_bytes = run_bounded([str(a) for a in argv],
-                                               timeout=timeout)
-        so = (out_bytes or b"").decode("utf-8", "replace").strip()
-        err = (err_bytes or b"").decode("utf-8", "replace").strip()
-    except subprocess.TimeoutExpired:
-        rc, err, so = None, f"timeout after {timeout}s", ""
-    except ToolOutputOverBudget:
-        rc, err, so = None, (f"backend output over the {MAX_TOOL_OUTPUT_BYTES}-byte "
-                             f"budget; refusing it"), ""
+        # A backend that prints a flood must not accumulate it in memory: its
+        # stdout/stderr go to temporary files and are read back under a budget
+        # (F61).
+        with tempfile.TemporaryFile() as out_tmp, tempfile.TemporaryFile() as err_tmp:
+            proc = subprocess.Popen(
+                [str(a) for a in argv], stdout=out_tmp, stderr=err_tmp,
+                **_redline_popen_kwargs())
+            try:
+                proc.wait(timeout=timeout)
+                rc = proc.returncode
+            except subprocess.TimeoutExpired:
+                _kill_redline_tree(proc)
+                try:
+                    proc.wait(timeout=30)      # reap; never leave a zombie
+                except subprocess.TimeoutExpired:
+                    pass
+                rc = None
+            out_tmp.seek(0, os.SEEK_END)
+            err_tmp.seek(0, os.SEEK_END)
+            over = (out_tmp.tell() > MAX_TOOL_OUTPUT_BYTES
+                    or err_tmp.tell() > MAX_TOOL_OUTPUT_BYTES)
+            out_tmp.seek(0)
+            err_tmp.seek(0)
+            so = out_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+            err = err_tmp.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
+        if over:
+            rc, err, so = None, (f"backend output over the {MAX_TOOL_OUTPUT_BYTES}-byte "
+                                 f"budget; refusing it"), ""
+        elif rc is None:
+            err, so = f"timeout after {timeout}s", ""
+        else:
+            err, so = (err or "").strip(), (so or "").strip()
     except FileNotFoundError as e:                              # noqa: BLE001
         rc, err, so = None, f"not found: {e}", ""
     except OSError as e:                                        # noqa: BLE001
@@ -364,83 +307,6 @@ def _w(tag: str) -> str:
 MC_NS = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 
 
-def _root_start_tag(text: str, limit: int = 6000) -> str:
-    """The document element's own start tag (or a bounded prefix).
-
-    Namespace declarations live on the ROOT element, which a long prolog --
-    comments, processing instructions, a DOCTYPE -- can push past a fixed byte
-    prefix. Reading the root tag itself finds them wherever it starts, and it
-    accepts both legal attribute quote styles (`xmlns:w14='...'`).
-
-    Prolog comments, processing instructions, CDATA sections and the DOCTYPE are
-    skipped (a `<name>` inside them is not the document element), and the start
-    tag ends at the first `>` OUTSIDE a quoted attribute value.
-    """
-    text = text or ""
-    i, n = 0, len(text)
-    while i < n:
-        lt = text.find("<", i)
-        if lt == -1:
-            break
-        if text.startswith("<!--", lt):
-            end, close_len = text.find("-->", lt + 4), 3
-        elif text.startswith("<![CDATA[", lt):
-            end, close_len = text.find("]]>", lt + 9), 3
-        elif text.startswith("<?", lt):
-            end, close_len = text.find("?>", lt + 2), 2
-        elif text.startswith("<!", lt):
-            # DOCTYPE / markup declaration: skip it, respecting a quoted value
-            # and the internal subset's `[ ... ]` so its `>` ends the scan.
-            j, depth, quote = lt + 2, 0, ""
-            while j < n:
-                ch = text[j]
-                if quote:
-                    if ch == quote:
-                        quote = ""
-                elif ch in "\"'":
-                    quote = ch
-                elif ch == "[":
-                    depth += 1
-                elif ch == "]":
-                    depth = max(0, depth - 1)
-                elif ch == ">" and depth == 0:
-                    j += 1
-                    break
-                j += 1
-            i = j
-            continue
-        else:
-            m = re.match(r"<([A-Za-z_][\w:.-]*)(?=[\s/>])", text[lt:])
-            if not m:
-                i = lt + 1
-                continue
-            j, quote = lt + 1 + len(m.group(1)), ""
-            while j < n:
-                ch = text[j]
-                if quote:
-                    if ch == quote:
-                        quote = ""
-                elif ch in "\"'":
-                    quote = ch
-                elif ch == ">":
-                    return text[lt:j + 1]
-                j += 1
-            return text[lt:]
-        if end == -1:
-            break
-        i = end + close_len
-    return text[:limit]
-
-
-def _namespace_declarations(text: str) -> dict:
-    """{prefix: uri} for every `xmlns:prefix` declaration in `text`."""
-    out = {}
-    for m in re.finditer(r"xmlns:([A-Za-z_][A-Za-z0-9_.-]*)\s*=\s*(?:\"([^\"]*)\"|'([^']*)')",
-                         text or ""):
-        out[m.group(1)] = m.group(2) if m.group(2) is not None else m.group(3)
-    return out
-
-
 def _serialize_document(root, raw: bytes) -> bytes:
     """Serialise `root`, restoring the xmlns declarations ElementTree dropped.
 
@@ -455,12 +321,12 @@ def _serialize_document(root, raw: bytes) -> bytes:
     wanted = (root.get("{%s}Ignorable" % MC_NS) or "").split()
     if not wanted:
         return out
-    head = _root_start_tag(out.decode("utf-8", "replace"))
+    head = out[:4000].decode("utf-8", "replace")
     missing = [p for p in dict.fromkeys(wanted) if ("xmlns:%s=" % p) not in head]
     if not missing:
         return out
-    declared = _namespace_declarations(
-        _root_start_tag(raw.decode("utf-8", "replace")))
+    declared = dict(re.findall(r'xmlns:([A-Za-z0-9_]+)="([^"]+)"',
+                               raw[:6000].decode("utf-8", "replace")))
     for prefix in missing:
         uri = declared.get(prefix)
         if uri:
@@ -473,10 +339,10 @@ def _docx_root(path: Path):
         raw = _docx_xml_part(z, "word/document.xml")
     if raw is None:
         raise OSError("word/document.xml is over the size/entity budget")
-    for prefix, uri in _namespace_declarations(
-            _root_start_tag(raw.decode("utf-8", "replace"))).items():
+    head = raw[:6000].decode("utf-8", "replace")
+    for m in re.finditer(r'xmlns:([A-Za-z0-9_]+)="([^"]+)"', head):
         try:
-            ET.register_namespace(prefix, uri)
+            ET.register_namespace(m.group(1), m.group(2))
         except ValueError:
             pass
     return raw, ET.fromstring(raw)
@@ -495,29 +361,12 @@ def _track_change(tag: str, counter: list, ts: str):
     return el
 
 
-def _mark_paragraph(ppr, tag: str, counter: list, ts: str) -> None:
-    """Mark the PARAGRAPH MARK as inserted/deleted (`w:pPr/w:rPr/w:ins|del`).
-
-    Wrapping only the runs leaves the paragraph mark live: accept-all keeps an
-    empty paragraph where a deleted one was, and reject-all keeps an empty
-    paragraph where an inserted one was.
-    """
-    rpr = ppr.find(_w("rPr"))
-    if rpr is None:
-        rpr = ET.SubElement(ppr, _w("rPr"))
-    for existing in rpr.findall(_w(tag)):
-        rpr.remove(existing)
-    # CT_ParaRPr puts ins/del FIRST, before the character properties.
-    rpr.insert(0, _track_change(tag, counter, ts))
-
-
 def _wrap_para(p, tag: str, del_text: bool, counter: list, ts: str):
     """Copy one paragraph, wrapping its run content in w:ins / w:del."""
     new_p = ET.Element(_w("p"))
     pr = p.find(_w("pPr"))
-    new_pr = copy.deepcopy(pr) if pr is not None else ET.Element(_w("pPr"))
-    _mark_paragraph(new_pr, tag, counter, ts)
-    new_p.append(new_pr)
+    if pr is not None:
+        new_p.append(copy.deepcopy(pr))
     tc = _track_change(tag, counter, ts)
     for child in list(p):
         if child is not pr:
@@ -688,70 +537,6 @@ def _emit_text(out: list, text: str, spans: list, marks: list, start: int, end: 
     out.append(wrapper)
 
 
-_PPr_VOLATILE_RE = re.compile(
-    rb"\s(?:[A-Za-z0-9_]+:)?(?:rsid[A-Za-z]*|paraId|textId|durableId)=\"[^\"]*\"")
-
-
-def _ppr_bytes(el) -> bytes:
-    """Serialised `w:pPr` without per-save bookkeeping attributes."""
-    if el is None:
-        return b""
-    cp = copy.deepcopy(el)
-    cp.tail = None
-    return _PPr_VOLATILE_RE.sub(b"", ET.tostring(cp))
-
-
-def _para_content_bytes(p) -> bytes:
-    """A paragraph's non-`w:pPr` children, volatile ids stripped."""
-    cp = copy.deepcopy(p)
-    cp.tail = None
-    for pr in cp.findall(_w("pPr")):
-        cp.remove(pr)
-    return _PPr_VOLATILE_RE.sub(b"", ET.tostring(cp))
-
-
-def _ppr_only_change(bp, rp) -> bool:
-    """True when the ONLY paragraph difference is its mark (`w:pPr`)."""
-    return (_ppr_bytes(bp.find(_w("pPr"))) != _ppr_bytes(rp.find(_w("pPr")))
-            and _para_content_bytes(bp) == _para_content_bytes(rp))
-
-
-def _pPr_for(bp, rp, counter: list, ts: str):
-    """The revised `w:pPr`, carrying a `w:pPrChange` when the mark changed.
-
-    Copying the revised pPr without the change record made a paragraph-mark
-    edit (heading level, list numbering) impossible to reject: both accept-all
-    and reject-all produced the revised style (F252). `w:pPrChange` is the
-    OOXML representation Word writes for exactly this change.
-    """
-    rp_pr = rp.find(_w("pPr"))
-    bp_pr = bp.find(_w("pPr"))
-    if rp_pr is None and bp_pr is None:
-        return None
-    # The LIVE pPr is the REVISED one; when the revision removed the pPr
-    # entirely the live form is an EMPTY pPr. Falling back to the base pPr here
-    # compared a copy of the base with the base, emitted no w:pPrChange and
-    # resurrected a style the revision had deleted: accept-all kept the heading
-    # (F014).
-    pr = copy.deepcopy(rp_pr) if rp_pr is not None else ET.Element(_w("pPr"))
-    old = bp_pr
-    if _ppr_bytes(rp_pr) != _ppr_bytes(old):
-        for existing in pr.findall(_w("pPrChange")):
-            pr.remove(existing)
-        change = _track_change("pPrChange", counter, ts)
-        old_pr = ET.SubElement(change, _w("pPr"))
-        if old is not None:
-            for child in list(old):
-                # CT_PPrChange's pPr is CT_PPrBase: rPr, sectPr and a nested
-                # pPrChange are CT_PPr-only extensions and are schema-invalid
-                # inside the recorded change.
-                if str(child.tag).rsplit("}", 1)[-1] in ("rPr", "sectPr", "pPrChange"):
-                    continue
-                old_pr.append(copy.deepcopy(child))
-        pr.append(change)
-    return pr
-
-
 def _replace_para(bp, rp, counter: list, ts: str):
     """Word-level tracked changes inside one changed paragraph.
 
@@ -777,36 +562,19 @@ def _replace_para(bp, rp, counter: list, ts: str):
         return _whole_paragraph_change(bp, rp, counter, ts)
     if base_text != _para_text(bp) or rev_text != _para_text(rp):
         return _whole_paragraph_change(bp, rp, counter, ts)
-    # The piecewise walk renders the equal ranges from the REVISED stream only,
-    # so a mark that exists only in the BASE (soft break/tab/field/drawing) was
-    # dropped and a revised-only mark was emitted with no w:ins. When the two
-    # mark inventories differ, use whole-paragraph markup: both streams then
-    # carry every mark inside their own del/ins (F249).
-    if sorted(str(a.get("text") or "") for _p, a in base_marks) != \
-            sorted(str(a.get("text") or "") for _p, a in rev_marks):
-        return _whole_paragraph_change(bp, rp, counter, ts)
 
     # Token offsets must be the offsets in the FULL paragraph. `\S+\s*`
     # drops a paragraph's leading whitespace, so the cumulative-length offsets
     # below started at 0 and every later slice was shifted by that prefix:
     # accepting "  Hello world" -> "  Hello there" produced "  Hello the".
-    def _tokens(text: str) -> list:
-        toks = [(m.start(), m.end(), m.group(0))
-                for m in re.finditer(r"\S+\s*", text)]
-        # `\S+\s*` drops leading whitespace, so a leading-space-only edit was
-        # outside every token range and could neither be marked nor rejected.
-        # Emit the prefix as its own atom.
-        lead = re.match(r"\s*", text).group(0)
-        if lead:
-            toks.insert(0, (0, len(lead), lead))
-        return toks
-
-    base_tok = _tokens(base_text)
-    rev_tok = _tokens(rev_text)
+    base_tok = [(m.start(), m.end(), m.group(0))
+                for m in re.finditer(r"\S+\s*", base_text)]
+    rev_tok = [(m.start(), m.end(), m.group(0))
+               for m in re.finditer(r"\S+\s*", rev_text)]
     base_words = [t[2] for t in base_tok]
     rev_words = [t[2] for t in rev_tok]
-    base_off = [t[0] for t in base_tok] + [len(base_text)]
-    rev_off = [t[0] for t in rev_tok] + [len(rev_text)]
+    base_off = ([0] + [t[0] for t in base_tok[1:]] + [len(base_text)])
+    rev_off = ([0] + [t[0] for t in rev_tok[1:]] + [len(rev_text)])
 
     out = []
     try:
@@ -830,9 +598,9 @@ def _replace_para(bp, rp, counter: list, ts: str):
         return _whole_paragraph_change(bp, rp, counter, ts)
 
     new_p = ET.Element(_w("p"))
-    pr = _pPr_for(bp, rp, counter, ts)
+    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
     if pr is not None:
-        new_p.append(pr)
+        new_p.append(copy.deepcopy(pr))
     for element in out:
         new_p.append(element)
     return new_p
@@ -846,17 +614,9 @@ def _whole_paragraph_change(bp, rp, counter: list, ts: str):
     (and the attempt log records that), never lossy.
     """
     wrapper = ET.Element(_w("p"))
-    pr = _pPr_for(bp, rp, counter, ts)
+    pr = rp.find(_w("pPr")) if rp.find(_w("pPr")) is not None else bp.find(_w("pPr"))
     if pr is not None:
-        wrapper.append(pr)
-    if pr is not None and _ppr_only_change(bp, rp):
-        # The ONLY change is the paragraph mark (style/numbering). A
-        # del+ins of identical text cannot express rejectable formatting; the
-        # pPrChange above is the whole change, so emit no run wrapper at all.
-        for child in list(rp):
-            if child is not rp.find(_w("pPr")):
-                wrapper.append(copy.deepcopy(child))
-        return wrapper
+        wrapper.append(copy.deepcopy(pr))
     del_el = _track_change("del", counter, ts)
     for child in list(bp):
         if child is not bp.find(_w("pPr")):
@@ -870,14 +630,6 @@ def _whole_paragraph_change(bp, rp, counter: list, ts: str):
     wrapper.append(del_el)
     wrapper.append(ins_el)
     return wrapper
-
-
-# The built-in redline holds every part of BOTH packages in memory. Cap the
-# decompressed bytes per part and in total (the same idea as
-# MEDIA_PART_MAX_BYTES/MEDIA_TOTAL_MAX_BYTES for embedded media) so a crafted
-# DOCX is a recorded backend failure instead of an out-of-memory kill.
-REDLINE_PART_MAX_BYTES = 64 * 1024 * 1024
-REDLINE_TOTAL_MAX_BYTES = 256 * 1024 * 1024
 
 
 def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path) -> dict:
@@ -1064,9 +816,8 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
                     # paragraph, reject-all yields the base.
                     emit(_whole_paragraph_change(bp, rp, counter, ts),
                          base_after=k + 1, rev_after=rp_index + 1)
-                    if not _ppr_only_change(bp, rp):
-                        n_del += 1
-                        n_ins += 1
+                    n_del += 1
+                    n_ins += 1
         elif tag == "delete":
             for k in range(i1, i2):
                 emit(_wrap_para(base_paras[k], "del", True, counter, ts), base_after=k + 1)
@@ -1099,82 +850,19 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
     payload = _serialize_document(base_root, base_raw)
     out_docx.parent.mkdir(parents=True, exist_ok=True)
 
-    # Every OTHER package part (headers, footers, footnotes/endnotes, comments,
-    # media) used to be copied from the BASE while only word/document.xml was
-    # substituted, so a revised header/media change was silently dropped with no
-    # warning. Carry the revised bytes and report that their internal changes are
-    # not marked (F167).
-    def _parts(path) -> dict:
-        """Every ZIP part's bytes, under a decompressed-size budget.
-
-        A DOCX is a ZIP: a few-megabyte file can inflate to gigabytes of
-        highly-compressible parts, and this last-resort backend read BOTH
-        packages whole and kept the two dicts alive while serialising the output
-        (a DOCX bomb). The embedded-media reader already caps per-part and total
-        bytes; do the same here and REFUSE an over-budget package, which the
-        caller records as a failed backend attempt instead of an OOM kill.
-        """
-        out, total = {}, 0
-        with zipfile.ZipFile(path) as z:
-            for info in z.infolist():
-                if info.is_dir():
-                    continue
-                size = int(info.file_size)
-                if size > REDLINE_PART_MAX_BYTES \
-                        or total + size > REDLINE_TOTAL_MAX_BYTES:
-                    raise OSError(
-                        f"refusing {Path(path).name}: its decompressed parts exceed the "
-                        f"redline byte budget ({info.filename} claims {size} bytes; "
-                        f"{total} already read)")
-                # The declared size is attacker-controlled: read through a
-                # bounded stream and count the REAL bytes (F04).
-                with z.open(info) as fh:
-                    payload = fh.read(REDLINE_PART_MAX_BYTES + 1)
-                if len(payload) > REDLINE_PART_MAX_BYTES \
-                        or total + len(payload) > REDLINE_TOTAL_MAX_BYTES:
-                    raise OSError(
-                        f"refusing {Path(path).name}: its decompressed parts exceed the "
-                        f"redline byte budget ({info.filename} expanded to "
-                        f"{len(payload)} bytes; {total} already read)")
-                out[info.filename] = payload
-                total += len(payload)
-        return out
-
-    base_parts, rev_parts = _parts(base_docx), _parts(revised_docx)
-    changed_parts = []
-    for name in sorted(set(base_parts) | set(rev_parts)):
-        if name == "word/document.xml" or name.startswith("docProps/"):
-            continue                    # docProps are volatile save bookkeeping
-        if base_parts.get(name) != rev_parts.get(name):
-            changed_parts.append(name)
-
     def _write_zip(f) -> None:
         with zipfile.ZipFile(base_docx) as zin, \
                 zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
-            written = set()
             for item in zin.infolist():
+                data = zin.read(item.filename)
                 if item.filename == "word/document.xml":
                     data = payload
-                elif item.filename not in rev_parts:
-                    # A part the revised package DELETED (header/footer/media)
-                    # must not survive from the base: it has no relationship or
-                    # content-type override in the revised package and accepting
-                    # all changes did not reproduce the revision (F251).
-                    continue
-                else:
-                    data = rev_parts[item.filename]
                 zout.writestr(item, data)
-                written.add(item.filename)
-            for name in sorted(rev_parts):
-                if name not in written and name != "word/document.xml":
-                    zout.writestr(name, rev_parts[name])
 
     _atomic_write_bytes(tmp_path_for(out_docx), out_docx, _write_zip, binary=True)
     info = {"paragraphs_inserted": n_ins, "paragraphs_deleted": n_del,
             "revision_ids": counter[0],
-            "non_paragraph_changed": non_paragraph_changed,
-            "non_document_parts_changed": changed_parts}
-    warnings = []
+            "non_paragraph_changed": non_paragraph_changed}
     if non_paragraph_relocated:
         warning = ("tables/content-controls/section properties MOVED relative to the "
                    "paragraphs; the built-in writer places them at their revised "
@@ -1183,20 +871,12 @@ def builtin_tracked_changes(base_docx: Path, revised_docx: Path, out_docx: Path)
         if non_paragraph_internal_changed:
             warning += ("; the revised non-paragraph content also differs, and the "
                         "built-in writer does NOT mark changes inside it")
-        warnings.append(warning + " -- inspect the diff with a real tracked-changes backend")
+        info["warning"] = warning + " -- inspect the diff with a real tracked-changes backend"
     elif non_paragraph_changed:
-        warnings.append("tables/content-controls/section properties differ between base and "
-                        "revised; the built-in writer keeps the revised ones in place but "
-                        "does NOT mark changes inside them -- inspect the diff with a real "
-                        "tracked-changes backend")
-    if changed_parts:
-        shown = ", ".join(changed_parts[:8]) + (" ..." if len(changed_parts) > 8 else "")
-        warnings.append(f"package part(s) outside word/document.xml differ between base and "
-                        f"revised ({shown}); the built-in writer carries the revised parts but "
-                        f"does NOT mark changes inside them -- inspect the diff with a real "
-                        f"tracked-changes backend")
-    if warnings:
-        info["warning"] = "; ".join(warnings)
+        info["warning"] = ("tables/content-controls/section properties differ between base and "
+                           "revised; the built-in writer keeps the revised ones in place but "
+                           "does NOT mark changes inside them -- inspect the diff with a real "
+                           "tracked-changes backend")
     return info
 
 
@@ -1222,10 +902,7 @@ def redline_markup_weight(docx: Path) -> dict:
             for child in node:
                 if child.tag == _w(wrapper):
                     if not inside:
-                        # Adjacent runs can spell ONE word (`corre` + `spondence`):
-                        # joining their text with a space counted two words and
-                        # inflated the over-marking gate (F158).
-                        total += len("".join(
+                        total += len(" ".join(
                             t.text or "" for t in child.iter(_w(text_tag))).split())
                     walk(child, True)
                 else:
@@ -1253,12 +930,8 @@ def redline_minimal_weight(base: Path, revised: Path) -> dict:
         _, base_root = _docx_root(base)
         _, rev_root = _docx_root(revised)
         base_body, rev_body = base_root.find(_w("body")), rev_root.find(_w("body"))
-        # The MARKED weight counts every w:ins/w:del word anywhere under
-        # word/document.xml (table cells included), so the minimal estimate must
-        # count the same regions or a faithful table-heavy redline looks
-        # order-of-magnitude over-marked and is rejected (F250).
-        base_texts = [_para_text(p) for p in base_body.iter(_w("p"))]
-        rev_texts = [_para_text(p) for p in rev_body.iter(_w("p"))]
+        base_texts = [_para_text(p) for p in base_body.findall(_w("p"))]
+        rev_texts = [_para_text(p) for p in rev_body.findall(_w("p"))]
     except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError, AttributeError):
         return {"ins": 0, "del": 0}
     ins = dele = 0
@@ -1287,23 +960,6 @@ def redline_minimal_weight(base: Path, revised: Path) -> dict:
     return {"ins": ins, "del": dele}
 
 
-def _docx_body_paragraph_texts(path: Path):
-    """Every body paragraph's text (table cells included), or None if unreadable.
-
-    Used only to recognise an UNMARKED COPY of one of the two inputs: a
-    zero-markup file whose text inventory is exactly one input's proves the
-    backend never compared the pair (F016).
-    """
-    try:
-        _, root = _docx_root(path)
-        body = root.find(_w("body"))
-        return ([_para_text(p) for p in body.iter(_w("p"))]
-                if body is not None else [])
-    except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError,
-            AttributeError, RuntimeError):
-        return None
-
-
 def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
     """How faithful `out` is, as far as a code-side check can tell.
 
@@ -1316,42 +972,12 @@ def redline_fidelity(base: Path, revised: Path, out: Path) -> dict:
     marked = redline_markup_weight(out)
     minimal = redline_minimal_weight(base, revised)
     marked_w = marked["ins"] + marked["del"]
-    # A BASE document may already carry LIVE tracked changes (an earlier
-    # revision round). The built-in writer copies an unchanged paragraph
-    # verbatim -- with its `w:ins`/`w:del` -- so counting every word of the
-    # OUTPUT charged the backend for markup it never wrote: a 300-word inherited
-    # insertion beside a two-word edit scored 302 marked against 2 minimal and
-    # rejected the backend as over-marking (F167). Only the markup BEYOND what
-    # the inputs already carried is the backend's own.
-    base_marked = redline_markup_weight(base)
-    base_w = base_marked["ins"] + base_marked["del"]
-    own_w = max(0, marked_w - base_w)
     minimal_w = minimal["ins"] + minimal["del"]
-    over = bool(minimal_w) and own_w > max(3 * minimal_w, minimal_w + 200)
-    # The opposite failure of over-marking is marking NOTHING: the pair's own
-    # minimal weight proves the two documents differ, so a readable output with
-    # zero own w:ins/w:del is suspicious. The decisive case is an output whose
-    # text inventory is one of the INPUTS unchanged: the backend copied an input
-    # instead of comparing the pair (a no-op compare, or the arguments in the
-    # wrong order). The old result carried only `over_marked`, so such a copy
-    # passed the only gate and was announced as the tracked copy (F016). The
-    # copy is named, not just the count, so the caller cannot reject a writer
-    # that legitimately reports an un-representable difference.
-    under = bool(minimal_w) and own_w == 0
-    copied_input = None
-    if under:
-        out_texts = _docx_body_paragraph_texts(out)
-        if out_texts is not None:
-            for _label, _src in (("base", base), ("revised", revised)):
-                if out_texts == _docx_body_paragraph_texts(_src):
-                    copied_input = _label
-                    break
+    over = bool(minimal_w) and marked_w > max(3 * minimal_w, minimal_w + 200)
     return {"marked_words": marked_w, "minimal_words": minimal_w,
             "marked_ins": marked["ins"], "marked_del": marked["del"],
             "minimal_ins": minimal["ins"], "minimal_del": minimal["del"],
-            "base_marked_words": base_w, "own_marked_words": own_w,
-            "over_marked": over, "under_marked": under,
-            "unmarked_input_copy": copied_input}
+            "over_marked": over}
 
 
 def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
@@ -1373,26 +999,6 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         order = (["redline-cmd"] if cmd_template else []) + ["builtin"]
     else:
         order = [tool] + (["redline-cmd"] if cmd_template else [])
-    # F165: an external backend writes `out` itself, so a planted symlink at a
-    # `redlines/r<N>_<vid>/` directory would redirect that write outside --root.
-    # Validate the whole parent chain before the first backend.
-    try:
-        _refuse_symlinked_parent(out)
-    except NameError:                                        # pragma: no cover
-        pass
-    except OSError as e:
-        # This function's contract is "returns the attempt log (never raises)".
-        # The guard raises OSError for a symlinked ancestor (or a path blocked by
-        # a file); the old `except NameError` let it escape, and `track_one_pair`
-        # calls this with no try -- one symlinked `tracking/` directory aborted
-        # the whole tracking pass (F168). Report it as a failed backend attempt.
-        # The documented return is the attempt LOG OBJECT (the same shape the
-        # normal path returns), not a bare list: every caller reads `res["ok"]`.
-        return {"ok": False, "tool": None,
-                "attempts": [{"backend": "output-guard", "cmd": [], "rc": None,
-                              "ok": False, "detail": str(e)[:300]}],
-                "validated_ooxml": False, "validation_detail": "no output",
-                "warning": None}
     out.parent.mkdir(parents=True, exist_ok=True)      # external tools need the directory
 
     # OUT must never be one of the INPUTS: drop_stale_out() unlinks it before
@@ -1407,16 +1013,9 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         except OSError:
             same = False
         if same:
-            # Every caller reads result["ok"]; returning a bare LIST here raised
-            # `TypeError: list indices must be integers` and aborted the
-            # tracking pass instead of reporting the refused pair (F61).
-            return {"ok": False, "tool": None,
-                    "attempts": [{"backend": "input-guard", "cmd": [], "rc": None,
-                                  "ok": False,
-                                  "detail": f"refusing to use the {label} file as OUT: "
-                                            f"it would be deleted before the diff"}],
-                    "validated_ooxml": False, "validation_detail": "no output",
-                    "warning": None}
+            return [{"backend": "input-guard", "cmd": [], "rc": None, "ok": False,
+                     "detail": f"refusing to use the {label} file as OUT: it would be "
+                               f"deleted before the diff"}]
 
     def drop_stale_out(backend_name: str):
         """Claim OUT for the next attempt; returns an attempt record on failure.
@@ -1503,11 +1102,11 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
                     res2["backend"] = "python-redlines[docxodus]"
                     attempts.append(res2)
         elif backend == "docx-trackdiff":
-            # The shipped docx-trackdiff CLI accepts exactly `old new out`
-            # (argparse); its `--base/--revised/--out` form exits 2 and the
-            # package has no `__main__`, so the old chain logged two guaranteed
-            # failures per pair before giving up (F195).
-            for argv in (["docx-trackdiff", str(base), str(revised), str(out)],):
+            for argv in (["docx-trackdiff", str(base), str(revised), str(out)],
+                         ["docx-trackdiff", "--base", str(base), "--revised", str(revised),
+                          "--out", str(out)],
+                         [sys.executable, "-m", "docx_trackdiff", str(base), str(revised),
+                          str(out)]):
                 stale = drop_stale_out(backend)
                 if stale:
                     attempts.append(stale)
@@ -1520,21 +1119,11 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         else:
             try:
                 info = builtin_tracked_changes(base, revised, out)
-                # The README's contract for `ok` is "the backend exited 0 AND
-                # the file it wrote is a readable OOXML package"; the builtin
-                # branch alone recorded ok=True without that check.
-                _readable, _why = docx_is_readable(out)
                 attempts.append({"backend": "builtin-ooxml", "cmd": ["builtin"], "rc": 0,
-                                 "ok": bool(_readable),
+                                 "ok": True,
                                  "detail": f"w:ins paragraphs={info['paragraphs_inserted']} "
-                                           f"w:del paragraphs={info['paragraphs_deleted']}"
-                                           + ("" if _readable else
-                                              ("; could not be saved (OUT is missing)"
-                                               if not out.exists() else
-                                               f"; output is not readable OOXML: {_why}")),
+                                           f"w:del paragraphs={info['paragraphs_deleted']}",
                                  "non_paragraph_changed": info.get("non_paragraph_changed"),
-                                 "non_document_parts_changed":
-                                     info.get("non_document_parts_changed"),
                                  "warning": info.get("warning")})
             except Exception as e:                              # noqa: BLE001
                 attempts.append({"backend": "builtin-ooxml", "cmd": ["builtin"], "rc": None,
@@ -1551,32 +1140,11 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         # result is kept when every backend over-marks.
         fidelity = redline_fidelity(base, revised, out)
         last["fidelity"] = fidelity
-        copied = fidelity.get("unmarked_input_copy")
-        if copied and not last.get("non_paragraph_changed"):
-            # A readable file with NO markup whose text is an INPUT unchanged is
-            # not a tracked-changes document: nothing was compared (a no-op
-            # compare, or the arguments in the wrong order). Fail the attempt so
-            # the next backend is tried and a pair with no usable redline is
-            # reported FAILED instead of announced as tracked. A writer that
-            # says it could not represent the difference (the built-in writer's
-            # non_paragraph_changed table caveat) keeps its documented warning
-            # behaviour.
-            last["ok"] = False
-            last["detail"] = ("the backend wrote a readable .docx with no w:ins/w:del "
-                              f"markup for {fidelity['minimal_words']} word(s) of real "
-                              f"change: an unmarked copy of the {copied} document is not "
-                              "a tracked-changes document")
-            continue
         if fidelity["over_marked"]:
-            _over = (f"over-marked redline: "
-                     f"{fidelity.get('own_marked_words', fidelity['marked_words'])} "
-                     f"marked word(s) written by this backend for "
-                     f"{fidelity['minimal_words']} word(s) of real change (the "
-                     f"backend rewrites whole paragraphs when a run is not plain "
-                     f"text)")
-            # APPEND: the structural caveat recorded by the writer (e.g. an
-            # unmarked table edit) must survive into the manifest/README.
-            last["warning"] = "; ".join(x for x in (last.get("warning"), _over) if x)
+            last["warning"] = (f"over-marked redline: {fidelity['marked_words']} marked word(s) "
+                               f"for {fidelity['minimal_words']} word(s) of real change (the "
+                               f"backend rewrites whole paragraphs when a run is not plain "
+                               f"text)")
         # An operator's EXPLICIT choice of backend (`--redline-tool`, or a
         # `--redline-cmd` they wired) is honoured: the numbers are recorded and
         # the caveat is reported, but the chain does not shop for a quieter
@@ -1584,15 +1152,8 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         if not fidelity["over_marked"] or tool != "auto":
             winner = last
             break
-        try:
-            fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
-            os.close(fd)
-        except OSError as exc:
-            # A temp-dir failure must not abort the pair (or the whole pass):
-            # record the failure exactly as the copy failure below does (F171).
-            attempts.append({"backend": last.get("backend", tool), "ok": False,
-                             "detail": f"the over-marked candidate could not be saved: {exc}"})
-            continue
+        fd, saved_name = tempfile.mkstemp(prefix="paper-redline-", suffix=".docx")
+        os.close(fd)
         saved = Path(saved_name)
         try:
             shutil.copyfile(out, saved)
@@ -1642,32 +1203,10 @@ def redline_one_pair(tool: str, cmd_template: list, base: Path, revised: Path,
         except OSError:
             pass
     validated, validation_detail = (docx_is_readable(out) if winner else (False, "no output"))
-    return {"ok": bool(winner) and bool(validated),
-            "tool": (winner or {}).get("backend", tool),
+    return {"ok": bool(winner), "tool": (winner or {}).get("backend", tool),
             "attempts": attempts, "validated_ooxml": bool(validated),
             "validation_detail": validation_detail,
             "warning": (winner or {}).get("warning")}
-
-
-def _md_table_cell(text) -> str:
-    """One Markdown table/bullet text: a pipe or newline cannot break the row.
-
-    Escaping only `|` left a literal backslash before a pipe with an EVEN run of
-    backslashes, which a reader takes as an escaped backslash followed by a real
-    cell separator -- the exact defect the shared p04 helper documents and fixes.
-    Normalise the whitespace here (the README's old behaviour) and delegate the
-    escaping, so the two writers cannot diverge again (F018).
-    """
-    return md_table_cell(" ".join(str(text or "").split()))
-
-
-def _md_code(text) -> str:
-    """A Markdown code span for a path, even when the path carries a backtick."""
-    text = " ".join(str(text or "").split()).replace("|", "\\|")
-    run = max((len(m) for m in re.findall(r"`+", text)), default=0) + 1
-    ticks = "`" * run
-    pad = " " if text.startswith("`") or text.endswith("`") else ""
-    return f"{ticks}{pad}{text}{pad}{ticks}"
 
 
 def redline_readme(manifest: dict) -> str:
@@ -1679,7 +1218,7 @@ def redline_readme(manifest: dict) -> str:
          "automation) -- when that server is configured on this machine",
          "2. `python-redlines[docxodus]` (through `paper_redlines_adapter.py`, which reports the "
          "interface it used)",
-         "3. `docx-trackdiff` (CLI form: `docx-trackdiff OLD NEW OUT`)",
+         "3. `docx-trackdiff` (CLI, two argument forms, then `python -m docx_trackdiff`)",
          "4. `--redline-cmd '<json argv with {base} {revised} {out}>'` when you supply one",
          "5. the built-in OOXML word/paragraph-level tracked-changes writer (stdlib only; "
          "unchanged paragraphs are copied verbatim, a changed paragraph carries word-level "
@@ -1701,9 +1240,8 @@ def redline_readme(manifest: dict) -> str:
         for c in v["comparisons"]:
             _result = ("skipped (tool=none)" if c.get("skipped")
                        else ("ok" if c["ok"] else "FAILED"))
-            L.append(f"| {v['round']} | {v['version']} | {c['source']} | "
-                     f"{_md_code(c['base_rel'])} -> {_md_code(c['revised_rel'])} | "
-                     f"{_md_table_cell(c['basis'])} | {c['tool'] or '-'} | "
+            L.append(f"| {v['round']} | {v['version']} | {c['source']} | `{c['base_rel']}` -> "
+                     f"`{c['revised_rel']}` | {c['basis']} | {c['tool'] or '-'} | "
                      f"{_result} |")
     L += ["", "`ok` means the backend exited 0 AND the file it wrote is a readable OOXML package "
               "(a zip whose `word/document.xml` parses) -- a text dump, a truncated zip or a "
@@ -1713,8 +1251,7 @@ def redline_readme(manifest: dict) -> str:
     if warn_rows:
         L += ["## Caveats on files that were still written", ""]
         for r, vid, c in warn_rows:
-            L.append(f"- r{r} {vid} {_md_code(c['revised_rel'])} ({c['tool']}): "
-                     f"{_md_table_cell(c['warning'])}")
+            L.append(f"- r{r} {vid} `{c['revised_rel']}` ({c['tool']}): {c['warning']}")
         L.append("")
     if manifest["notes"]:
         L += ["", "## Notes", ""] + [f"- {n}" for n in manifest["notes"]]
@@ -1723,9 +1260,8 @@ def redline_readme(manifest: dict) -> str:
     if not skipped:
         L.append("- (none)")
     for r, vid, s in skipped:
-        L.append(f"- r{r} {vid}: "
-                 f"{_md_code(s.get('base_rel') or s.get('revised_rel') or s.get('source'))} "
-                 f"-- {_md_table_cell(s['reason'])}")
+        L.append(f"- r{r} {vid}: {s.get('base_rel') or s.get('revised_rel') or s.get('source')} "
+                 f"-- {s['reason']}")
     L.append("")
     return "\n".join(L)
 
@@ -1741,7 +1277,7 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
     """
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
-    versions = None if versions is None else list(versions)
+    versions = list(versions) if versions else None
     out_root = ensure_aux_output_root(ctx.root, REDLINE_DIRNAME)
     src_setup = Path(ctx.state.get("source") or ".")
     # The setup source is only a trustworthy baseline while it still matches the
@@ -1805,76 +1341,29 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
                     continue
                 if note:
                     entry["skipped"].append({"source": label, "reason": note})
-                    # Do not ALSO write comparisons under a label reported as
-                    # skipped: the readme would say the source was skipped while
-                    # listing its files as written against a different baseline
-                    # (F110).
-                    continue
-                unreadable_base, unreadable_cand = [], []
-                pairs, unmatched_base, unmatched_cand = match_docx_pairs(
-                    base_sources, srcs, base_problems=unreadable_base,
-                    cand_problems=unreadable_cand)
-                # A file that could not be read is NOT an absent counterpart: name
-                # the real reason and suppress the false "no corresponding .docx"
-                # row for it (F173).
-                unreadable_base_rels = {p["rel"] for p in unreadable_base}
-                unreadable_cand_rels = {p["rel"] for p in unreadable_cand}
+                pairs, unmatched_base, unmatched_cand = match_docx_pairs(base_sources, srcs)
                 for rel in unmatched_base:
-                    if rel in unreadable_base_rels:
-                        continue
                     entry["skipped"].append({"source": label, "base_rel": rel,
                                              "reason": "no corresponding .docx in the revised "
                                                        "package"})
                 for rel in unmatched_cand:
-                    if rel in unreadable_cand_rels:
-                        continue
                     entry["skipped"].append({"source": label, "revised_rel": rel,
                                              "reason": "new .docx with no counterpart in this "
                                                        "source"})
-                for prob in unreadable_base:
-                    entry["skipped"].append({"source": label, "base_rel": prob["rel"],
-                                             "reason": "unreadable trackable file (not "
-                                                       f"compared): {prob['error']}"})
-                for prob in unreadable_cand:
-                    entry["skipped"].append({"source": label, "revised_rel": prob["rel"],
-                                             "reason": "unreadable trackable file (not "
-                                                       f"compared): {prob['error']}"})
                 for pair in pairs:
                     out = out_root / f"r{r}_{vid}" / label / pair["cand_rel"]
                     if tool == "none":
-                        # A redline from an EARLIER invocation may still sit at
-                        # OUT; publication copies that directory with no manifest
-                        # check, so a skipped row must not leave it behind.
-                        try:
-                            out.unlink()
-                        except OSError:
-                            pass
                         entry["comparisons"].append({
                             "source": label, "base_rel": pair["base_rel"],
                             "revised_rel": pair["cand_rel"], "basis": pair["basis"],
-                            # A skipped row is never reusable as a difference
-                            # track; record the pair digests and say so.
-                            "base_digest": pair.get("base_digest"),
-                            "cand_digest": pair.get("cand_digest"),
-                            "reusable": False,
                             "out": out.relative_to(ctx.root).as_posix(),
                             "tool": None, "ok": False, "skipped": True,
                             "reason": "tool=none: only the manifest/report was requested",
                             "attempts": []})
                         continue
                     else:
-                        try:
-                            result = redline_one_pair(tool, redline_cmd, pair["base_path"],
-                                                      pair["cand_path"], out)
-                        except Exception as e:                    # noqa: BLE001
-                            # One pair's unexpected failure must not lose the
-                            # attempts already collected: record it as this
-                            # pair's failed attempt and continue (F171).
-                            result = {"ok": False, "tool": None,
-                                      "attempts": [{"backend": tool, "ok": False,
-                                                    "detail": f"{type(e).__name__}: {e}"[:300]}],
-                                      "validated_ooxml": False,
-                                      "validation_detail": "no output", "warning": None}
+                        result = redline_one_pair(tool, redline_cmd, pair["base_path"],
+                                                  pair["cand_path"], out)
                     entry["comparisons"].append({
                         "source": label, "base_rel": pair["base_rel"],
                         "revised_rel": pair["cand_rel"], "basis": pair["basis"],
@@ -1897,40 +1386,6 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
             entry["status"] = (f"{ok_n}/{len(entry['comparisons'])} written"
                                if entry["comparisons"] else "no .docx pairs")
             manifest["versions"].append(entry)
-    # ACCUMULATE across invocations: the round close calls this once per round,
-    # and a fresh manifest erased every earlier round's rows (while their files
-    # stayed on disk), so the tracking pass could not reuse them (F253).
-    try:
-        _prev = read_json(out_root / "manifest.json") or {}
-    except (OSError, ValueError):
-        _prev = {}
-    # One non-dict entry (a corrupted/merged/hand-edited manifest, or a
-    # `versions` value that is an object rather than a list) crashed the
-    # accumulation below with AttributeError from a pass whose product is only an
-    # audit aid (F018). Drop such entries as stale ONCE, at read time.
-    _prev_versions = [v for v in
-                      ((_prev.get("versions") if isinstance(_prev, dict) else None) or [])
-                      if isinstance(v, dict)]
-    _prev_map = {(v.get("round"), v.get("version")): v for v in _prev_versions}
-    # A "not materialized" placeholder must not REPLACE a stored entry whose
-    # comparisons were really produced (a temporarily absent source dir).
-    _drop = set()
-    for _v in manifest["versions"]:
-        _key = (_v.get("round"), _v.get("version"))
-        _old = _prev_map.get(_key)
-        if str(_v.get("status") or "") == "not materialized" and _old \
-                and (_old.get("comparisons") or []):
-            _drop.add(_key)
-    if _drop:
-        manifest["versions"] = [v for v in manifest["versions"]
-                                if (v.get("round"), v.get("version")) not in _drop]
-    _new_keys = {(v.get("round"), v.get("version")) for v in manifest["versions"]}
-    _kept = [v for v in _prev_versions
-             if (v.get("round"), v.get("version")) not in _new_keys]
-    if _kept:
-        manifest["versions"] = _kept + manifest["versions"]
-        manifest["versions"].sort(key=lambda v: (int(v.get("round") or 0),
-                                                 str(v.get("version") or "")))
     write_json_atomic(out_root / "manifest.json", manifest)
     write_text_atomic(out_root / "README.md", redline_readme(manifest))
     return manifest
@@ -1953,14 +1408,11 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
         try:
             cmd_template = json.loads(args.redline_cmd)
         except ValueError:
-            die("--redline-cmd must be a JSON argv list", code=2)
+            die("--redline-cmd must be a JSON argv list")
         if not isinstance(cmd_template, list) or not cmd_template:
-            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}", code=2)
+            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
     if args.round is not None and int(args.round) < 1:
-        die(f"--round takes a 1-based round number, got {args.round!r}", code=2)
-    if args.round is not None and int(args.round) > ctx.rounds_count():
-        die(f"--round {int(args.round)} does not exist: this pipeline root is configured "
-            f"with {ctx.rounds_count()} round(s) (rounds are 1-based)", code=2)
+        die(f"--round takes a 1-based round number, got {args.round!r}")
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
                 else [v.strip() for v in str(args.version).split(",") if v.strip()])
@@ -1968,7 +1420,7 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
         bad = [v for v in versions if not is_fresh_vid(v)]
         die(f"--version takes a round-local candidate version id or a comma-separated list of "
             f"them (the round's own plan decides which exist: a1/w1../a2../i1..), or 'all'; "
-            f"got {', '.join(bad)}", code=2)
+            f"got {', '.join(bad)}")
     print(f"[redline] root={ctx.root} tool={args.tool} rounds={rounds or 'all'} "
           f"versions={versions or 'all candidates of each round'}")
     manifest = run_redlines(ctx, rounds=rounds, versions=versions, tool=args.tool,
@@ -1976,27 +1428,12 @@ def _cmd_redline_locked(ctx: Ctx, args) -> None:
     ok_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c["ok"])
     fail_n = sum(1 for v in manifest["versions"] for c in v["comparisons"]
                  if not c["ok"] and not c.get("skipped"))
-    # A requested version that was never materialized produces ZERO comparison
-    # rows, so fail_n stayed 0 and `redline --version w99` printed "0 failed"
-    # and exited 0 -- an operator could not tell a real run from one that did
-    # nothing (F034). The version must exist in at least one selected round.
-    selected_rounds = set(rounds or range(1, ctx.rounds_count() + 1))
-    have_versions = {(v.get("round"), str(v.get("version")))
-                     for v in manifest["versions"]
-                     if v.get("round") in selected_rounds
-                     and str(v.get("status") or "") != "not materialized"}
-    missing_versions = ([vid for vid in versions
-                         if not any(ver == vid for _r, ver in have_versions)]
-                        if versions is not None else [])
     skip_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c.get("skipped"))
     warn_n = sum(1 for v in manifest["versions"] for c in v["comparisons"] if c.get("warning"))
     print(f"[redline] {ok_n} tracked-changes docx written, {fail_n} failed"
           + (f", {skip_n} skipped (tool=none)" if skip_n else "")
           + (f", {warn_n} with caveats (see README)" if warn_n else ""))
-    if missing_versions:
-        print(f"[redline] {len(missing_versions)} requested version(s) were never materialized "
-              f"in the selected round(s): {', '.join(missing_versions)}")
     print(f"[redline] manifest: {ctx.root / REDLINE_DIRNAME / 'manifest.json'}")
     print(f"[redline] summary:  {ctx.root / REDLINE_DIRNAME / 'README.md'}")
-    if (fail_n or missing_versions) and args.tool != "none":
+    if fail_n and args.tool != "none":
         sys.exit(4)

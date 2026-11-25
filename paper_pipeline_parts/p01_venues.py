@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 01/25 of the pipeline -- executed by the
+# Part 01/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -430,20 +430,12 @@ def _clean_length_limits(limits, prefix: str, problems: list):
             continue
         pairing_error = (base is None) != (relaxation is None)
         base = _profile_int(base, f"{prefix}.{key}.base", problems, minimum=1)
-        if relaxation is not None and (isinstance(relaxation, bool)
-                                       or not isinstance(relaxation, (int, float))):
-            # float(True) is 1.0 and float("1.1") is 1.1: a bool or a numeric
-            # string silently changed the enforced rule.
+        try:
+            relaxation = float(relaxation) if relaxation is not None else None
+        except (TypeError, ValueError):
             problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
                             f"(got {relaxation!r})")
             relaxation = None
-        else:
-            try:
-                relaxation = float(relaxation) if relaxation is not None else None
-            except (TypeError, ValueError):
-                problems.append(f"{prefix}.{key}.relaxation must be a number >= 1.0 "
-                                f"(got {relaxation!r})")
-                relaxation = None
         if relaxation is not None and not math.isfinite(relaxation):
             # JSON's NaN/Infinity are accepted by json.loads and compare as
             # neither < 1.0 nor > 0, so they slipped through every range check
@@ -687,7 +679,6 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # measured against another type's caps. A profile written in the older,
     # single-type shape (top-level `article_type`/`length_limits`/`captions`)
     # is read as a one-entry table, so it keeps exactly its old behaviour.
-    explicit_article_types = out.get("article_types") is not None
     types_raw = out.get("article_types")
     if types_raw is None:
         types_raw = [{"id": _slugify_article_type(article_type), "label": article_type,
@@ -738,83 +729,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # The top-level fields stay the DEFAULT type's data: a reader that only knows
     # the pre-article-type shape (an older tool, a hand-written config) sees
     # exactly what it saw before, and `set-article-type` re-points the accessors.
-    # A venue-level `captions`/`length_limits.cover_letter` block written NEXT TO
-    # an article_types table is the venue-wide fallback: a default type that
-    # states neither block inherits it (the README calls the legend policy and
-    # the cover-letter preference "per venue"), instead of silently dropping it.
-    top_captions = _clean_captions(out.get("captions"), "captions", problems) \
-        if explicit_article_types else None
-    top_limits = _clean_length_limits(out.get("length_limits"), "length_limits",
-                                      problems) if explicit_article_types else None
-    # A venue-level abstract/main-text block written next to an article_types
-    # table populates ONLY the default type. A default type that states no
-    # number for a section inherits the top-level one; a NON-default type never
-    # borrows it (the README's "a type with null bases carries no numbers" --
-    # the stages name the venue's own table limit instead). The old comment
-    # called this a venue-wide fallback and promised every type the numbers,
-    # which the code never did (F176).
-    if top_limits is not None:
-        _type_limits = default_entry.get("length_limits")
-        if not isinstance(_type_limits, dict):
-            _type_limits = {"source": "",
-                            "abstract": {"base": None, "relaxation": None},
-                            "main_text": {"base": None, "relaxation": None}}
-            default_entry["length_limits"] = _type_limits
-        # The top-level block's `source` is the citation for the numbers it
-        # supplies. The synthesized block used to start with source "" and
-        # `length_limits_source` fell back to the type's label, so the accepted
-        # venue-level source was silently dropped whenever a table was present
-        # (F37). A source the type states itself still wins.
-        if not str(_type_limits.get("source") or "").strip() \
-                and str(top_limits.get("source") or "").strip():
-            _type_limits["source"] = top_limits["source"]
-        for _section in ("abstract", "main_text"):
-            _type = _type_limits.get(_section) or {}
-            _top = top_limits.get(_section) or {}
-            if (_type.get("base") is None and _type.get("relaxation") is None
-                    and (_top.get("base") is not None
-                         or _top.get("relaxation") is not None)):
-                _type_limits[_section] = copy.deepcopy(_top)
-    if default_entry["captions"] is not None:
-        clean_captions = copy.deepcopy(default_entry["captions"])
-    elif top_captions is not None:
-        clean_captions = copy.deepcopy(top_captions)
-    else:
-        clean_captions = copy.deepcopy(EMPTY_CAPTIONS)
-    if default_entry["length_limits"] is not None:
-        clean_limits = copy.deepcopy(default_entry["length_limits"])
-        if ("cover_letter" not in clean_limits and top_limits is not None
-                and "cover_letter" in top_limits):
-            clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
-    else:
-        clean_limits = copy.deepcopy(EMPTY_LENGTH_LIMITS)
-        if top_limits is not None and "cover_letter" in top_limits:
-            clean_limits["cover_letter"] = copy.deepcopy(top_limits["cover_letter"])
-    # A profile that carries BOTH a top-level `length_limits` and a
-    # `article_types` table may state different caps for the same section. The
-    # article type wins (it is the selected type's own table), but silently
-    # dropping the top-level numbers left the operator with no report that the
-    # profile says two things (F160).
-    if top_limits is not None and default_entry["length_limits"] is not None:
-        for _section in ("abstract", "main_text"):
-            _top = top_limits.get(_section) or {}
-            _type = default_entry["length_limits"].get(_section) or {}
-            # Only TWO STATED numbers can conflict; `null` means "this block
-            # carries no number", so a top-level value is not contradicted by a
-            # type that states none (and a hand-edited top-level value must keep
-            # loading, as the documented snapshot/re-record path expects).
-            _top_base, _type_base = _top.get("base"), _type.get("base")
-            if _top_base is not None and _type_base is not None \
-                    and (_top_base, _top.get("relaxation")) != (
-                        _type_base, _type.get("relaxation")):
-                problems.append(
-                    f"length_limits.{_section} "
-                    f"(base={_top.get('base')!r}, relaxation={_top.get('relaxation')!r}) "
-                    f"conflicts with article_types[{default_type_id}].length_limits."
-                    f"{_section} (base={_type.get('base')!r}, "
-                    f"relaxation={_type.get('relaxation')!r}); the article type's value is "
-                    f"the one applied -- make the two blocks agree or remove the "
-                    f"top-level number")
+    clean_limits = (copy.deepcopy(default_entry["length_limits"])
+                    if default_entry["length_limits"] is not None
+                    else copy.deepcopy(EMPTY_LENGTH_LIMITS))
+    clean_captions = (copy.deepcopy(default_entry["captions"])
+                      if default_entry["captions"] is not None
+                      else copy.deepcopy(EMPTY_CAPTIONS))
 
     journals = _profile_str_list(out.get("journals"), "journals", problems)
     aliases = _profile_str_list(out.get("journal_aliases"), "journal_aliases", problems)
@@ -824,16 +744,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
             re.compile(pat)
         except re.error as e:
             problems.append(f"journal_patterns entry {pat!r} is not a regular expression: {e}")
-    prompt = out.get("prompt")
-    if prompt is None:
-        prompt = {}
-    elif not isinstance(prompt, dict):
+    prompt = out.get("prompt") or {}
+    if not isinstance(prompt, dict):
         problems.append("'prompt' must be an object")
         prompt = {}
-    submission = out.get("submission")
-    if submission is None:
-        submission = {}
-    elif not isinstance(submission, dict):
+    submission = out.get("submission") or {}
+    if not isinstance(submission, dict):
         problems.append("'submission' must be an object")
         submission = {}
     pdf_accepted = submission.get("pdf_accepted")
@@ -897,23 +813,17 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
 
     # The venue's own raster-resolution floor (FMT-IM4). Like figure_text, it is
     # a measured rule with a source, and a profile that states none gets no gate.
-    image_dpi_raw = out.get("image_dpi")
+    image_dpi_raw = out.get("image_dpi") or {}
     clean_image_dpi = {}
-    if image_dpi_raw is not None:
+    if image_dpi_raw:
         if not isinstance(image_dpi_raw, dict):
             problems.append("'image_dpi' must be an object")
         else:
-            # A present block DECLARES the rule: min_dpi is required even when
-            # the object is empty (an empty one used to mean "no rule").
-            _dpi = image_dpi_raw.get("min_dpi")
-            if _dpi is None:
-                problems.append("image_dpi.min_dpi is required when the block is present")
-                min_dpi = 0
-            elif isinstance(_dpi, bool) or not isinstance(_dpi, (int, float)):
+            try:
+                min_dpi = float(image_dpi_raw.get("min_dpi") or 0)
+            except (TypeError, ValueError):
                 problems.append("image_dpi.min_dpi must be a number")
                 min_dpi = 0
-            else:
-                min_dpi = float(_dpi)
             if not math.isfinite(min_dpi) or min_dpi <= 0:
                 problems.append("image_dpi.min_dpi must be a finite number > 0 when the "
                                 "block is present")
@@ -923,21 +833,17 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # The venue's own figure-type minimum (FMT-IM6). It is a measured rule with
     # a source, not a pipeline default: a profile that does not state it gets no
     # gate. Validate it here so a typo cannot silently disable the rule.
-    figure_text_raw = out.get("figure_text")
+    figure_text_raw = out.get("figure_text") or {}
     clean_figure_text = {}
-    if figure_text_raw is not None:
+    if figure_text_raw:
         if not isinstance(figure_text_raw, dict):
             problems.append("'figure_text' must be an object")
         else:
-            _pt = figure_text_raw.get("min_pt")
-            if _pt is None:
-                problems.append("figure_text.min_pt is required when the block is present")
-                min_pt = 0
-            elif isinstance(_pt, bool) or not isinstance(_pt, (int, float)):
+            try:
+                min_pt = float(figure_text_raw.get("min_pt") or 0)
+            except (TypeError, ValueError):
                 problems.append("figure_text.min_pt must be a number")
                 min_pt = 0
-            else:
-                min_pt = float(_pt)
             if not math.isfinite(min_pt) or min_pt <= 0:
                 problems.append("figure_text.min_pt must be a finite number > 0 when the "
                                 "block is present")
@@ -952,12 +858,12 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # none gets an advisory policy gap, never an invented finding. Validate the
     # block here so a typo cannot silently switch a declared bar off, and keep
     # the shape `_venue_style_limits` reads.
-    style_limits_raw = out.get("style_limits")
+    style_limits_raw = out.get("style_limits") or {}
     clean_style_limits = {}
-    if style_limits_raw is not None:
+    if style_limits_raw:
         if not isinstance(style_limits_raw, dict):
             problems.append("'style_limits' must be an object")
-        elif style_limits_raw:
+        else:
             bars_raw = style_limits_raw.get("sentence_words")
             clean_bars = {}
             if bars_raw is not None:
@@ -965,39 +871,26 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
                     problems.append("style_limits.sentence_words must be an object")
                 else:
                     for kind, value in bars_raw.items():
-                        if str(kind).strip().lower() not in (
-                                "front", "abstract", "body", "methods", "legend",
-                                "refs", "heading"):
-                            # A typo silently disabled the declared bar: the
-                            # scanner looks the key up by its own section kind.
+                        try:
+                            words = int(value)
+                        except (TypeError, ValueError):
                             problems.append(
-                                f"style_limits.sentence_words.{kind} is not a scanner "
-                                f"section kind (front/abstract/body/methods/legend/"
-                                f"refs/heading)")
+                                f"style_limits.sentence_words.{kind} must be a number")
                             continue
-                        # A real integer, not bool/float/str: int(True) is 1
-                        # word, int('40') is 40 and int(40.9) silently truncates.
-                        if isinstance(value, bool) or not isinstance(value, int):
-                            problems.append(
-                                f"style_limits.sentence_words.{kind} must be an integer")
-                            continue
-                        words = value
                         if words <= 0:
                             problems.append(
                                 f"style_limits.sentence_words.{kind} must be > 0")
                             continue
-                        # Store the scanner's own (lowercase) spelling: the
-                        # lookup is by section kind, so "Body" must not pass
-                        # validation while never applying.
-                        clean_bars[str(kind).strip().lower()] = words
+                        clean_bars[str(kind)] = words
             cap_raw = style_limits_raw.get("paragraph_words")
             cap = 0
             if cap_raw is not None:
-                if isinstance(cap_raw, bool) or not isinstance(cap_raw, int):
-                    problems.append("style_limits.paragraph_words must be an integer")
+                try:
+                    cap = int(cap_raw)
+                except (TypeError, ValueError):
+                    problems.append("style_limits.paragraph_words must be a number")
                     cap = 0
                 else:
-                    cap = cap_raw
                     if cap <= 0:
                         problems.append(
                             "style_limits.paragraph_words must be > 0 when the block "
@@ -1029,12 +922,9 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
     # profile's own `sources` field names where its numbers come from"), and
     # the rebuilt return value used to drop the key, so a stage reading the
     # profile through VenueProfile.data could not name the guideline it used.
-    # The README promises the map is "carried through the loader unchanged":
-    # `str(v)` turned a nested list/dict value into an unparseable Python repr,
-    # so values (not just keys) are preserved here (F186).
-    clean_sources = ({str(k): copy.deepcopy(v) for k, v in raw_sources.items()}
+    clean_sources = ({str(k): str(v) for k, v in raw_sources.items()}
                      if isinstance(raw_sources, dict) else {})
-    result = {
+    return {
         "id": venue_id,
         "label": label,
         "short": short,
@@ -1059,6 +949,8 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         "leftover_phrases": leftover,
         "numbering": numbering,
         "references": clean_references,
+        "figure_text": clean_figure_text,
+        "image_dpi": clean_image_dpi,
         "style_limits": clean_style_limits,
         "submission": {
             "pdf_accepted": pdf_accepted,
@@ -1067,14 +959,6 @@ def normalize_venue_profile(data, origin: str = "<builtin>") -> dict:
         },
         "prompt": clean_prompt,
     }
-    # A profile that states no measured rule omits the key entirely. Emitting
-    # `{}` made a re-validation (set-venue --profile, archive inheritance) see a
-    # PRESENT-but-empty block, which F116 now correctly rejects.
-    if clean_figure_text:
-        result["figure_text"] = clean_figure_text
-    if clean_image_dpi:
-        result["image_dpi"] = clean_image_dpi
-    return result
 
 
 class VenueProfile:
@@ -1188,7 +1072,7 @@ class VenueProfile:
         if entry.get("captions") is not None:
             return entry["captions"]
         default = self._default_type_entry()
-        return default.get("captions") or self.data.get("captions") or EMPTY_CAPTIONS
+        return default.get("captions") or EMPTY_CAPTIONS
 
     @property
     def caption_default(self) -> int:
@@ -1280,10 +1164,7 @@ class VenueProfile:
         cover = raw.get("cover_letter")
         if cover is None:
             cover = ((self._default_type_entry().get("length_limits") or {})
-                     .get("cover_letter"))
-        if cover is None:
-            cover = (self.data.get("length_limits") or {}).get("cover_letter")
-        cover = cover or {}
+                     .get("cover_letter") or {})
         return {"abstract": spec("abstract"),
                 "main text": spec("main_text"),
                 "cover letter": {"min": cover.get("min"), "max": cover.get("max"),
@@ -1385,18 +1266,11 @@ def available_venue_profiles(root=None) -> dict:
                 continue
             origin = f"root: {d}" if root is not None and \
                 Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else f"shipped: {d}"
-            # `path.read_text()` here had no regular-file/symlink refusal, no
-            # size cap and no O_NONBLOCK: a FIFO named `*.json` blocked
-            # `set-venue --list`, `status` and every prompt command forever, and
-            # a multi-GB profile was read whole before validation (F32). Use the
-            # same bounded, no-follow reader the state loader uses, and list a
-            # refused entry as INVALID instead of following/blocking on it.
-            data = read_json(path, revive=False)
-            if data is None:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as e:
                 found.setdefault(key, {"id": key, "label": key,
-                                       "error": f"{path}: not readable JSON (missing, a "
-                                                f"symlink/FIFO/device, over the size budget, or "
-                                                f"malformed)",
+                                       "error": f"{path}: not readable JSON: {e}",
                                        "origin": origin, "path": str(path)})
                 continue
             declared = (str(data.get("id") or "").strip().lower()
@@ -1425,16 +1299,12 @@ def available_venue_profiles(root=None) -> dict:
                     f"the file declares id {declared!r}; the file name {path.name!r} is "
                     f"the id `set-venue` resolves -- rename the file to {declared}.json "
                     f"or fix its id")
-            if declared:
                 owner = declared_owner.get(declared)
                 if owner is not None and owner[1].parent == path.parent and owner[0] != key:
                     # Two files in the SAME directory declaring one id: name the
                     # duplicate instead of hiding it. The file whose NAME is the
                     # declared id is the rightful owner; the other one is the
-                    # duplicate. This must run even when THIS file's name is
-                    # the declared id: the duplicate may have been read first,
-                    # and the outer `declared != key` guard made the rightful
-                    # owner's correcting branch unreachable (F042).
+                    # duplicate.
                     if key == declared:
                         prior = found.get(owner[0])
                         if prior is not None and not prior.get("error"):
@@ -1487,13 +1357,10 @@ def load_venue_profile(venue_id, root=None) -> VenueProfile:
             if len(matches) != 1:
                 continue
             path = matches[0]
-        # Bounded, no-follow read: a symlinked/FIFO/oversized profile must be
-        # refused rather than followed or read whole (F32).
-        data = read_json(path, revive=False)
-        if data is None:
-            raise VenueProfileError(
-                f"{path}: not readable JSON (missing, a symlink/FIFO/device, over the "
-                f"size budget, or malformed)")
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise VenueProfileError(f"{path}: not readable JSON: {e}")
         origin = "root-local profile" if root is not None and \
             Path(d) == Path(root) / VENUE_PROFILES_DIRNAME else "shipped profile"
         # Resolution is by FILE NAME. A hand-added file whose JSON declares a
@@ -1609,26 +1476,9 @@ def _is_guidance_title(title) -> bool:
     return not low or low in VENUE_GUIDANCE_SECTIONS
 
 
-def _validated_artifact_venue_id(venue_id, what: str) -> str:
-    """A validated venue id for a path join (`<id>.official` etc.), or raise.
-
-    `load_venue_profile` rejects an id with a leading '.' or a path separator, but
-    the pack/exemplar helpers interpolated the caller's RAW id into
-    `Path(d) / f"{vid}<suffix>"` (F78), so `../x` could resolve -- and
-    `build-venue-templates` could WRITE -- outside the profile store. The same
-    check now guards every path-building use of the id.
-    """
-    vid = str(venue_id or "").strip().lower()
-    if not vid or not VENUE_ID_RE.match(vid):
-        raise VenueProfileError(
-            f"invalid venue id {venue_id!r} for {what}: letters, digits, '.', '_', "
-            f"'+', '-' only", unknown=True)
-    return vid
-
-
 def venue_exemplar_dirs(venue_id, root=None) -> list:
     """Existing `<venue-id>.manuscripts/` dirs, precedence order (root first)."""
-    vid = _validated_artifact_venue_id(venue_id, "the exemplar corpus")
+    vid = str(venue_id or "").strip().lower()
     out = []
     for d in venue_profile_search_dirs(root):
         p = Path(d) / f"{vid}{VENUE_EXEMPLAR_SUFFIX}"
@@ -1639,7 +1489,7 @@ def venue_exemplar_dirs(venue_id, root=None) -> list:
 
 def venue_pack_dir(venue_id, root=None):
     """The venue's generated template pack dir, or None when it does not exist."""
-    vid = _validated_artifact_venue_id(venue_id, "the template pack")
+    vid = str(venue_id or "").strip().lower()
     for d in venue_profile_search_dirs(root):
         p = Path(d) / f"{vid}{VENUE_TEMPLATE_SUFFIX}"
         if (p / VENUE_NORM_FILE).is_file():
@@ -1649,7 +1499,7 @@ def venue_pack_dir(venue_id, root=None):
 
 def venue_official_dirs(venue_id, root=None, profiles_dir=None) -> list:
     """Existing `<venue-id>.official/` dirs (explicit profiles_dir first)."""
-    vid = _validated_artifact_venue_id(venue_id, "the official template corpus")
+    vid = str(venue_id or "").strip().lower()
     out = []
     if profiles_dir:
         p = Path(profiles_dir) / f"{vid}{VENUE_OFFICIAL_SUFFIX}"
@@ -1717,20 +1567,10 @@ def _name_is_article_type_manuscript(name, type_names=()) -> bool:
             continue
         if norm == t:
             return True
-        if norm.startswith(t + " "):
-            rest = norm[len(t) + 1:]
-            if re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}", rest):
-                return True
-            # The pipeline's own revision token (7 hex), a `.final`/`_final`
-            # spelling and a combined form are version suffixes too; without
-            # this, a renamed article-type manuscript fell through to the
-            # `letter` -> cover branch (F64).
-            if re.fullmatch(r"(?:final|draft|revised|revision)", rest):
-                return True
-            if re.fullmatch(r"[0-9a-f]{7}", rest.replace(" ", "")):
-                return True
-            if re.fullmatch(r"(?:final|draft|revised) ?[0-9a-f]{7}", rest):
-                return True
+        if norm.startswith(t + " ") \
+                and re.fullmatch(r"(?:v|rev|version|revision|draft)? ?\d{1,3}",
+                                 norm[len(t) + 1:]):
+            return True
     return False
 
 
@@ -1771,7 +1611,6 @@ def docx_document_role(name, manuscript_names=()) -> str:
     # sample). The prefix test covers every `supplement*` compound; `support`
     # does not start with `supplement` and stays `main` (see the role tests).
     if "supp" in tokens or "suppl" in tokens \
-            or ("supporting" in tokens and "information" in tokens) \
             or any(re.fullmatch(
                 r"supp(?:l(?:ement(?:s|al|ary|arymaterial|almaterial)?)?)?\d*", t)
                 for t in tokens):
@@ -1795,7 +1634,7 @@ def docx_document_role(name, manuscript_names=()) -> str:
 
 def _profile_for_template_names(venue_id, root=None, profiles_dir=None):
     """The venue profile used to derive template-role names, or None."""
-    vid = _validated_artifact_venue_id(venue_id, "the template-role profile")
+    vid = str(venue_id or "").strip().lower()
     if profiles_dir:
         p = Path(profiles_dir) / f"{vid}{VENUE_PROFILE_SUFFIX}"
         if p.is_file():
@@ -1896,11 +1735,7 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                                   manuscript_names=article_type_manuscript_names(ctx))
     if not res or not venue_templates_enabled():
         return {}
-    # The sandbox is agent-writable: a previous attempt can leave
-    # `venue_template` (or a role directory) as a symlink to an outside
-    # directory, so create every level through the no-follow guard and write
-    # each template atomically instead of `copy2`-ing through a planted link.
-    dst = safe_mkdir(sb / "venue_template")
+    dst = sb / "venue_template"
     staged = {}
     for role, value in (("word", res.get("word") or {}), ("latex", res.get("latex") or {})):
         for key, p in value.items():
@@ -1909,12 +1744,12 @@ def stage_venue_template(ctx: "Ctx", sb: Path) -> dict:
                     continue
                 target = dst / role / q.name
                 if not target.is_file() or sha256_file(target) != sha256_file(q):
-                    safe_mkdir(target.parent)
+                    target.parent.mkdir(parents=True, exist_ok=True)
                     if target.is_file():
                         # the previously staged copy is 0444: an UPDATED venue
-                        # template must still be re-stageable
+                        # template must still be re-stageable (copy2 would raise)
                         make_writable(target)
-                    write_bytes_atomic(target, read_regular_file(q))
+                    shutil.copy2(q, target)
                 with contextlib.suppress(OSError):
                     os.chmod(target, 0o444)
                 staged[f"{role}/{q.name}"] = sha256_file(target)
@@ -1949,10 +1784,6 @@ def extract_official_template(path: Path) -> dict:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {"skipped": "unreadable"}
-        # A commented-out declaration or a fenced example is not authoritative
-        # structure: run every discovery on the SAME comment/fence-stripped
-        # text the section reader uses.
-        text = _strip_source_markup(text, suffix)
         m = TEX_DOCCLASS_RE.search(text)
         out["documentclass"] = m.group(1).strip() if m else ""
         out["sections"] = [{"level": lvl, "title": title}
@@ -1981,15 +1812,10 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
     sample document, plus any the operator lists explicitly in
     `<venue-id>.official/requirements.json` (`{"mandatory_sections": [...]}`).
     """
-    # F114: every derived field (sections, class, statements) comes from the
-    # MAIN samples only. A supplementary template's headings/class must not
-    # become the venue's authoritative skeleton.
-    main_records = [r for r in records
-                    if str(r.get("role") or "main") == "main"]
-    n = len(main_records)
+    n = len(records)
     positions, spellings, counts = {}, {}, {}
     st_positions, st_spellings = {}, {}
-    for rec in main_records:
+    for rec in records:
         # A section is present in a SAMPLE at most once: counting every heading
         # occurrence made a template that repeats "Results" look like two
         # samples carrying it, and `present` then satisfied the every-sample
@@ -2023,10 +1849,10 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
                  "mean_position": round(sum(positions[k]) / len(positions[k]), 2)}
                 for k in order]
     mandatory = [s["title"] for s in sections if n and s["present"] == n]
-    classes = [r.get("documentclass") for r in main_records if r.get("documentclass")]
+    classes = [r.get("documentclass") for r in records if r.get("documentclass")]
     statements = []
     for label, _pat in VENUE_STATEMENT_PATTERNS:
-        c = sum(1 for r in main_records if label in (r.get("statements") or []))
+        c = sum(1 for r in records if label in (r.get("statements") or []))
         if c:
             statements.append({"label": label, "present": c, "n_samples": n})
     st_order = sorted(st_positions, key=lambda k: (sum(st_positions[k]) / len(st_positions[k]), k))
@@ -2038,29 +1864,16 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
             continue
         seen_st.add(word_key)
         statement_sections.append(title)
-    # Mandatory sections are computed over the MAIN samples that carry a BODY at
-    # all: a supplementary-material template in the same pack must not veto a body
-    # section the main samples all share (F67). A sample's role comes from its
-    # file name (`docx_document_role`); a record built by a caller that carries no
-    # role is a main sample (the pre-F67 shape).
-    main_counts, body_samples = {}, 0
-    for rec in main_records:
-        body_keys = set()
-        for sec in (rec.get("sections") or []):
-            if int(sec.get("level") or 0) != 1:
-                continue
-            title = sec.get("title")
-            if _is_guidance_title(title) or _section_is_statement(title):
-                continue
-            body_keys.add(str(title or "").strip().lower())
-        if not body_keys:
-            continue
-        body_samples += 1
-        for key in body_keys:
-            main_counts[key] = main_counts.get(key, 0) + 1
+    # Mandatory sections are computed over the samples that carry a BODY at all:
+    # a supplementary-material template in the same pack must not veto a body
+    # section the main samples all share.
+    body_samples = 0
+    for rec in records:
+        if any(int(s.get("level") or 0) == 1 and not _is_guidance_title(s.get("title"))
+               and not _section_is_statement(s.get("title")) for s in (rec.get("sections") or [])):
+            body_samples += 1
     mandatory = [s["title"] for s in sections
-                 if body_samples
-                 and main_counts.get(s["title"].strip().lower(), 0) >= body_samples]
+                 if body_samples and s["present"] >= body_samples]
     # The operator's pinned sections must survive the body-samples recompute:
     # requirements.json is authoritative about what this venue ALWAYS requires,
     # even when the sampled official templates do not all carry the section.
@@ -2076,83 +1889,6 @@ def official_skeleton(records: list, explicit_requirements: dict = None) -> dict
                       for r in records]}
 
 
-def _validated_official_requirements(official: dict, struct_path) -> dict:
-    """Shape-check the pack's `official` block before it becomes requirements (F70).
-
-    `official_template_requirements` only required an object. A string
-    `mandatory_sections` was then iterated one CHARACTER at a time into bogus
-    requirements, and a string `statements` entry crashed the whole conformance
-    scan (which p04 records only as an opaque `official_template: {error}`,
-    dropping the class). A broken/hand-edited pack is reported, naming the field.
-    """
-    def bad(field, want, got):
-        raise VenueProfileError(
-            f"{struct_path}: the venue template pack's official {field!r} must be {want} "
-            f"(got {got}); regenerate it with `build-venue-templates`")
-
-    sections = official.get("sections")
-    if sections is not None:
-        if not isinstance(sections, list):
-            bad("sections", "a list of objects with a string title", type(sections).__name__)
-        for sec in sections:
-            if not isinstance(sec, dict) or not isinstance(sec.get("title"), str):
-                bad("sections", "a list of objects with a string title", repr(sec))
-    pinned = official.get("mandatory_sections")
-    if pinned is not None:
-        if isinstance(pinned, str) or not isinstance(pinned, list):
-            bad("mandatory_sections", "a list of non-empty strings",
-                type(pinned).__name__)
-        for item in pinned:
-            if not isinstance(item, str) or not item.strip():
-                bad("mandatory_sections", "a list of non-empty strings", repr(item))
-    statements = official.get("statements")
-    if statements is not None:
-        if not isinstance(statements, list):
-            bad("statements", "a list of objects with a string label",
-                type(statements).__name__)
-        for stmt in statements:
-            if not isinstance(stmt, dict) or not isinstance(stmt.get("label"), str):
-                bad("statements", "a list of objects with a string label", repr(stmt))
-    documentclass = official.get("documentclass")
-    if documentclass is not None and not isinstance(documentclass, str):
-        # A list/int here survived validation and scan_template_conformance
-        # stringified it, making the class row impossible to satisfy (F256).
-        bad("documentclass", "a string class name ('' when the template declares none)",
-            repr(documentclass))
-    return official
-
-
-def _validated_explicit_requirements(data, where: str) -> dict:
-    """The operator's pinned requirements, SHAPE-checked before use (F69).
-
-    A syntactically valid `requirements.json` of the wrong shape used to crash the
-    build (a list has no `.get`) or, worse, install one mandatory section per
-    CHARACTER of a string. Fail the build instead, naming the file and the field
-    (the same way an unreadable pin is failed by F197).
-    """
-    if data is None:
-        return {}
-    if not isinstance(data, dict):
-        die(f"{where}: the operator's pinned official requirements must be a JSON object "
-            f"such as {{\"mandatory_sections\": [\"Data availability\"]}}, not "
-            f"{type(data).__name__}; fix or remove that file")
-    out = dict(data)
-    pinned = out.get("mandatory_sections")
-    if pinned is not None:
-        if isinstance(pinned, str) or not isinstance(pinned, list):
-            die(f"{where}: 'mandatory_sections' must be a JSON LIST of section titles "
-                f"(got a {type(pinned).__name__}); a bare string would be read one "
-                f"character at a time. Fix or remove that file")
-        cleaned = []
-        for item in pinned:
-            if not isinstance(item, str) or not item.strip():
-                die(f"{where}: every 'mandatory_sections' entry must be a non-empty string "
-                    f"(got {item!r}); fix or remove that file")
-            cleaned.append(item.strip())
-        out["mandatory_sections"] = cleaned
-    return out
-
-
 def official_template_requirements(venue_id, root=None) -> dict:
     """The pinned official-template requirements a session must conform to.
 
@@ -2164,29 +1900,13 @@ def official_template_requirements(venue_id, root=None) -> dict:
     pack = venue_pack_dir(venue_id, root)
     if pack is None:
         return {}
-    struct_path = pack / VENUE_STRUCTURE_FILE
     try:
-        data = json.loads(struct_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        # The pack EXISTS (venue_pack_dir found its summary), so an unreadable
-        # structure.json is a BROKEN pack, not a venue that ships none: returning
-        # {} here let the caller skip every official-template requirement (F198).
-        raise VenueProfileError(
-            f"{struct_path}: the venue template pack's {VENUE_STRUCTURE_FILE} cannot be "
-            f"read ({e}); the pack exists, so its official requirements are unknown -- "
-            f"regenerate it with `build-venue-templates` or remove the pack")
-    official = data.get("official") if isinstance(data, dict) else None
-    if not isinstance(official, dict):
-        raise VenueProfileError(
-            f"{struct_path}: the venue template pack carries no 'official' object; "
-            f"regenerate it with `build-venue-templates`")
-    official = _validated_official_requirements(official, struct_path)
-    # A pack that pins ONLY declarations or ONLY a class file is still an
-    # authoritative requirement set: discarding it dropped the venue's rule
-    # instead of enforcing or reporting it (wave-2 F181).
-    if not (official.get("sections") or official.get("mandatory_sections")
-            or official.get("statements")
-            or str(official.get("documentclass") or "").strip()):
+        data = json.loads((pack / VENUE_STRUCTURE_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    official = (data or {}).get("official") or {}
+    if not isinstance(official, dict) or not official.get("sections") \
+            and not official.get("mandatory_sections"):
         return {}
     norm = (data or {}).get("norm") or {}
     advisory = [str(s.get("title") or "") for s in (norm.get("sections") or [])
@@ -2198,14 +1918,7 @@ def official_template_requirements(venue_id, root=None) -> dict:
 
 
 _TEMPLATE_HEADING_KEY_RE = re.compile(r"[^a-z0-9]+")
-# A CAPTION, not prose: the label and number must be followed by the caption's
-# delimiter (|, :, an en/em dash, - or .) and then whitespace/end-of-line. The
-# formatter's caption grammar states the same rule ("Table 3 shows ..." is a
-# body sentence, not a caption); the earlier template pattern accepted that prose
-# as a caption and fed it to the numbering check (F72).
-_TEMPLATE_CAPTION_RE = re.compile(
-    r"^\s*(Figure|Fig\.?|Table)\s*S?(\d{1,3})[A-Za-z]?\s*(?:\||:|\u2014|\u2013|-|\.)(?=\s|$)",
-    re.I)
+_TEMPLATE_CAPTION_RE = re.compile(r"^\s*(Figure|Fig\.?|Table)\s*(\d{1,3})[A-Za-z]?\b", re.I)
 
 
 def _heading_key(text) -> str:
@@ -2217,44 +1930,6 @@ def _docx_style_ids(path: Path) -> list:
     mod = _format_module()
     fn = getattr(mod, "docx_style_ids", None)
     return fn(path) if fn is not None else []
-
-
-def _docx_style_name_map(path: Path) -> dict:
-    """{style id: declared style name} from a DOCX's word/styles.xml.
-
-    Word style ids are arbitrary: a real Heading 1 may carry the id `H1` while
-    its declared name is `heading 1`. The live `w:pStyle` value alone therefore
-    cannot tell a heading from prose (wave-2 F174); this map resolves it. `{}`
-    when styles.xml is absent/unreadable.
-
-    The formatter's reader applies the untrusted-DOCX part/total budget and the
-    DTD/entity refusal (the same guard as `docx_style_ids`); this wrapper must
-    never bypass it with a direct `zipfile.read` on a submitted package.
-    """
-    mod = _format_module()
-    fn = getattr(mod, "docx_style_name_map", None)
-    return fn(path) if fn is not None else {}
-
-
-_DOCX_HEADING_NAME_RE = re.compile(r"(?i)^heading\s*[1-9]$")
-
-
-def _docx_heading_style(style_id, style_names=None) -> bool:
-    """True when a paragraph's `w:pStyle` id/declared name denotes a heading."""
-    sid = str(style_id or "").strip()
-    if not sid:
-        return False
-    if _style_id_is_heading(sid):
-        # A declared style name outranks a short id: a custom style whose id is
-        # `H1` but whose styles.xml name is "Body Text" is prose, not a
-        # heading (test_wave2_G8 C130). An undeclared `H1`/`heading1` is a
-        # heading; a `HeadingN` id keeps the old unconditional behavior.
-        if sid.lower().startswith("heading"):
-            return True
-        name = str((style_names or {}).get(sid) or "").strip()
-        return not name or bool(_DOCX_HEADING_NAME_RE.match(name))
-    name = str((style_names or {}).get(sid) or "").strip()
-    return bool(name and _DOCX_HEADING_NAME_RE.match(name))
 
 
 def _docx_front_matter_report(path: Path, template: Path = None, containers=()) -> dict:
@@ -2287,12 +1962,6 @@ def scan_template_conformance(sources: list, requirements: dict,
     official_titles = [str(s.get("title") or "") for s in (req.get("sections") or [])
                        if isinstance(s, dict) and str(s.get("title") or "").strip()]
     advisory = [str(t) for t in (req.get("advisory_sections") or []) if str(t).strip()]
-
-    def _section_key(value) -> str:
-        """A heading label without its section number ("2.1 Results" -> results)."""
-        return _heading_key(re.sub(r"^\s*\d+(?:\.\d+)*\s*[.)]?\s+", "",
-                                   str(value or "")))
-
     # The official pack can yield a single parsable section (Frontiers). Then the
     # recent-practice order is the only usable architecture order; the rows say
     # which basis they used.
@@ -2300,11 +1969,9 @@ def scan_template_conformance(sources: list, requirements: dict,
     order_titles = official_titles
     if len(order_titles) < 2 and len(advisory) >= 2:
         order_titles, order_basis = advisory, "recent practice (advisory)"
-    # The lookup key drops BOTH the section number and the punctuation, so a
-    # numbered heading ("2. Methods") matches the template's "Methods" (F71).
     order_index = {}
     for i, t in enumerate(order_titles):
-        order_index.setdefault(_section_key(t), i)
+        order_index.setdefault(_heading_key(t), i)
 
     have_class, texts, docs = "", [], set()
     tex_classes = {}            # doc -> documentclass declared in that file
@@ -2312,50 +1979,12 @@ def scan_template_conformance(sources: list, requirements: dict,
     doc_headings = []           # (doc, title) in document order
     caption_rows = []           # (doc, is_table, number)
     docx_paths = {}             # doc -> Path
-    seen_section_keys = set()   # every heading label in the MAIN manuscript(s)
-    main_heading_texts = []     # main-role heading text, for statement blocks
-    main_statement_texts = []   # main-role statement-block lead paragraphs
+    seen_section_keys = set()   # every heading label met anywhere in the corpus
 
-    def _statement_lead_label(line) -> str:
-        """The label a statement-block lead paragraph starts with, else "".
-
-        A required statement is often a block with a bold lead label
-        ("**Funding.** This work ...") rather than a heading. Only the
-        paragraph's LEAD label counts: a body sentence that merely contains
-        the word is still prose (F050/F121).
-        """
-        s = str(line or "").strip()
-        s = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", s)
-        s = re.sub(r"^(?:\*{1,3}|_{1,3})", "", s)
-        s = re.sub(r"^\\?(?:textbf|textit|emph)\{", "", s)
-
-        def _separated(rest: str) -> bool:
-            rest = re.sub(r"^(?:\*{1,3}|_{1,3})", "", rest)
-            rest = re.sub(r"^\}", "", rest)
-            # The label may be continued by its own qualifier ("Ethics
-            # approval.", "Funding statement."); an unrelated continuing word
-            # still fails because the separator must follow the qualifier.
-            return bool(re.match(
-                r"\s*(?:(?:approval|statement|section|policy|declaration|"
-                r"disclosure|details|information)\s*)*[.:]", rest, re.I))
-
-        # The requested label itself. Its own pattern may match only a prefix
-        # ("ethic" / "acknowledg"), so a separator test after the pattern end
-        # would reject the common "Ethics." / "Acknowledgements." lead.
-        for _label in statements:
-            lab = str(_label or "").strip()
-            if lab and s.lower().startswith(lab.lower()) \
-                    and _separated(s[len(lab):]):
-                return lab
-        # A synonym form from the pattern table ("Conflict of interest." for
-        # "Competing interests"), with the match required to end a word.
-        for _label, _pat in VENUE_STATEMENT_PATTERNS:
-            m = _pat.match(s)
-            if not m or (m.end() < len(s) and s[m.end()].isalnum()):
-                continue
-            if _separated(s[m.end():]):
-                return _label
-        return ""
+    def _section_key(value) -> str:
+        """A heading label without its section number ("2.1 Results" -> results)."""
+        return _heading_key(re.sub(r"^\s*\d+(?:\.\d+)*\s*[.)]?\s+", "",
+                                   str(value or "")))
 
     for src, prefix, excluded in sources:
         if not src.is_dir():
@@ -2371,47 +2000,22 @@ def scan_template_conformance(sources: list, requirements: dict,
                 continue
             doc = prefix + rel
             ext = p.suffix.lower()
-            # A COVER LETTER is not a manuscript: a heading or a declaration
-            # sentence in the letter must not satisfy the manuscript's mandatory
-            # section, required statement or architecture order (F73). It stays
-            # in `docx_paths` so the style block can measure it against the
-            # venue's COVER template (and only that one).
-            role = docx_document_role(p.name, manuscript_names)
             if ext in LENGTH_DOCX_EXTS:
-                pairs = _docx_paragraphs_with_styles(p)
-                if pairs is None:
-                    # An unreadable DOCX is a REPORTED gap, not a silently
-                    # compliant document (F74): the TeX/Markdown branches below
-                    # already name the source they could not read.
-                    unparsed.append(doc)
+                paras = _docx_paragraphs(p)
+                if paras is None:
                     continue
-                docx_paths[doc] = p
-                if role == "cover":
-                    continue
-                # F050: a supplementary document's headings/statements/class
-                # must not satisfy the MAIN manuscript's requirements.
+                texts.append("\n".join(paras))
                 docs.add(doc)
-                if role == "main":
-                    texts.append("\n".join(text for text, _style in pairs))
+                docx_paths[doc] = p
                 seen = set()
-                style_names = _docx_style_name_map(p)
-                for para, style in pairs:
+                for para in paras:
                     line = para.strip()
-                    # A required section must be a SECTION: a plain body
-                    # paragraph whose whole text is "Results" is prose, not a
-                    # heading. Word marks a heading with its paragraph style
-                    # (the codebase's `Heading*` convention); the MD/TEX
-                    # branches use their own heading regexes further down.
-                    if _docx_heading_style(style, style_names):
-                        skey = _section_key(line)
-                        if skey and role == "main":
-                            seen_section_keys.add(skey)
-                            main_heading_texts.append(line)
-                        if skey in order_index and skey not in seen:
-                            seen.add(skey)
-                            doc_headings.append((doc, order_titles[order_index[skey]]))
-                    if role == "main" and _statement_lead_label(line):
-                        main_statement_texts.append(line)
+                    key = _heading_key(line)
+                    if key:
+                        seen_section_keys.add(_section_key(line))
+                    if key in order_index and key not in seen:
+                        seen.add(key)
+                        doc_headings.append((doc, order_titles[order_index[key]]))
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2421,50 +2025,36 @@ def scan_template_conformance(sources: list, requirements: dict,
                 if text is None:
                     unparsed.append(doc)
                     continue
-                text = _strip_source_markup(text, ".tex")
-                if role == "cover":
-                    continue
+                texts.append(text)
                 docs.add(doc)
-                if role == "main":
-                    texts.append(text)
                 for m in TEX_SECTION_RE.finditer(text):
-                    skey = _section_key(m.group(2))
-                    if skey and role == "main":
-                        seen_section_keys.add(skey)
-                        main_heading_texts.append(m.group(2))
-                    if skey in order_index:
-                        doc_headings.append((doc, order_titles[order_index[skey]]))
+                    key = _heading_key(m.group(2))
+                    if key:
+                        seen_section_keys.add(_section_key(m.group(2)))
+                    if key in order_index:
+                        doc_headings.append((doc, order_titles[order_index[key]]))
                 for line in text.splitlines():
-                    if role == "main" and _statement_lead_label(line):
-                        main_statement_texts.append(line)
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
                                              int(m.group(2))))
                 m = TEX_DOCCLASS_RE.search(text)
-                if m and role == "main":
+                if m:
                     tex_classes.setdefault(doc, m.group(1).strip())
             elif ext in LENGTH_TEXT_EXTS:
                 text = read_text_bounded(p)
                 if text is None:
                     unparsed.append(doc)
                     continue
-                text = _strip_source_markup(text, ".md")
-                if role == "cover":
-                    continue
+                texts.append(text)
                 docs.add(doc)
-                if role == "main":
-                    texts.append(text)
                 for m in MD_HEADING_RE.finditer(text):
-                    skey = _section_key(m.group(2))
-                    if skey and role == "main":
-                        seen_section_keys.add(skey)
-                        main_heading_texts.append(m.group(2))
-                    if skey in order_index:
-                        doc_headings.append((doc, order_titles[order_index[skey]]))
+                    key = _heading_key(m.group(2))
+                    if key:
+                        seen_section_keys.add(_section_key(m.group(2)))
+                    if key in order_index:
+                        doc_headings.append((doc, order_titles[order_index[key]]))
                 for line in text.splitlines():
-                    if role == "main" and _statement_lead_label(line):
-                        main_statement_texts.append(line)
                     m = _TEMPLATE_CAPTION_RE.match(line)
                     if m:
                         caption_rows.append((doc, m.group(1).lower().startswith("tab"),
@@ -2479,12 +2069,6 @@ def scan_template_conformance(sources: list, requirements: dict,
         have_class = tex_classes[(mains or list(tex_classes))[0]]
     blob = "\n".join(texts)
     low = blob.lower()
-    # A required STATEMENT is a section/block of its own, not any prose sentence
-    # that happens to contain the word: match its pattern against the main-role
-    # HEADINGS (a "Funding" / "Data availability" heading) and statement-block
-    # LEAD PARAGRAPHS ("**Funding.** This work ..."), never the body.
-    statement_blob = "\n".join(main_heading_texts + main_statement_texts)
-    statement_low = statement_blob.lower()
     # A required section must be a SECTION: its label may not be satisfied by
     # the word appearing in a Results sentence somewhere in the corpus. Section
     # numbering is dropped, so "## 2. Materials and Methods" matches the
@@ -2498,8 +2082,8 @@ def scan_template_conformance(sources: list, requirements: dict,
     pats = {label: pat for label, pat in VENUE_STATEMENT_PATTERNS}
     missing_statements = [
         s for s in statements
-        if not ((pats[s].search(statement_blob) if s in pats else None)
-                or s.strip().lower() in statement_low)]
+        if not ((pats[s].search(blob) if s in pats else None)
+                or s.strip().lower() in low)]
     # A required class cannot be satisfied by a corpus with NO LaTeX: `have_class`
     # stays "" for a Word-only submission, and treating that as "no check needed"
     # made the requirement silently disappear from both the evidence table and
@@ -2514,43 +2098,30 @@ def scan_template_conformance(sources: list, requirements: dict,
     for doc, seq in sorted(by_doc.items()):
         for i in range(len(seq)):
             inversion = next((j for j in range(i + 1, len(seq))
-                              if order_index.get(_section_key(seq[j]), -1)
-                              < order_index.get(_section_key(seq[i]), -1)), None)
+                              if order_index.get(_heading_key(seq[j]), -1)
+                              < order_index.get(_heading_key(seq[i]), -1)), None)
             if inversion is not None:
                 order_rows.append(
                     f"{doc}: section {seq[inversion]!r} appears after {seq[i]!r} "
                     f"(order basis: {order_basis}: {' > '.join(order_titles)})")
                 break
-    # Figure/table labels: first occurrences must be ascending and gap-free PER
-    # SEQUENCE. Figures are numbered per submission unit: the main manuscript and
-    # each supplementary file carry their own numbering, so a supplement's
-    # "Figure 1" after the main text's "Figure 2" is not a main-text defect (F75).
-    # The main-role documents form ONE sequence (a manuscript may be split across
-    # files); every other role/document is its own sequence.
+    # Figure/table labels: first occurrences must be ascending and gap-free.
     label_rows = []
-    caption_groups = {}
-    for doc, is_table, number in caption_rows:
-        role = docx_document_role(Path(doc).name, manuscript_names)
-        group = "main" if role == "main" else doc
-        caption_groups.setdefault((group, is_table), []).append(number)
-    for (group, is_table), nums in sorted(caption_groups.items()):
-        label = "Table" if is_table else "Figure"
-        where = "" if group == "main" else f" in {group}"
+    for is_table, label in ((False, "Figure"), (True, "Table")):
+        nums = [n for _doc, table, n in caption_rows if table is is_table]
         first = []
         for n in nums:
             if n not in first:
                 first.append(n)
         if first and first != sorted(first):
-            label_rows.append(
-                f"{label} captions are out of order{where}: first occurrences {first}")
+            label_rows.append(f"{label} captions are out of order: first occurrences {first}")
         if first:
             gaps = sorted(set(range(1, max(first) + 1)) - set(first))
             if gaps:
-                label_rows.append(f"{label} numbering has gaps{where}: {gaps}")
+                label_rows.append(f"{label} numbering has gaps: {gaps}")
     # Word template styles: every corpus .docx must carry the ids of the
     # template that governs ITS role (main / supplementary / cover letter).
     word_styles_missing = []
-    word_template_rows = []
     front_rows = []
     if word_template is not None or word_template_supplementary is not None \
             or word_template_cover is not None:
@@ -2559,21 +2130,6 @@ def scan_template_conformance(sources: list, requirements: dict,
                     if word_template_supplementary is not None else set())
         cover_ids = (set(_docx_style_ids(Path(word_template_cover)))
                      if word_template_cover is not None else set())
-        # A template that cannot be read (or declares no style ids at all) leaves
-        # its style/front-matter requirement UNANSWERED; the old gate on
-        # `main_ids or supp_ids or cover_ids` silently skipped the whole block and
-        # reported word_template_ok (F74). Only when the formatter module is
-        # absent is the check impossible for every role, and then no row is
-        # invented for one template alone.
-        if _format_module() is not None:
-            for _role, _tpl, _ids in (("main", word_template, main_ids),
-                                      ("supplementary", word_template_supplementary, supp_ids),
-                                      ("cover letter", word_template_cover, cover_ids)):
-                if _tpl is not None and not _ids:
-                    word_template_rows.append(
-                        f"word template unreadable or declaring no styles ({_role}): "
-                        f"{Path(_tpl).name}; its style and front-matter requirements could "
-                        f"not be checked")
         if main_ids or supp_ids or cover_ids:
             for doc, path in sorted(docx_paths.items()):
                 role = docx_document_role(doc, manuscript_names)
@@ -2598,7 +2154,7 @@ def scan_template_conformance(sources: list, requirements: dict,
                     front_rows.append(f"{doc}: {row}")
     conforms = (bool(req) and not missing_sections and not missing_statements and class_ok
                 and not order_rows and not label_rows and not word_styles_missing
-                and not word_template_rows and not front_rows and not unparsed)
+                and not front_rows)
     return {"official": bool(req), "required": {"documentclass": want_class,
                                                 "mandatory_sections": mandatory,
                                                 "statements": statements},
@@ -2608,8 +2164,7 @@ def scan_template_conformance(sources: list, requirements: dict,
             "class_ok": class_ok, "order_basis": order_basis,
             "order_rows": order_rows, "label_rows": label_rows,
             "word_styles_missing": word_styles_missing,
-            "word_template_ok": not word_styles_missing and not word_template_rows,
-            "word_template_rows": word_template_rows,
+            "word_template_ok": not word_styles_missing,
             "front_matter_rows": front_rows,
             "conforms": conforms,
             "note": ("advisory, code-side: a row names a requirement the official template "
@@ -2624,29 +2179,11 @@ def venue_profiles_write_dir(root=None) -> Path:
     return dirs[0] if dirs else Path(VENUE_PROFILES_DIRNAME)
 
 
-#: Names that document a downloaded corpus, not a published manuscript or a
-#: journal template. A README's headings must not become an advisory norm or an
-#: authoritative mandatory section (wave-2 F188); the corpus-wide README rule
-#: (`is_non_manuscript_rel`) cannot see a bare `LICENSE.md`/`NOTICE.txt`.
-_EXEMPLAR_METADATA_STEMS = frozenset({
-    "readme", "license", "licence", "copying", "notice", "manifest",
-    "changelog", "contributing", "code_of_conduct",
-})
-
-
-def _is_exemplar_metadata_file(p: Path) -> bool:
-    """True for a corpus documentation/metadata file, never a manuscript."""
-    return p.stem.strip().lower() in _EXEMPLAR_METADATA_STEMS
-
-
 def _exemplar_files(dirp: Path) -> list:
-    """Every supported MANUSCRIPT/TEMPLATE exemplar file under one corpus dir."""
+    """Every supported exemplar file under one corpus dir, sorted."""
     out = []
     for p in sorted(dirp.rglob("*")):
         if not p.is_file():
-            continue
-        rel = p.relative_to(dirp).as_posix()
-        if is_non_manuscript_rel(rel) or _is_exemplar_metadata_file(p):
             continue
         suf = p.suffix.lower()
         if suf in VENUE_EXEMPLAR_TEXT_SUFFIXES or suf in VENUE_EXEMPLAR_DOCX_SUFFIXES:
@@ -2654,53 +2191,13 @@ def _exemplar_files(dirp: Path) -> list:
     return out
 
 
-_MD_FENCE_OPEN_RE = re.compile(r"^\s*(`{3,}|~{3,})")
-
-
-def _strip_markdown_fences(text: str) -> str:
-    """`text` without its fenced code blocks (line structure kept).
-
-    A fenced `## Results` is CODE, not a heading: leaving it in the raw text
-    satisfied a mandatory-section requirement the live manuscript did not
-    contain (wave-2 F183).
-    """
-    out = []
-    fence = ""
-    for line in (text or "").splitlines(keepends=True):
-        m = _MD_FENCE_OPEN_RE.match(line)
-        if not fence:
-            if m:
-                fence = m.group(1)[0]
-                out.append("\n" if line.endswith("\n") else "")
-                continue
-            out.append(line)
-            continue
-        if m and m.group(1)[0] == fence:
-            fence = ""
-        out.append("\n" if line.endswith("\n") else "")
-    return "".join(out)
-
-
-def _strip_source_markup(text: str, suffix: str) -> str:
-    """A source document without TeX comments / Markdown fenced code."""
-    if suffix == ".tex":
-        return strip_tex_comment(text)
-    if suffix in (".md", ".markdown", ".txt"):
-        return _strip_markdown_fences(text)
-    return text
-
-
 def _sections_from_text(text: str, suffix: str) -> list:
     """[(level, title)] in reading order, from a .tex or markdown/text body."""
-    text = _strip_source_markup(text, suffix)
     if suffix == ".tex":
         return [(_TEX_LEVELS.get(kind, 1), title.strip())
                 for kind, title in TEX_SECTION_RE.findall(text) if title.strip()]
-    if suffix in (".md", ".markdown", ".txt"):
-        # Markdown levels are normalized to the LaTeX convention: the first.
-        # '.txt' is a declared exemplar suffix and the same heading grammar is
-        # the only structured form a plain-text transcript carries; treating it
-        # as unsupported made the pack derive from an empty structure.
+    if suffix in (".md", ".markdown"):
+        # Markdown levels are normalized to the LaTeX convention: the first
         # `#` heading is the TITLE (dropped below), `##` is a top-level section
         # (level 1), `###` a subsection (level 2), ...
         raw = [(len(hashes), title.strip())
@@ -2719,14 +2216,7 @@ def _docx_exemplar_text(path: Path):
         return None
     try:
         with zipfile.ZipFile(path) as pkg:
-            # The formatter's bounded, entity-guarded reader and shared
-            # UTF-16-aware decoder: a large compressed part must not be
-            # decompressed whole, and a UTF-16 template must still parse.
-            problem = mod._docx_zip_problem(pkg)
-            if problem:
-                return None
-            xml = mod.ooxml_part_text(
-                mod._docx_xml_part_guarded(pkg, "word/document.xml"))
+            xml = pkg.read("word/document.xml").decode("utf-8", "replace")
     # RuntimeError is what `zipfile` raises for an ENCRYPTED entry and
     # NotImplementedError for an unsupported compression method: neither is an
     # OSError/BadZipFile/KeyError, so a reader that answers "unreadable" must
@@ -2734,21 +2224,15 @@ def _docx_exemplar_text(path: Path):
     except (OSError, zipfile.BadZipFile, KeyError, RuntimeError, NotImplementedError):
         return None
     sections, lines = [], []
-    style_names = _docx_style_name_map(path)
     for _s, _e, frag in mod.paragraphs(xml):
         text = mod.text_of(frag).strip()
         if not text:
             continue
         lines.append(text)
         style = mod.elem_val(mod.ppr_of(frag), "pStyle") or ""
-        # Resolve an arbitrary style id through styles.xml (F174): a real
-        # Heading 1 may carry the id `H1` and declare the name `heading 1`.
-        style_name = style if style.startswith("Heading") \
-            else (style_names.get(style) or style)
-        m = re.match(r"(?i)^heading\s*([1-4])$",
-                     style_name.replace("-", "").replace(" ", ""))
+        m = re.match(r"(?i)^heading\s*([1-4])$", style.replace("-", "").replace(" ", ""))
         if not m:
-            m = re.match(r"(?i)^heading([1-4])$", style_name)
+            m = re.match(r"(?i)^heading([1-4])$", style)
         if m:
             sections.append((int(m.group(1)), text))
     return sections, "\n".join(lines)
@@ -2767,12 +2251,7 @@ def extract_manuscript_structure(path: Path) -> dict:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             return {"skipped": "unreadable"}
-        text = _strip_source_markup(text, suffix)
         sections = _sections_from_text(text, suffix)
-        if not sections:
-            # An exemplar that yields no sections is not a structure record: it
-            # would raise n_exemplars while contributing nothing to the norm.
-            return {"skipped": "no section headings could be parsed"}
         abstract = bool(TEX_ABSTRACT_RE.search(text) if suffix == ".tex"
                         else MD_ABSTRACT_RE.search(text))
     elif suffix in VENUE_EXEMPLAR_DOCX_SUFFIXES:
@@ -2801,12 +2280,6 @@ def structure_norm(records: list) -> dict:
     n = len(records)
     positions, spellings, counts = {}, {}, {}
     for rec in records:
-        # A section is present in an EXEMPLAR at most once, at its FIRST
-        # position: counting every repeated heading made one exemplar that repeats
-        # "Results" report present=2 with n_exemplars=1 and shifted the mean
-        # position, which could invert the advisory order (F76). This is the same
-        # per-record de-duplication official_skeleton applies (F40).
-        seen_in_record = set()
         for i, sec in enumerate(rec.get("sections") or []):
             if int(sec.get("level") or 0) != 1:
                 # The modal order is the TOP-LEVEL order; subsections belong to
@@ -2819,9 +2292,6 @@ def structure_norm(records: list) -> dict:
                 # Statement sections are reported under "Statement placement",
                 # not in the body-section order.
                 continue
-            if key in seen_in_record:
-                continue
-            seen_in_record.add(key)
             counts[key] = counts.get(key, 0) + 1
             positions.setdefault(key, []).append(i)
             spellings.setdefault(key, {})
@@ -2909,69 +2379,44 @@ def render_architecture_summary(venue_id: str, norm: dict, official: dict = None
     return "\n".join(L)
 
 
-def _skeleton_key(title) -> str:
-    """The agreement key two skeleton titles are the same requirement by."""
-    words = re.findall(r"[a-z0-9]+", str(title).lower())
-    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
-
-
 def _skeleton_titles(norm: dict, official: dict = None) -> list:
     """The skeleton order: the OFFICIAL sections as the backbone, completed by
-    the advisory norm's sections (inserted at their modal positions).
-
-    With no official section evidence the skeleton carries the advisory titles
-    and, when the venue carries none either, NO body-section order at all: the
-    venue stated none, so inventing an IMRAD order would be a rule the venue did
-    not state (F66). An operator-pinned mandatory section is always a skeleton
-    title, even when no sampled template shows it (F68).
-    """
+    the advisory norm's sections (inserted at their modal positions)."""
     off = list((official or {}).get("sections") or [])
     adv = list(norm.get("sections") or [])
-
-    key = _skeleton_key
-
-    pinned = [str(m).strip() for m in ((official or {}).get("mandatory_sections") or [])
-              if str(m).strip()]
     if not off:
-        merged = [s["title"] for s in adv]
-        seen = {key(t) for t in merged}
-        word_sets = [set(key(t).split()) for t in merged]
-    else:
-        merged = [s["title"] for s in off]
-        # The insert position must be found in the list that GROWS, never in `off`:
-        # once one advisory section was inserted, index `i` of `off` no longer names
-        # the same slot of `merged`, so a later advisory section landed BEFORE its
-        # predecessor (Ethics 0.5, Data availability 0.6 -> the 0.6 section came
-        # first). `merged_pos` carries each merged slot's mean_position in parallel.
-        merged_pos = [float(o.get("mean_position", 99)) for o in off]
-        seen = {key(t) for t in merged}
-        word_sets = [set(key(t).split()) for t in merged]
-        for a in adv:
-            title = a["title"]
-            k = key(title)
-            if k in seen:
-                continue
-            if len(k.split()) == 1 and any(k in ws for ws in word_sets):
-                # A one-word variant ("Methods", "Conclusion") is folded into the
-                # fuller heading already present.
-                continue
-            idx = len(merged)
-            for i, pos in enumerate(merged_pos):
-                if float(a.get("mean_position", 99)) <= pos:
-                    idx = i
-                    break
-            merged.insert(idx, title)
-            merged_pos.insert(idx, float(a.get("mean_position", 99)))
-            seen.add(k)
-            word_sets.append(set(k.split()))
-    # A pinned mandatory section is a REQUIREMENT: it is appended verbatim (only
-    # an exact same-key title already present suppresses it) so the emitted
-    # skeleton carries the section the pack's conformance scan will demand.
-    for title in pinned:
+        return [s["title"] for s in adv] or ["Abstract", "Introduction", "Methods", "Results",
+                                             "Discussion"]
+
+    def key(title):
+        words = re.findall(r"[a-z0-9]+", str(title).lower())
+        return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in words)
+
+    merged = [s["title"] for s in off]
+    # The insert position must be found in the list that GROWS, never in `off`:
+    # once one advisory section was inserted, index `i` of `off` no longer names
+    # the same slot of `merged`, so a later advisory section landed BEFORE its
+    # predecessor (Ethics 0.5, Data availability 0.6 -> the 0.6 section came
+    # first). `merged_pos` carries each merged slot's mean_position in parallel.
+    merged_pos = [float(o.get("mean_position", 99)) for o in off]
+    seen = {key(t) for t in merged}
+    word_sets = [set(key(t).split()) for t in merged]
+    for a in adv:
+        title = a["title"]
         k = key(title)
-        if not k or k in seen:
+        if k in seen:
             continue
-        merged.append(title)
+        if len(k.split()) == 1 and any(k in ws for ws in word_sets):
+            # A one-word variant ("Methods", "Conclusion") is folded into the
+            # fuller heading already present.
+            continue
+        idx = len(merged)
+        for i, pos in enumerate(merged_pos):
+            if float(a.get("mean_position", 99)) <= pos:
+                idx = i
+                break
+        merged.insert(idx, title)
+        merged_pos.insert(idx, float(a.get("mean_position", 99)))
         seen.add(k)
         word_sets.append(set(k.split()))
     return merged
@@ -2994,29 +2439,15 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
     titles = _skeleton_titles(norm, off)
     mandatory = {m.lower() for m in (off.get("mandatory_sections") or [])}
     L = [f"<!-- Word template skeleton for venue '{venue_id}'. Structure only; replace every "
-         f"placeholder. Word styles: use the Title style for the manuscript title, Heading 1 "
-         f"for top-level sections and Heading 2 for subsections, so the generated .docx "
-         f"carries a navigable outline and the pack readers (which treat Heading 1 as a "
-         f"top-level section) see the same hierarchy."
+         f"placeholder. Word styles: use Heading 1 for the title, Heading 2 for top-level "
+         f"sections and Heading 3 for subsections, so the generated .docx carries a navigable "
+         f"outline."
          + (" The sections marked [MANDATORY] come from the journal's OWN template: they must "
             "exist. Use the styles the journal's .dotx/.docx template provides."
-            if off.get("sections") or off.get("mandatory_sections") else "")
+            if off.get("sections") else "")
          + " -->", "",
          "# <Manuscript title>", ""]
-    if not titles:
-        # F66: no official and no advisory section evidence. The venue stated no
-        # section order, so the skeleton asserts none instead of inventing an
-        # IMRAD architecture the venue never required.
-        L += ["<!-- No section evidence: neither the venue's official template nor its "
-              "exemplar manuscripts carries a usable section heading, so this skeleton "
-              "asserts NO body-section order. Follow the venue's author guidelines for "
-              "the section set; never invent one. -->", ""]
-    # A statement label that is already a skeleton title is the SAME
-    # requirement: emitting it again duplicated a pinned statement section in
-    # the generated skeleton (wave-2 F177).
-    title_keys = {_skeleton_key(t) for t in titles}
-    statement_labels = [l for l in _skeleton_statements(norm, off)
-                        if _skeleton_key(l) not in title_keys]
+    statement_labels = _skeleton_statements(norm, off)
     for title in titles:
         mark = " [MANDATORY]" if title.strip().lower() in mandatory else ""
         if title.strip().lower() in ("abstract",):
@@ -3026,36 +2457,16 @@ def render_word_template(venue_id: str, norm: dict, official: dict = None) -> st
     for label in statement_labels:
         L += [f"## {label}", "", f"<{label} statement.>", ""]
     L += ["<!-- End of template. The section list follows the journal's OWN template when one "
-          "is present, otherwise the venue's recent-practice order; when neither tier carries "
-          "section evidence this skeleton asserts no body-section order. Adjust only where the "
-          "manuscript's content or the venue's guidelines require it. -->"]
+          "is present (otherwise the venue's modal order); adjust only where the manuscript's "
+          "content or the venue's guidelines require it. -->"]
     return "\n".join(L)
-
-
-_TEX_TITLE_ESCAPES = {
-    "\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$",
-    "#": r"\#", "_": r"\_", "{": r"\{", "}": r"\}",
-    "~": r"\textasciitilde{}", "^": r"\textasciicircum{}",
-}
-
-
-def _tex_title_escape(text) -> str:
-    r"""Escape a section TITLE for `\section{...}`.
-
-    A venue heading such as "Results & Discussion" made pdflatex reject the
-    generated skeleton (a misplaced alignment tab), and a '%' commented out the
-    closing brace. The skeleton is generated code, so it must quote its data.
-    """
-    return "".join(_TEX_TITLE_ESCAPES.get(ch, ch) for ch in str(text or ""))
 
 
 def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> str:
     """A LaTeX skeleton: the journal's class/section order when one is known."""
     off = official or {}
     titles = _skeleton_titles(norm, off)
-    title_keys = {_skeleton_key(t) for t in titles}
-    statement_labels = [l for l in _skeleton_statements(norm, off)
-                        if _skeleton_key(l) not in title_keys]
+    statement_labels = _skeleton_statements(norm, off)
     docclass = str(off.get("documentclass") or "").strip()
     L = ["% LaTeX template skeleton for venue '" + venue_id + "'.",
          "% Structure only: replace the placeholders with the manuscript's own content."]
@@ -3077,22 +2488,15 @@ def render_latex_template(venue_id: str, norm: dict, official: dict = None) -> s
           "\\begin{document}",
           "\\maketitle",
           ""]
-    if not titles:
-        # F66: no section evidence -> assert none, never invent an IMRAD order.
-        L += ["% No section evidence: neither the venue's official template nor its exemplar "
-              "manuscripts carries a usable section heading, so no body-section order is "
-              "asserted here. Follow the venue's author guidelines for the section set.", ""]
     for title in titles:
         low = title.strip().lower()
         if low == "abstract":
             L += ["\\begin{abstract}", "<Abstract: one paragraph, no citations.>", "\\end{abstract}",
                   ""]
             continue
-        safe_title = _tex_title_escape(title)
-        L += [f"\\section{{{safe_title}}}", f"% <{safe_title} text.>", ""]
+        L += [f"\\section{{{title}}}", f"% <{title} text.>", ""]
     for label in statement_labels:
-        safe_label = _tex_title_escape(label)
-        L += [f"\\section*{{{safe_label}}}", f"% <{safe_label} statement.>", ""]
+        L += [f"\\section*{{{label}}}", f"% <{label} statement.>", ""]
     L += ["\\end{document}"]
     return "\n".join(L)
 
@@ -3111,12 +2515,6 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
     vid = str(venue_id or "").strip().lower()
     if not vid:
         die("build-venue-templates needs a venue id")
-    if not VENUE_ID_RE.match(vid):
-        # The id is joined into the pack path below; a path separator would write
-        # outside the profile store (F78). Refuse it exactly as the profile
-        # loader refuses it.
-        die(f"build-venue-templates: invalid venue id {venue_id!r}: letters, digits, "
-            f"'.', '_', '+', '-' only")
     src_dirs = []
     if exemplar_dir:
         src_dirs = [Path(exemplar_dir)]
@@ -3168,27 +2566,15 @@ def build_venue_templates(venue_id, root=None, profiles_dir=None, exemplar_dir=N
         if rec.get("skipped"):
             off_skipped.append({"file": p.name, "why": rec["skipped"]})
         else:
-            # The sample's ROLE travels with its structure: a supplementary
-            # template's headings must not veto the main samples' mandatory
-            # sections (F67). The same name rule the rest of the pipeline uses
-            # classifies it; cover templates were already skipped above.
-            rec["role"] = docx_document_role(p.name, _tmpl_names)
             off_records.append(rec)
     explicit = None
     for d in off_dirs:
         p = d / VENUE_OFFICIAL_REQUIREMENTS
         if p.is_file():
             try:
-                explicit = _validated_explicit_requirements(
-                    json.loads(p.read_text(encoding="utf-8")), str(p))
-            except (OSError, ValueError) as e:
-                # requirements.json is AUTHORITATIVE about the sections this
-                # venue ALWAYS requires. Treating an unreadable pin as "no pin"
-                # silently dropped those sections from the pack (F197): fail the
-                # build instead, naming the file.
-                die(f"{p}: the operator's pinned official requirements cannot be read "
-                    f"({e}); fix or remove that file (an unreadable pin must not "
-                    f"silently drop the mandatory sections it records)")
+                explicit = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                explicit = None
             break
     if not records and not off_records:
         looked = [str(d) for d in src_dirs + off_dirs]
@@ -3302,8 +2688,8 @@ and statement placement; no prose was copied). Two tiers, with different authori
     The template's first-page header (logo) and its page-number footer are part of the
     deliverable, not decoration.
   * THE FIRST-PAGE BLOCK IS THE TEMPLATE'S OWN, IN ITS ORDER AND SPACING: one title line, ONE
-    author-list line, the affiliation lines in the spacing the template itself uses, then ONE
-    correspondence block -- the label "* Correspondence:" in the weight the template uses, followed by a line break, the
+    author-list line, the affiliation lines the template spaces with before=240/after=0, then ONE
+    correspondence block -- the BOLD label "* Correspondence:" followed by a line break, the
     corresponding author's name (when the source marks a lead contact or a
     corresponding author), another line break and the email -- then ONE "Keywords: ..." line and
     the unnumbered "Abstract" heading with its paragraph. Fold a separate "Lead contact" /
@@ -3324,8 +2710,7 @@ and statement placement; no prose was copied). Two tiers, with different authori
     "Resource availability", "Materials availability", "Method details", or a bare "Key
     resources" heading) are not part of this venue's structure: fold their content into the
     template's own sections (Methods subsections, Statements, or the tables/figures area) and
-    place each table caption on the side the venue profile's `tables.caption` policy states
-    (before, after or any); when the profile declares no rule, the template decides.
+    place each table caption immediately before its table.
 @@TRANSFER@@
 
 @@NORM@@
@@ -3353,15 +2738,6 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False,
         return ""
     try:
         summary = (pack / VENUE_NORM_FILE).read_text(encoding="utf-8").strip()
-    except UnicodeDecodeError as e:
-        # The pack EXISTS, so an undecodable summary is a BROKEN pack (not a
-        # venue without one): the same contract official_template_requirements()
-        # enforces for structure.json.  Letting the UnicodeDecodeError escape
-        # killed every prompt-rendering command with a traceback instead.
-        raise VenueProfileError(
-            f"{pack / VENUE_NORM_FILE}: the venue template pack's {VENUE_NORM_FILE} is not "
-            f"valid UTF-8 ({e}); regenerate the pack with `build-venue-templates` or "
-            f"remove it") from e
     except OSError:
         return ""
     digest = sha256_file(pack / VENUE_NORM_FILE)
@@ -3500,35 +2876,18 @@ def venue_id_of(ctx=None) -> str:
 # in the MIDDLE of one command is therefore not picked up by an already-cached
 # lookup -- re-run the command, as with every other recorded-rule change.
 _DISPLAY_RULE_INHERIT_CACHE: dict = {}
-# The VenueProfileError (as a message) that stopped an inheritance lookup, kept
-# beside the cached result so a caller can REPORT it instead of silently running
-# with fewer rules than the recorded profile states (F195).
-_DISPLAY_RULE_INHERIT_ERRORS: dict = {}
 
 
-def _inherited_display_rules(venue_id: str, root, missing: tuple,
-                             problems: list = None) -> dict:
-    """The shipped profile's display rules a pre-schema snapshot may inherit.
-
-    `problems`, when given, receives the reason a lookup failed: the snapshot
-    then keeps running rule-free, but the caller can name the cause (F195).
-    """
+def _inherited_display_rules(venue_id: str, root, missing: tuple) -> dict:
+    """The shipped profile's display rules a pre-schema snapshot may inherit."""
     key = (str(root), venue_id, missing)
     if key in _DISPLAY_RULE_INHERIT_CACHE:
-        err = _DISPLAY_RULE_INHERIT_ERRORS.get(key)
-        if err and problems is not None:
-            problems.append(err)
         return _DISPLAY_RULE_INHERIT_CACHE[key]
     inherited: dict = {}
-    inherit_error = None
     try:
         fresh = load_venue_profile(venue_id, root=root)
-    except VenueProfileError as e:
+    except VenueProfileError:
         fresh = None          # no readable file: the snapshot keeps running rule-free
-        inherit_error = (
-            f"the venue profile file for {venue_id!r} could not be read, so the recorded "
-            f"snapshot's display/measured rules were NOT inherited: {e}; fix that file or "
-            f"re-record the snapshot with `set-venue {venue_id}`")
     if fresh is not None:
         if "tables" in missing and fresh.declares_table_rule:
             inherited["tables"] = copy.deepcopy(fresh.tables)
@@ -3553,11 +2912,6 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple,
             inherited["figure_text"] = copy.deepcopy(fresh.data["figure_text"])
         if "image_dpi" in missing and (fresh.data.get("image_dpi") or {}):
             inherited["image_dpi"] = copy.deepcopy(fresh.data["image_dpi"])
-        # The venue's own sentence/paragraph length bars: a snapshot recorded
-        # before the field existed must inherit them, or a declared FMT-T9c/
-        # FMT-T9i limit becomes an advisory gap forever (F191).
-        if "style_limits" in missing and (fresh.data.get("style_limits") or {}):
-            inherited["style_limits"] = copy.deepcopy(fresh.data["style_limits"])
         # The page budget is the same kind of venue rule: a snapshot recorded
         # before F14 carries no key, so without this a budget later added to the
         # profile file would be ignored until `set-venue` re-recorded the root.
@@ -3586,15 +2940,11 @@ def _inherited_display_rules(venue_id: str, root, missing: tuple,
                          if isinstance(t, dict) and t.get("counting")}
         if type_counting:
             inherited["_type_counting"] = type_counting
-    if inherit_error is not None:
-        _DISPLAY_RULE_INHERIT_ERRORS[key] = inherit_error
-        if problems is not None:
-            problems.append(inherit_error)
     _DISPLAY_RULE_INHERIT_CACHE[key] = inherited
     return inherited
 
 
-def _snapshot_profile(cfg: dict, venue_id: str, root=None, problems: list = None):
+def _snapshot_profile(cfg: dict, venue_id: str, root=None):
     """The profile snapshot recorded in the config, when it matches the id.
 
     A snapshot recorded BEFORE the `tables`/`figures` schema existed carries no
@@ -3607,27 +2957,17 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None, problems: list = None
     The M19 counting convention inherits the same way, INCLUDING each article
     type's own block when that type counts differently from the venue default.
     """
-    if "venue_profile" not in cfg:
-        # Only an ABSENT key means "no snapshot" (a root created before the
-        # key existed). A present value of any other type is a broken recorded
-        # rule set, never a reason to adopt the mutable profile file (F176).
-        return None
     snapshot = cfg.get("venue_profile")
     if not isinstance(snapshot, dict):
-        if problems is not None:
-            problems.append(
-                f"the recorded venue profile snapshot in pipeline_config.json is not a "
-                f"JSON object (got {type(snapshot).__name__}); re-record it with "
-                f"`set-venue {venue_id}`")
         return None
     missing = tuple(k for k in ("tables", "figures", "references", "numbering",
                                 "leftover_phrases", "counting", "figure_text",
-                                "image_dpi", "style_limits",
-                                "foreign_container_headings", "page_budget")
+                                "image_dpi", "foreign_container_headings",
+                                "page_budget")
                     if k not in snapshot)
     # The lookup runs even when no venue-level key is missing: a per-type
     # counting block is inherited independently of the venue-level one.
-    inherited = _inherited_display_rules(venue_id, root, missing, problems=problems)
+    inherited = _inherited_display_rules(venue_id, root, missing)
     if inherited:
         inherited = dict(inherited)
         type_counting = inherited.pop("_type_counting", None)
@@ -3642,14 +2982,7 @@ def _snapshot_profile(cfg: dict, venue_id: str, root=None, problems: list = None
                 for entry in snapshot["article_types"]]
     try:
         prof = VenueProfile(snapshot, origin="recorded snapshot")
-    except VenueProfileError as e:
-        # A snapshot that is PRESENT but cannot be normalized is a broken
-        # recorded rule set, not "no snapshot": the caller must not silently
-        # adopt whatever the profile file now says (F190).
-        if problems is not None:
-            problems.append(
-                f"the recorded venue profile snapshot in pipeline_config.json cannot be "
-                f"used: {e}; re-record it with `set-venue {venue_id}`")
+    except VenueProfileError:
         return None
     return prof if prof.id == venue_id else None
 
@@ -3665,19 +2998,9 @@ def venue_profile_base(ctx=None):
     cfg = _ctx_cfg(ctx)
     venue_id = venue_id_of(ctx)
     root = getattr(ctx, "root", None)
-    snapshot_problems: list = []
-    prof = _snapshot_profile(cfg, venue_id, root=root, problems=snapshot_problems)
+    prof = _snapshot_profile(cfg, venue_id, root=root)
     if prof is not None:
-        if snapshot_problems:
-            # The snapshot itself is usable; inheritance could not read the
-            # profile file, so name that instead of running rule-free silently.
-            prof.snapshot_problems = list(snapshot_problems)
         return prof, None
-    if snapshot_problems:
-        # A recorded snapshot that cannot be normalized must not be replaced
-        # by the current profile file: that would silently change the root's
-        # rule set (F190). Report it, and let `venue_profile_of` refuse.
-        return None, VenueProfileError("; ".join(snapshot_problems))
     try:
         return load_venue_profile(venue_id, root=root), None
     except VenueProfileError as e:
@@ -3874,7 +3197,6 @@ def venue_config_findings(ctx) -> tuple:
             problems.append(unknown_venue_message(recorded or DEFAULT_VENUE,
                                                   getattr(ctx, "root", None)))
         return notes, problems
-    problems.extend(getattr(prof, "snapshot_problems", []) or [])
     # Apply the recorded article type only when it is VALID. An unknown type is
     # not a broken venue: the article-type block below names the
     # `set-article-type` remedy, while a profile that does not need that type
@@ -3917,40 +3239,11 @@ def venue_config_findings(ctx) -> tuple:
                         f"{prof.id!r} describes ({known}). Set the venue that matches the journal "
                         f"(`set-venue <id>`) or the journal the venue describes "
                         f"(`set-journal <name>`).")
-    _state = getattr(ctx, "state", None)
-    if not isinstance(_state, dict):
-        _state = {}
-    state_cfg = _state.get("config")
-    if state_cfg is None:
-        state_cfg = {}
-    elif not isinstance(state_cfg, dict):
-        # A JSON-VALID non-object `config` passed every shape check in the
-        # loader and got here, where `state_cfg.get` died with a bare
-        # AttributeError on every command that opens the root (F126). Refuse
-        # with the same actionable damaged-registry message the loader uses for
-        # its other containers.
-        die(f"state.json is damaged: 'config' must be an object (got "
-            f"{type(state_cfg).__name__}).\n"
-            f"       {getattr(ctx, 'state_path', 'state.json')}\n"
-            f"       Restore state.json from a backup.")
+    state_cfg = ((getattr(ctx, "state", None) or {}).get("config") or {})
     mirrored = str(state_cfg.get("venue") or "").strip().lower()
     if mirrored and mirrored != recorded:
         notes.append(f"state.json records venue {mirrored!r} but pipeline_config.json selects "
                      f"{recorded!r}: the config file wins (`set-venue` re-mirrors it).")
-    # The mirror carries every key `setup`/`set-*` writes, and README:431 says a
-    # config/state disagreement is reported. Only the venue was compared, so a
-    # stale journal or article type was silently ignored (F175). One note per
-    # disagreeing key; the config file wins in every case.
-    for _key, _what, _fix in (("journal", "journal", "set-journal"),
-                              ("article_type", "article type", "set-article-type")):
-        _mirrored = str(state_cfg.get(_key) or "").strip()
-        if not _mirrored:
-            continue
-        _configured = str(cfg.get(_key) or "").strip()
-        if _mirrored.casefold() != _configured.casefold():
-            notes.append(f"state.json records {_what} {_mirrored!r} but "
-                         f"pipeline_config.json selects {_configured!r}: the config file "
-                         f"wins (`{_fix}` re-mirrors it).")
     return notes, problems
 
 AGENT_PRESETS = {
@@ -4258,13 +3551,8 @@ def raw_data_dirname(dirp: Path) -> str:
 
 
 def area_dir(sb: Path, area: str) -> Path:
-    """The directory a recorded input-area key names inside a sandbox.
-
-    The key comes from a state record, not from the operator's argv: resolve it
-    with `contained_under` so a tampered `../outside` cannot make a read-only
-    integrity probe hash (and report on) a tree outside the root.
-    """
-    return contained_under(sb, area)
+    """The directory a recorded input-area key names inside a sandbox."""
+    return sb / area
 
 
 def norm_raw_data_name(rel: str) -> str:
@@ -4278,26 +3566,6 @@ def without_raw_data(m: dict) -> dict:
     Used to compare a published winner with its pin: the raw-data area is an
     INPUT (byte-verified against the pristine copy), not content the stage wrote,
     so a normalised copy of it must not read as "the champion changed".
-
-    ONLY raw data leaves this manifest. The feedback areas are also evidence
-    inputs, but they are not this function's exclusion: dropping them too made
-    an edit to a winner's `human_review_feedback/` or `llm_review_feedback/`
-    invisible to `pinned_integrity` (F103). The inert `<raw-data>.disabled`
-    spellings stay out with it.
     """
-    def _raw_data_only(rel) -> bool:
-        norm = str(rel or "").replace("\\", "/")
-        if is_raw_data_rel(norm):
-            return True
-        return (is_disabled_evidence_rel(norm)
-                and norm.split("/", 1)[0].startswith(RAW_DATA_DIR))
-
-    files = {k: v for k, v in (m or {}).get("files", {}).items()
-             if not _raw_data_only(k)}
-    # Preserve the manifest's COVERAGE keys (`unreadable_dirs`, ...): dropping
-    # them made a partially walked winner compare equal to its complete pin,
-    # and an unreadable subtree disappeared from the integrity comparison (F68).
-    out = {k: v for k, v in (m or {}).items() if k not in ("files", "count")}
-    out["files"] = files
-    out["count"] = len(files)
-    return out
+    files = {k: v for k, v in (m or {}).get("files", {}).items() if not is_evidence_rel(k)}
+    return {"files": files, "count": len(files)}

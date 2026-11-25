@@ -35,6 +35,7 @@ import tempfile
 import time
 import zipfile
 from pathlib import Path
+from write_quality_fixture_lib import audit_fixture
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_anon", str(WS / "paper_pipeline.py"))
@@ -135,6 +136,7 @@ def build_round_root(tmp: Path, rewrites=1, revises=1, judges=1, by_products=Fal
     shutil.copytree(pristine, root / "runs" / a1 / "base")
     rec = ctx.register(a1, "a1", 1, f"runs/{a1}", source_id=nb.ORIGINAL_ID)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, "a1")
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, "a1")
     return ctx, src
@@ -147,6 +149,7 @@ def register_fresh(ctx, vid, text, mode: int = None, mtime: float = None):
     write(out / "manuscript-p.md", text, mode=mode, mtime=mtime)
     rec = ctx.register(rid, kind, 1, f"runs/{rid}", produces=vid, source_id="a1")
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, vid)
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, vid)
     return rec

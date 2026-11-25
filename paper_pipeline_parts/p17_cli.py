@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/25 of the pipeline -- executed by the
+# Part 17/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -18,10 +18,7 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]   (default: both enabled)
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
-          [--enable-soft-deletions] [--disable-soft-deletions]
-          [--tolerate-fail] [--no-tolerate-fail]
-          (default: prefer-rewrite off, strict failures) copy the pristine corpus read-only,
-          record its SHA-256 manifest, and
+          (default: off) copy the pristine corpus read-only, record its SHA-256 manifest, and
           create pipeline_config.json + state.json (no sandboxes are built yet).
           --venue selects the VENUE PROFILE whose submission rules every stage
           enforces (default: nature-biotechnology, this pipeline's pre-venue
@@ -80,9 +77,9 @@ USAGE_EXAMPLES = """usage:
           Legend length never makes a version ineligible, reorders a ranking or
           fails a decision.
           --zotero is the reference-tooling policy for every agent session
-          (off|read|edit|apply; default edit). The prompts try the `zot` CLI
-          (pyzotero-cli) first, then the Zotero MCP service, and use the
-          Zotero skill only as the fallback when both are unavailable. off
+          (off|read|edit|apply; default edit). The prompts try the Zotero MCP
+          service first, then the Zotero skill, and use the `zot` CLI
+          (pyzotero-cli) only as the fallback when both are unavailable. off
           disables all three; read resolves and verifies references only; edit
           also lets the revision and integration stages add, remove or relink
           citations in their revised copy (the Zotero library stays read-only);
@@ -113,20 +110,17 @@ USAGE_EXAMPLES = """usage:
           [--enable-insertions] [--disable-insertions]
           [--enable-deletions] [--disable-deletions]
           [--prefer-rewrite-over-deletion] [--no-prefer-rewrite-over-deletion]
-          [--enable-soft-deletions] [--disable-soft-deletions]
-          [--tolerate-fail] [--no-tolerate-fail]
           (default: the root's recorded policy; both enabled unless `setup` disabled one;
-           prefer-rewrite off; tolerate-fail off unless `setup` recorded it on or
-           this invocation's flag sets it)
+           prefer-rewrite off unless `setup` recorded it on or this invocation's flag sets it)
           [--retry-backoff 30] [--retry-backoff-max 600]
           [--agent-harness dsh|gpt-codex|claude-code] [--agent-model NAME_OR_URL]
           [--agent-model-api-key KEY] [--agent-model-name MODEL]
-          [--agent-model-prep-json JSON] [--reasoning-effort LEVEL]
+          [--agent-model-prep-json JSON]
           [--judge-agent-harness dsh|gpt-codex|claude-code] [--judge-agent-model NAME_OR_URL]
           [--judge-agent-model-api-key KEY] [--judge-agent-model-name MODEL]
           [--judge-agent-model-prep-json JSON]
-          [--manual] [--agent-cmd '<json argv>'] [--judge-manual]
-          [--judge-agent-cmd '<json argv>']
+          [--agent codex|claude|dsh|qwen|dots|manual] [--agent-cmd '<json argv>']
+          [--judge-agent codex|claude|dsh|qwen|dots|manual] [--judge-agent-cmd '<json argv>']
           [--poll S] [--skip-hash]
           drive rounds 1..R as a DEPENDENCY GRAPH: every session starts as soon
           as its inputs exist (the M rewrites and the round's review start
@@ -142,17 +136,10 @@ USAGE_EXAMPLES = """usage:
           attempt, capped by --retry-backoff-max; 0 = retry immediately). If the
           judge panel is still incomplete after the retries, the round is left
           pending (reports/round<r>_panel_gaps.json) instead of being decided on
-          the reduced panel. --tolerate-fail keeps a failed stage from
-          terminating the invocation: when all its retries are exhausted, the
-          trial with the most required output files (ties: fewest FAIL
-          messages) is used as that stage's result, printed as TOLERATED_FAIL,
-          and the pipeline continues on it. The result is PROVISIONAL / NOT
-          CERTIFIED (a panel round is never certified with a tolerated stage;
-          an auto-promoted round promotes the trial it used), and `run` exits
-          0. It is OFF by default and `run` can override the root's record.
-          --judge-manual/--judge-agent-cmd select the judge backend without
-          changing the production pair (it is the largest wave), e.g. to run
-          judges on a cheaper CLI than the production stages.
+          the reduced panel.
+          --judge-agent/--judge-agent-cmd override the backend for the judge
+          panel only (it is the largest wave), e.g. to run judges on a cheaper
+          CLI than the production stages.
           --only SELECTION runs a subset in this invocation; items are a UNION:
           a round ordinal or range (--only 1,2 = only rounds 1 and 2, every
           stage; --only 1-3), a stage name (--only audit = that stage in every
@@ -174,9 +161,7 @@ USAGE_EXAMPLES = """usage:
           started in that invocation, and a round whose other stages are still
           pending stays incomplete for a later `run`.
   run-decide --root <dir> [same options as `run`] [same options as `decide`]
-          run the pending rounds and then decide, in series (a non-`all` --only
-          selection runs only the selection and does NOT start the decide
-          phase; `--only all` is a plain run): the `run` phase
+          run the pending rounds and then decide, in series: the `run` phase
           holds the root lock and finishes first, then `decide` recomputes the
           decision and publishes <root>/final_clean_version_<root name>/ -- the
           champion corpus byte-for-byte (no scratch, no auxiliaries, no
@@ -254,14 +239,11 @@ USAGE_EXAMPLES = """usage:
           the suggested-length caption report for the final winner: caption
           length is advisory in this pipeline, so the flag deliberately no
           longer exits non-zero.
-          exit codes: 2 nothing to decide | 4 a provisional answer under
-          --require-complete (incomplete rounds, a tolerated stage failure and
-          an auto-promoted unjudged winner are all provisional) |
+          exit codes: 2 nothing to decide | 4 incomplete (--require-complete) |
           5 broken evidence / recomputed champion differs from the stored one /
           an incomplete judge panel (never certified).
-  retry   --root <dir> --run <ID>
+  retry   --root <dir> --run <ID> [--all-failed]
   retry   --root <dir> --runs <SELECTION>              (same grammar as --only)
-  retry   --root <dir> --all-failed
           reset one run (the failed attempt's artifacts are archived under
           runs/<run>_try<N>_failed/ keeps its whole sandbox -- deliverables,
           transcript and record.json -- and the attempt's record stays in
@@ -333,7 +315,7 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   python paper_pipeline.py setup --source ./non_revised --root ./paper_rounds \\
       --rounds 3 --judges 2
 
-  # 1. run ALL THREE rounds end to end. Each round is the same dependency graph; the
+  # 1. run BOTH rounds end to end. Each round is the same dependency graph; the
   #    arrows below are DEPENDENCIES, not a schedule, so independent runs
   #    overlap (up to --jobs sessions at once):
   #    M rewrites (round 1: w1, w2) and ONE review start TOGETHER ->
@@ -346,7 +328,7 @@ review-audit-revise-and-judge round 3 (full review, no rewrite, no integration)
   #    round<R>_winner/.
   python paper_pipeline.py run --root ./paper_rounds --jobs 255
   #    Useful variants of that one command:
-  #      --manual                        paste each PROMPT.md yourself (staged;
+  #      --agent manual                  paste each PROMPT.md yourself (staged;
   #                                      --no-wait prints every ready prompt)
   #      --judge-agent-cmd '<json argv>' run the panel on a cheaper CLI
   #      --retries 2 --retry-backoff 30  two retries per failure, exponential
@@ -433,16 +415,35 @@ model/harness selection:
   --judge-agent-model-prep-json and --judge-agent-cmd; the judge-side key uses
   the matching PAPER_JUDGE_AGENT_MODEL_* variables.
 
-manual and custom backends:
-  --manual: the orchestrator builds every sandbox + PROMPT.md and polls for
-  each completion signal; you paste each prompt into your agent yourself, with
-  cwd = that sandbox. --judge-manual stages the judge prompts the same way.
-  Manual mode respects the same dependencies, and --no-wait prints EVERY prompt
-  whose dependencies are already satisfied (a revise prompt is never printed
-  before the round's review marker exists, and an integration prompt never
-  before the whole pool is done).
+legacy agent backends (kept exactly as before; do not combine with the new
+--agent-harness/--agent-model pair):
+  --agent codex `codex exec -`, plus a `-c` override per MCP server
+  the prompts drive (an MCP call that wants approval is DENIED, not queued, in
+  a non-interactive session: approval policy is `never`)   |   --agent claude
+  `claude --permission-mode bypassPermissions --print`   |   --agent dsh
+  the DeepSeek Harness CLI: `dsh --profile headless --json -` (prompt on
+  stdin, one fresh persisted session per attempt; the harness's own home
+  $DSH_HOME owns the model, the DEEPSEEK_API_KEY credential and its MCP
+  servers, and a continuation adopts the session its `--json` stream named with
+  `--session-id`). A gap that would fail every session -- the binary not
+  installed, a build whose headless app declares neither `--json` nor the stdin
+  task form, a `node` the harness cannot run under (older than 22, or one it
+  was not installed for) -- is named with its fix before the wave starts
+  instead of once per session.
+  --agent manual: the orchestrator builds every sandbox + PROMPT.md and polls
+  for each completion signal; you paste each prompt into your agent yourself,
+  with cwd = that sandbox. Manual mode respects the same dependencies, and
+  --no-wait prints EVERY prompt whose dependencies are already satisfied (a
+  revise prompt is never printed before the round's review marker exists, and
+  an integration prompt never before the whole pool is done).
+  --agent dots: dots3-note-prev through the Dots API (default endpoint
+  https://note3-prev-api.askdiandian.com/v1, key DOTS_API_KEY). The adapter
+  PAPER_DOTS_HARNESS=codex (default; the platform's documented Responses
+  route), dsh (a generated llm-pi-ai route), or claude (the platform's
+  Anthropic Messages endpoint); `chat` is text-only.
+  See paper_dots_agent.py --probe and PAPER_DOTS_* in its docstring.
   any other CLI: --agent-cmd '["your","cli","--flag"]' or PAPER_AGENT_CMD (JSON
-  argv list in the environment); --judge-agent-cmd overrides the judge command.
+  argv list in the environment).
 
 completion signals (never a bare non-empty output directory):
   rewrite / review / revise / integrate -> _pipeline_done.json, matching stage
@@ -506,22 +507,6 @@ def add_content_edit_policy_opts(parser: argparse.ArgumentParser,
                         action=ContentEditPolicyAction, const=False, default=None,
                         help="use the historical deletion-only manual-required fallback "
                              "(the default)")
-    # THE MIDDLE POLICY: between --disable-deletions (nothing may go) and the
-    # permissive default (any unit may go). Both kinds stay enabled, so a
-    # duplicate, a leaked prompt or a placeholder can still be removed; a unit
-    # that carries a claim, value, definition or citation may not.
-    parser.add_argument("--enable-soft-deletions",
-                        dest="soft_deletions",
-                        action=ContentEditPolicyAction, const=True, default=None,
-                        help="allow deletions only of the documented removable units "
-                             "(a duplicate whose other copy survives, a leaked "
-                             "prompt/instruction, a placeholder, an internal artifact); a "
-                             "claim-bearing unit must be corrected in place or recorded "
-                             "manual-required (benchmark-only middle policy)")
-    parser.add_argument("--disable-soft-deletions",
-                        dest="soft_deletions",
-                        action=ContentEditPolicyAction, const=False, default=None,
-                        help="allow any content unit to be deleted, as before (the default)")
 
 
 CHAMPION_SELECT_HELP = (
@@ -614,8 +599,8 @@ def build_parser() -> argparse.ArgumentParser:
                     help="the venue's article type this submission is (e.g. article, "
                          "brief-communication, review, resource, analysis, matters-arising, "
                          "letter-to-the-editor -- the ids the selected venue profile carries; "
-                         "`setup` prints the selected id and the profile's type count, and "
-                         "`set-article-type --list` shows every id with its caps). Each type "
+                         "`setup` prints them and, on an existing root, "
+                         "`set-article-type --list` shows them with their caps). Each type "
                          "carries its own M19 limits: a type the profile has no numbers for is "
                          "counted and reported against the venue's own table, never against "
                          "another type's caps. Default: the venue profile's default type")
@@ -676,8 +661,7 @@ def build_parser() -> argparse.ArgumentParser:
                          f"'full' runs the whole frozen sweep set, 'formatting-writing' runs only "
                          f"the surface checks (M1/M3/M6-M12/M17-M20/M24/M26) and the prose/"
                          f"architecture passes J3/J5 and records every other check as out of "
-                         f"scope. A per-round list of the same enum strings, same list rules as "
-                         f"--rewrites (default: "
+                         f"scope. An integer/list pair, same rules as --rewrites (default: "
                          f"{','.join(DEFAULTS['review_scope'])}). Use it (e.g. "
                          f"--review-scope full,full,formatting-writing) to make a later round a "
                          f"polish pass instead of another full review")
@@ -698,8 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "init (start a NEW submission: the venue's own Word template is filled "
                          "by the conform stage BEFORE round 1 -- or, when no template ships, "
                          "the journal's author guidelines and then academic convention -- "
-                         "the `run` option `--no-template-stage` opts out; then the "
-                         "pipeline's own rounds run "
+                         "`--no-template-stage` opts out; then the pipeline's own rounds run "
                          "with no journal feedback and no response letter), transfer (option 1: "
                          "revise for a NEW journal; no response to reviewers; rewrites "
                          "allowed), resubmit (option 2: new submission to the SAME journal; "
@@ -823,11 +806,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "byte-identical to --source and reports formatting only")
     ps.add_argument("--zotero", choices=list(ZOTERO_MODES), default=DEFAULT_ZOTERO_MODE,
                     help="Zotero reference-tooling policy for every agent session. The stage "
-                         "prompts try the `zot` CLI (pyzotero-cli) first, then the Zotero MCP "
-                         "service, and use the Zotero skill only as the fallback when both are "
+                         "prompts try the Zotero MCP service first, then the Zotero skill, and "
+                         "use the `zot` CLI (pyzotero-cli) only as the fallback when both are "
                          "unavailable. "
-                         "off = the run policy forbids all Zotero tooling (`zot` CLI, "
-                         "MCP service or skill) and every stage prompt says so; the pipeline "
+                         "off = the run policy forbids all Zotero tooling (MCP service, "
+                         "skill or `zot` CLI) and every stage prompt says so; the pipeline "
                          "does not uninstall the harness's MCP registration or skill, so "
                          "install with --no-zotero-mcp --no-external to remove them. Live "
                          "fields stay on the skills' manual route. "
@@ -859,33 +842,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "the revisers wait for it")
     ps.add_argument("--no-audit", dest="audit", action="store_const", const="off",
                     help="turn the auditor off (same as --audit off)")
-    ps.add_argument("--revision-audit", choices=("on", "off"), default="on",
-                    help="audit the revised package after revise and write a bounded-repair "
-                         "plan. ON (default): the revision audit runs; when its plan is "
-                         "non-empty, ONE bounded repair pass applies it and produces the final "
-                         "revised version. OFF: both are skipped and the revised version is "
-                         "final. `PAPER_REVISION_AUDIT=off` does the same on an existing root, "
-                         "and `--no-audit` skips the GUIDED-REVIEW audit (the reviser then works from "
-                         "the frozen findings unaudited)")
-    ps.add_argument("--concern-audit", choices=("on", "off"), default="on",
-                    help="audit the GENERATED concern ledger (and its JF finding list) with an "
-                         "independent session, then apply its dispositions in ONE repair pass. "
-                         "ON by default for major/minor revisions. The audit disposes every "
-                         "concern (confirmed / defective / dropped) against the HUMAN feedback; "
-                         "the repair corrects/removes only confirmed rows and regenerates the "
-                         "finding list. OFF records the skip and the scoped revision consumes "
-                         "the generated ledger unaudited.")
-    ps.add_argument("--no-concern-audit", dest="concern_audit", action="store_const",
-                    const="off", help="same as --concern-audit off")
-    ps.add_argument("--response-audit", choices=("on", "off"), default="on",
-                    help="audit the RESPONSE-TO-REVIEWERS letter + response_map.json with an "
-                         "independent session, then repair only confirmed defects in a second "
-                         "session. ON by default in every mode that writes a response. The "
-                         "repair edits only response/ and never the manuscript; a claim the "
-                         "final package does not support is corrected or downgraded, never "
-                         "invented.")
-    ps.add_argument("--no-response-audit", dest="response_audit", action="store_const",
-                    const="off", help="same as --response-audit off")
+    ps.add_argument("--revision-audit", choices=("on",), default="on",
+                    help="mandatory independent post-revise audit in every mode, including "
+                         "major/minor; a non-empty repair plan runs one bounded repair pass. "
+                         "This audit cannot be disabled. --no-audit controls only the earlier "
+                         "review-disposition audit")
     ps.add_argument("--guided-review",
                     dest="guided_review", choices=list(GUIDED_REVIEW_MODES),
                     default=GUIDED_REVIEW_DEFAULT,
@@ -900,8 +861,7 @@ def build_parser() -> argparse.ArgumentParser:
                          "`guided_review`, the run id `r<r>_guided_review` and the area "
                          "`guided_review/`. Refused with a concern-scoped revision mode, "
                          "with --review-split, "
-                         "with `--cold-start-review off` (no finding source would remain) "
-                         "and outside a "
+                         "with the probe off (no finding source would remain) and outside a "
                          "full-scope round")
     ps.add_argument("--no-guided-review",
                     dest="guided_review", action="store_const",
@@ -916,13 +876,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "stops INLINING the elaborative ones: each stage prompt carries the "
                          "contract, the finding schema and the completion marker, and the long "
                          "rule sections are written to INSTRUCTIONS/PROFILE_RULES.md in the "
-                         "session sandbox and referenced for a bounded read. It is a payload "
-                         "choice, not a model-class claim: it is valid for any harness whose "
-                         "per-call instruction budget makes inlining expensive, and it asserts "
-                         "nothing about the model or its context window. The "
+                         "session sandbox and referenced for a bounded read. It is for a "
+                         "limited-context model (one GPU, ~100k tokens or less); the "
                          "postchecks, the coverage table and every deliverable are UNCHANGED. "
                          "Not to be confused with the model's reasoning effort (see "
-                         "PAPER_AGENT_REASONING_EFFORT), which this flag does not touch")
+                         "PAPER_QWEN_REASONING_EFFORT), which this flag does not touch")
     ps.add_argument("--cold-start-review",
                     dest="cold_start_review", choices=list(COLD_START_REVIEW_MODES),
                     default=COLD_START_REVIEW_DEFAULT,
@@ -974,36 +932,15 @@ def build_parser() -> argparse.ArgumentParser:
                          "`--strict-artifacts` means `on`")
     ps.add_argument("--fix-artifacts", dest="artifact_policy", action="store_const", const="fix",
                     help="same as --strict-artifacts fix")
-    ps.add_argument("--tolerate-fail", dest="tolerate_fail",
-                    action="store_const", const=True, default=None,
-                    help="keep a stage that exhausts its retries from terminating the "
-                         "invocation: use that run's BEST FAILED TRIAL (most required output "
-                         "files produced, then fewest FAIL messages), print it as "
-                         "TOLERATED_FAIL, and continue with its output. The result stays "
-                         "PROVISIONAL and is never certified. OFF by default (a failed stage "
-                         "leaves the round incomplete and `run` exits 3). `setup` records it; "
-                         "`run` can override it for one invocation")
-    ps.add_argument("--no-tolerate-fail", dest="tolerate_fail",
-                    action="store_const", const=False,
-                    help="use the strict failure path (the default; same as omitting the pair)")
-    # The previous spelling of the same policy; kept as a hidden alias.
-    ps.add_argument("--almost-fail", dest="tolerate_fail",
-                    action="store_const", const=True, help=argparse.SUPPRESS)
-    ps.add_argument("--no-almost-fail", dest="tolerate_fail",
-                    action="store_const", const=False, help=argparse.SUPPRESS)
 
     decide_opts = argparse.ArgumentParser(add_help=False)  # shared by decide / run-decide
     decide_opts.add_argument("--package-winner", action="store_true",
                              help="copy the final champion's pinned corpus into <root>/final/; "
-                                  "REFUSED when the champion cannot be re-derived, the "
-                                  "content-addressed chain is broken, an enabled gate fails, the "
-                                  "final round is incomplete or a ranked panel is incomplete. An "
-                                  "auto-promoted (unjudged) winner IS packaged, but it is "
-                                  "labelled PROVISIONAL -- never a certified panel result")
+                                  "REFUSED unless every configured round is complete and every "
+                                  "ranked panel is complete (a provisional or short-panel winner "
+                                  "is never packaged)")
     decide_opts.add_argument("--require-complete", action="store_true",
-                             help="exit 4 unless the answer is a complete, non-provisional "
-                                  "decision: an incomplete round, a tolerated stage failure and "
-                                  "an auto-promoted (unjudged) winner also exit 4")
+                             help="exit non-zero unless all configured rounds are complete")
     decide_opts.add_argument("--require-clean-captions", action="store_true",
                              help="print the suggested-length caption report for the final winner; "
                                   "kept for CLI compatibility. Caption length is advisory, so this "
@@ -1081,32 +1018,10 @@ def build_parser() -> argparse.ArgumentParser:
     add_content_edit_policy_opts(run_opts, default=True)   # config unless explicitly passed
     run_opts.add_argument("--champion-select", choices=list(CHAMPION_SELECT_MODES),
                           default=None, metavar="MODE", help=CHAMPION_SELECT_HELP)
-    run_opts.add_argument("--tolerate-fail", dest="tolerate_fail",
-                          action="store_const", const=True, default=None,
-                          help="override the root's failure policy for this invocation: when a "
-                               "run exhausts its retries, use its BEST FAILED TRIAL (most "
-                               "required output files, then fewest FAIL messages) as the stage's "
-                               "result and continue with it. The stage prints TOLERATED_FAIL; "
-                               "the decision stays PROVISIONAL and is never certified. Default: "
-                               "the root's policy (strict FAIL unless setup recorded it)")
-    run_opts.add_argument("--no-tolerate-fail", dest="tolerate_fail",
-                          action="store_const", const=False,
-                          help="use the strict failure path for this invocation (overrides a "
-                               "root that recorded --tolerate-fail)")
-    run_opts.add_argument("--almost-fail", dest="tolerate_fail",
-                          action="store_const", const=True, help=argparse.SUPPRESS)
-    run_opts.add_argument("--no-almost-fail", dest="tolerate_fail",
-                          action="store_const", const=False, help=argparse.SUPPRESS)
     run_opts.add_argument("--jobs", type=int, default=DEFAULTS["jobs"],
                     help=f"concurrent agent sessions (default: {DEFAULTS['jobs']})")
     run_opts.add_argument("--timeout", type=int, default=None,
                     help="per-run timeout seconds (default: 4h; manual mode: none)")
-    run_opts.add_argument("--max-turns", type=int, default=DEFAULTS["max_turns"],
-                    help=f"model-turn cap for one agent session (default: "
-                         f"{DEFAULTS['max_turns']}; 0 = unlimited). A long-horizon stage "
-                         f"needs hundreds of turns, but a looping session must still stop: "
-                         f"the orchestrator counts the harness's own turn-end events and "
-                         f"kills the session at the cap")
     run_opts.add_argument("--retries", type=int, default=DEFAULTS["retries"],
                     help=f"automatic retries for a failed run (default: "
                          f"{DEFAULTS['retries']} -> three attempts); each retry waits "
@@ -1118,10 +1033,12 @@ def build_parser() -> argparse.ArgumentParser:
     run_opts.add_argument("--retry-backoff-max", type=int, default=DEFAULTS["retry_backoff_max"],
                     help=f"cap on a single backoff wait in seconds (default: "
                          f"{DEFAULTS['retry_backoff_max']})")
-    run_opts.add_argument(
-        "--manual", action="store_true",
-        help="stage every session prompt for manual completion instead of launching an "
-             "agent (the former `--agent manual`)")
+    run_opts.add_argument("--agent", choices=list(AGENT_CHOICES), default=None,
+                    help="LEGACY shortcut for --agent-harness + --agent-model (codex, claude, "
+                         "dsh, qwen, dots, manual). It keeps the old command exactly; do not "
+                         "combine it with the new --agent-harness/--agent-model/--agent-model-* "
+                         "options. Omit the new options to use the default: dsh + "
+                         "deepseek-flash")
     run_opts.add_argument("--agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI that runs the sessions: dsh (DeepSeek Harness, the default), "
@@ -1157,16 +1074,6 @@ def build_parser() -> argparse.ArgumentParser:
                          "reasoning_effort, ...). It may be incomplete: keys it omits keep "
                          "the harness defaults, and nested objects merge key by key. "
                          "Applies only to a custom endpoint URL")
-    run_opts.add_argument("--reasoning-effort", type=str.lower, default=None,
-                    choices=list(_model_runtime.REASONING_EFFORT_LEVELS),
-                    metavar="LEVEL",
-                    help="reasoning level every session requests from the selected model: "
-                         "off, minimal, low, medium, high, xhigh or max. It overrides the "
-                         "model's shared default and the per-family overrides, and it also "
-                         "reaches GPT/Claude, whose default is otherwise the model's own. "
-                         "A level the model's wire does not document maps to its nearest one "
-                         "(deepseek medium->high; qwen high/max->xhigh). Also "
-                         "$PAPER_AGENT_REASONING_EFFORT")
     run_opts.add_argument("--no-template-stage", action="store_true",
                           help="do NOT author the package inside the journal's Word templates "
                                "before the round (the default is to run that stage first in "
@@ -1174,10 +1081,11 @@ def build_parser() -> argparse.ArgumentParser:
                                "submission the round starts from)")
     run_opts.add_argument("--agent-cmd", default=None,
                     help="JSON argv list overriding the agent command")
-    run_opts.add_argument(
-        "--judge-manual", action="store_true",
-        help="stage the judge session prompts for manual completion (the former "
-             "`--judge-agent manual`)")
+    run_opts.add_argument("--judge-agent", choices=list(AGENT_CHOICES), default=None,
+                    help="LEGACY shortcut for --judge-agent-harness + --judge-agent-model; "
+                         "keeps the old judge command exactly. Do not combine with the new "
+                         "--judge-agent-harness/--judge-agent-model/--judge-agent-model-* "
+                         "options")
     run_opts.add_argument("--judge-agent-harness", choices=list(AGENT_HARNESS_CHOICES),
                     type=agent_choice, default=None, metavar="NAME",
                     help="the CLI for judge sessions only. When neither judge option is "
@@ -1209,10 +1117,8 @@ def build_parser() -> argparse.ArgumentParser:
                          "(--only 1,2 = only rounds 1 and 2, every stage; --only 1-3), a STAGE "
                          "name (--only audit = that stage in every round; guided_review, "
                          "cold_start_review, rewrite, audit, revise, integrate, judge, and the "
-                         "journal modes' feedback, concerns, concern_audit, concern_repair, "
-                         "response_draft, response, response_audit, response_repair; `review` "
-                         "selects BOTH discovery passes; aliases w, a/a2, i, merge, j, fb, ca, "
-                         "cr, rd, resp, ra, rr), "
+                         "journal modes' feedback, concerns, response; `review` selects BOTH "
+                         "discovery passes; aliases w, a/a2, i, merge, j, fb, resp), "
                          "ROUND:STAGE (--only 2:merge,3:judge = round 2's integration and round "
                          "3's judge; '.' and '/' also separate, 'all' stands for every stage), or "
                          "ONE AGENT SESSION instead of its whole stage: --only rewriter2 runs only "
@@ -1411,8 +1317,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="also set the target journal, atomically with the venue change")
     psv.add_argument("--article-type", default=None, metavar="ID",
                      help="also select the article type (see `set-article-type`); a type the "
-                          "new venue's profile does not carry is rejected, while a type "
-                          "recorded from the old profile falls back to the new profile's "
+                          "new venue's profile does not carry falls back to that profile's "
                           "default with a note")
     psv.add_argument("--profile", default=None, metavar="FILE",
                      help=f"install a venue profile JSON into "
@@ -1509,8 +1414,6 @@ def build_parser() -> argparse.ArgumentParser:
                           "declarations and the files they resolve to")
     phf.add_argument("--clear", action="store_true",
                      help="remove every placeholder-file declaration and exit")
-    phf.add_argument("--force", action="store_true",
-                     help="change the evidence policy although this root already has run records")
     phf.set_defaults(func=cmd_set_placeholder_file)
 
     ptf = sub.add_parser("set-tiebreak-defect-floor", parents=[common],
@@ -1638,18 +1541,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     prt = sub.add_parser("retry", parents=[common],
                          help="rebuild a failed/stale run's sandbox and reset it")
-    # argparse enforces the documented mutual exclusion and exits with the
-    # usage code 2 (the manual check in p16 remains as a defence in depth).
-    prt_excl = prt.add_mutually_exclusive_group()
-    prt_excl.add_argument("--run", default=None, help="specific run id, e.g. r2_a2_review")
-    prt_excl.add_argument("--runs", metavar="SELECTION", default=None,
+    prt.add_argument("--run", default=None, help="specific run id, e.g. r2_a2_review")
+    prt.add_argument("--runs", metavar="SELECTION", default=None,
                      help="reset the runs an equivalent `run --only SELECTION` invocation "
                           "selects: the SAME grammar (rounds, stages, ROUND:STAGE, single "
                           "sessions, judge selectors and judge run ids), e.g. "
                           "`--runs 1:review,1:feedback` or `--runs 1:judge,2:feedback,2:review`. "
                           "Mutually exclusive with --run and --all-failed; a selection that "
                           "names no existing run says so and resets nothing")
-    prt_excl.add_argument("--all-failed", action="store_true",
+    prt.add_argument("--all-failed", action="store_true",
                      help="reset every failed or stale run")
     prt.set_defaults(func=cmd_retry)
 
@@ -1758,10 +1658,7 @@ def main() -> None:
     # process-wide, so `run-decide` keeps it across both phases).
     skip_note = configure_hash_checks(bool(getattr(args, "skip_hash", False)))
     if skip_note:
-        # An ADVISORY, not part of the command's output: on stdout it preceded
-        # the JSON document of every `--json` command, so a consumer's json.load
-        # failed on a valid flag combination (F020). stderr keeps it visible.
-        print(f"[{args.cmd}] WARNING: {skip_note}", file=sys.stderr)
+        print(f"[{args.cmd}] WARNING: {skip_note}")
     try:
         args.func(args)
     except KeyboardInterrupt:
@@ -1770,438 +1667,3 @@ def main() -> None:
         # signal handler has already terminated the agent process groups; exit
         # with the shell's interrupt status instead of a traceback.
         sys.exit(130)
-
-
-# --- trend/agents reporting views (moved here from p12 to keep every part
-#     under the 10,000-line structural limit; the loader defines them before
-#     main() dispatches) ---------------------------------------------------
-def trend_read_decision(root: Path) -> dict:
-    """One root's reports/decision.json, or None when absent/unreadable."""
-    p = Path(root) / "reports" / "decision.json"
-    if not p.is_file():
-        return None
-    try:
-        dj = read_json(p, revive=False, lenient=True)
-    except Exception:                                            # noqa: BLE001
-        return None
-    return dj if isinstance(dj, dict) else None
-
-
-def trend_order(roots: list) -> list:
-    """Order roots into the chain each one's recorded `source` implies.
-
-    A root whose `config.source` lies inside another root's tree consumed that
-    root (usually its final_clean_version), so it comes AFTER it. Roots that
-    cannot be linked keep the order they were given; a cycle is also kept in the
-    given order rather than guessed at. A repeated root is listed once.
-    """
-    items = []
-    _seen = set()
-    for r in roots:
-        rp = str(Path(r).resolve())
-        if rp in _seen:
-            continue                      # the same root must not be listed twice (F245)
-        _seen.add(rp)
-        items.append((rp, Path(r), trend_read_decision(Path(r))))
-    known = {rp: (r, dj) for rp, r, dj in items}
-    pending = [rp for rp, _r, _dj in items]
-    order, guard = [], 0
-    while pending and guard <= len(pending) ** 2 + 1:
-        progressed = False
-        for rp in list(pending):
-            _r, dj = known[rp]
-            src = str(((dj or {}).get("config") or {}).get("source") or "")
-            parents = [op for op in pending
-                       if op != rp and src
-                       and (src == op or src.startswith(op.rstrip("/") + "/"))]
-            if not parents:
-                order.append(rp)
-                pending.remove(rp)
-                progressed = True
-        if not progressed:
-            # A cycle (or several unlinked roots): report it, keep the given order.
-            order.extend(pending)
-            break
-        guard += 1
-    return [known[rp][0] for rp in order]
-
-
-def _trend_cell(value):
-    if value is None:
-        return "-"
-    if isinstance(value, float):
-        return f"{value:g}"
-    return str(value)
-
-
-def trend_rows(roots: list) -> tuple:
-    """(per-round rows, per-run rows) for the trend tables, in chain order."""
-    round_rows, run_rows = [], []
-    for root in trend_order([str(r) for r in roots]):
-        dj = trend_read_decision(root)
-        if not dj:
-            run_rows.append({"run": root.name, "rounds": 0, "champion": None,
-                             "format_rows": None, "format_high": None, "format_medium": None,
-                             "format_low": None, "over_length": None, "placeholders": None,
-                             "generated": None,
-                             # None = the decision predates the certification block.
-                             "certified": None})
-            continue
-        src = (dj.get("config") or {}).get("source")
-        rounds = dj.get("rounds") or []
-        for r in rounds:
-            sel = r.get("selection") or {}
-            rep = sel.get("champion_rep") or sel.get("champion") or r.get("stored_champion")
-            st = (r.get("stats") or {}).get(rep) or {}
-            census = ((r.get("issue_census") or {}).get(rep) or {})
-            tiers = census.get("tiers") or {}
-            sevs = census.get("severities") or {}
-            row = {"run": root.name, "round": r.get("round"),
-                   "champion": sel.get("champion") or r.get("stored_champion"),
-                   "median": st.get("median"), "mean": st.get("mean"), "n": st.get("n"),
-                   # `vs_input` is the champion against the version THIS RUN
-                   # started from: the root's pristine original (`vs_original`).
-                   # `vs_incumbent` is the round's base (`vs_base`). The two are
-                   # distinct from round 2 on and are deliberately NOT collapsed:
-                   # the first is the run-level input margin, the second the
-                   # previous champion's.
-                   "vs_input": st.get("vs_original"), "vs_incumbent": st.get("vs_base")}
-            for tier in BASIS_TIERS:
-                row[tier] = (tiers.get(tier) or {}).get("total")
-            for sev in SEVERITIES:
-                row[sev] = (sevs.get(sev) or {}).get("total")
-            round_rows.append(row)
-        fin = dj.get("final") or {}
-        fmt = fin.get("format") or {}
-        lengths = fin.get("lengths") or {}
-        last = rounds[-1] if rounds else {}
-        last_rep = ((last.get("selection") or {}).get("champion_rep")
-                    or (last.get("selection") or {}).get("champion")
-                    or last.get("stored_champion"))
-        last_stat = ((last.get("stats") or {}).get(last_rep) or {})
-        run_rows.append({
-            "run": root.name, "rounds": len(rounds),
-            "champion": fin.get("champion") or last.get("stored_champion"),
-            "format_rows": (len(fmt.get("rows") or []) if fmt else None),
-            "format_high": fmt.get("high"), "format_medium": fmt.get("medium"),
-            "format_low": fmt.get("low"),
-            "over_length": (len(lengths.get("over_limit") or []) if lengths else None),
-            "placeholders": last_stat.get("author_placeholders"),
-            "generated": dj.get("generated"),
-            # `-` for decisions written before the certification block existed:
-            # the old files carry no explicit verdict, so do not imply one.
-            "certified": ((dj.get("certification") or {}).get("certified")
-                          if isinstance(dj.get("certification"), dict) else None)})
-    return round_rows, run_rows
-
-
-def format_trend(round_rows: list, run_rows: list) -> str:
-    """The markdown trend report (both tables plus the reading rules)."""
-    L = ["# Cross-run trend (read-only)", ""]
-    L.append("One row per decided round, in the chain order the recorded `source` implies "
-             "(`vs_input` = the champion against the version THAT run started from; "
-             "`vs_incumbent` = the champion against the previous round's champion). The two "
-             "margins come from different panels, so read them as PER-STEP statements: the run "
-             "that wins each step is improving on its own input, which is exactly what the "
-             "reference-moving design measures. The tier/severity columns are the champion's "
-             "ISSUE CENSUS (issues the panel attributed to it, from the judges' own ledger rows) "
-             "-- the absolute \"what is left\" number, comparable across runs, and `-` for rounds "
-             "decided before the census existed. A shrinking census with a stable margin is "
-             "progress; a stable census with a stable margin is noise-limited repetition.")
-    L.append("")
-    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_ROUND_FIELDS] for r in round_rows],
-                  list(TREND_ROUND_FIELDS)))
-    L.append("")
-    L.append("Per-run deterministic counters (code-side, no panel; `-` when the run predates "
-             "them): the OOXML formatting rows, the over-cap section count and the champion's "
-             "hand-off placeholder count at the end of the run. `certified` is the run's own "
-             "decision.json verdict (`true`/`false`; `-` when the decision predates the "
-             "certification block) -- a `false` row is a recorded, refused decision, not a "
-             "certified answer.")
-    L.append("")
-    L.append(_tbl([[_trend_cell(r.get(k)) for k in TREND_RUN_FIELDS] for r in run_rows],
-                  list(TREND_RUN_FIELDS)))
-    L.append("")
-    return "\n".join(L)
-
-
-def _trend_output_path(label: str, dest, roots: list) -> Path:
-    """Resolve a `trend` output path, refusing anything inside a pipeline root.
-
-    `trend` is documented as READ-ONLY (no lock, no writes into any root). The
-    old writer happily replaced `<root>/state.json` with the markdown report,
-    destroying the root.
-    """
-    q = Path(dest).expanduser().resolve()
-    for r in roots:
-        try:
-            q.relative_to(Path(r).resolve())
-        except ValueError:
-            continue
-        die(f"[trend] {label} {str(dest)!r} is inside the pipeline root {r} that trend just "
-            f"read; trend is READ-ONLY and never writes into a root. Pick a destination "
-            f"outside every root.", code=2)
-    # Also refuse a destination inside ANY pipeline root, even one not named on
-    # this invocation: an ancestor carrying pipeline_config.json/state.json is a
-    # root whose state must never be overwritten.
-    cur = q.parent
-    while True:
-        if (cur / "pipeline_config.json").is_file() or (cur / "state.json").is_file():
-            die(f"[trend] {label} {str(dest)!r} is inside pipeline root {cur}; trend is "
-                f"READ-ONLY and never writes into a root. Pick a destination outside every "
-                f"root.", code=2)
-        if cur.parent == cur:
-            break
-        cur = cur.parent
-    return q
-
-
-def cmd_trend(args) -> None:
-    """`trend`: read several roots' decision.json files and print the chain."""
-    roots = list(getattr(args, "roots", None) or [])
-    if not roots:
-        roots = [getattr(args, "root", None) or DEFAULTS["root"]]
-    roots = [str(Path(r).expanduser().resolve()) for r in roots]
-    missing = [r for r in roots if trend_read_decision(Path(r)) is None]
-    for r in missing:
-        print(f"[trend] note: {r} has no readable reports/decision.json "
-              f"(undecided, pruned or not a pipeline root) -- it is reported as an empty run")
-    round_rows, run_rows = trend_rows(roots)
-    text = format_trend(round_rows, run_rows)
-    print(text)
-    out = getattr(args, "out", None)
-    if out:
-        out_path = _trend_output_path("--out", out, roots)
-        write_text_atomic(out_path, text)
-        print(f"[trend] written: {out_path}")
-    csvp = getattr(args, "csv", None)
-    if csvp:
-        csv_path = _trend_output_path("--csv", csvp, roots)
-        p = write_csv_atomic(
-            csv_path, TREND_ROUND_FIELDS,
-            [{k: r.get(k) for k in TREND_ROUND_FIELDS} for r in round_rows])
-        print(f"[trend] written: {p}")
-
-
-def agent_session_plan(ctx: Ctx, only=None) -> list:
-    """Every AGENT session each round plans, without touching the corpus.
-
-    Producing sessions come straight from `round_run_plan()`: the rewrite
-    sessions the round's `--rewrites` count gives, its review (A, and B with
-    `--review-split`), its auditor and its revise arms, plus the integration arms
-    the round's `--integrators` mask selected. Judge session ids are the salted
-    per-version tokens of `judge_token_for()` -- a few sha256 calls over
-    (round, version id), never a document hash, so the whole listing costs
-    milliseconds on any root.
-
-    The judge FIELD, though, is the one thing that cannot be known before the
-    arms exist: it is deduplicated by CONTENT (a member whose documents are
-    content-identical to another member's is dropped), so a pending round lists
-    the candidate judge sessions and says `field_exact: false`.
-
-    `--champion-select revise`/`integrate` runs NO judge panel (see
-    round_champion_select), so those rounds list no judge session -- the same
-    rule drive_round applies at run time.
-    """
-    rows = []
-    # The template-first session runs ONCE, before any round, and only in the
-    # transfer/init modes (`run` calls _ensure_template_stage_for_run for those
-    # modes regardless of --only). A continue root must never list it, and a
-    # `--only 2` preview on init/transfer must list it even though round 1 is
-    # filtered out -- the old per-round block got both wrong.
-    _tpl_entry = None
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT) \
-            and not template_stage_record(ctx):
-        _tpl_templates = venue_word_templates(ctx)
-        _tpl_mode = journal_mode_of(ctx)
-        _tpl_has_docx = any(p.suffix.lower() == ".docx"
-                            for p in template_package_files(ctx.pristine))
-        if _tpl_has_docx and (_tpl_templates or _tpl_mode == JOURNAL_MODE_INIT):
-            _tpl_entry = {
-                "id": TEMPLATE_REWRITE_DIRNAME,
-                "session": "conform",
-                "stage": "conform",
-                "label": "template-first stage",
-                "agent": True,
-                "status": (ctx.run(TEMPLATE_REWRITE_DIRNAME) or {}).get(
-                    "status") or "planned",
-                "deps": [],
-            }
-    for r in range(1, ctx.rounds_count() + 1):
-        rec = ctx.round_rec(r)
-        if only is not None and (not only.covers_round(r) or not only.selects_round(ctx, r)):
-            continue
-        producing = []
-        if int(r) == 1 and _tpl_entry is not None:
-            producing.append(dict(_tpl_entry))
-        # The round's base copy (a1) is not an agent session -- it is the
-        # orchestrator's copy of the previous round's pin -- but the run table
-        # carries it, so list it first and label it.
-        base = {"id": rid_a1(r), "vid": A1_ID, "stage": "base", "deps": [],
-                "label": "base copy (no agent session)"}
-        for e in [base] + round_run_plan(ctx, r):
-            if only is not None and not only.entry_selected(r, e):
-                continue
-            run_rec = ctx.run(e["id"]) or {}
-            producing.append({
-                "id": e["id"],
-                "session": session_id_of_entry(e),
-                "stage": plan_stage_of(e),
-                "label": str(e.get("stage") or ""),
-                "agent": e["id"] != rid_a1(r),     # a1 is the orchestrator's copy
-                "status": run_rec.get("status") or "planned",
-                "deps": [str(d) for d in (e.get("deps") or [])],
-            })
-        field = [str(v) for v in (rec.get("field") or [])]
-        # A pending round's candidates are the judgeable ids (see judgeable_ids):
-        # the original, the earlier rounds' pins and the fresh arms.
-        candidates = field or judgeable_ids(ctx, r)
-        csel = round_champion_select(ctx, r)
-        judge_selected = (only is None or only.stage_selected(r, "judge")) \
-            and csel == "judge"
-        # WHICH judge sessions of the round run: the selector the `--only` items
-        # give (a preview of `run --only`), else the panel recorded by an earlier
-        # invocation on the pending round (see judges_enabled_spec).
-        spec = (only.judge_spec_for(r) if (only is not None and judge_selected) else "") \
-            or judges_enabled_spec(ctx, r)
-        enabled = set()
-        if spec:
-            try:
-                triples = parse_judges_enabled(spec, config_rounds(ctx),
-                                               lambda rr: judgeable_ids(ctx, rr),
-                                               lambda rr: round_judges(ctx, rr))
-                enabled = {(str(v), int(k)) for rr, v, k in triples if int(rr) == int(r)}
-            except ValueError:              # a hand-edited state/config: list the full panel
-                enabled = set()
-        judges = []
-        if judge_selected:
-            for vid in candidates:
-                token = judge_token_for(ctx, r, vid)
-                for j in range(1, round_judges(ctx, r) + 1):
-                    if enabled and (str(vid), int(j)) not in enabled:
-                        continue
-                    rid = rid_judge(r, token, j)
-                    judges.append({
-                        "id": rid,
-                        "target": str(vid),
-                        "judge_index": int(j),
-                        "status": (ctx.run(rid) or {}).get("status") or "planned",
-                    })
-        rows.append({
-            "round": int(r),
-            "status": rec.get("status") or "pending",
-            "champion": rec.get("champion"),
-            "champion_select": csel,
-            "judge_panel": csel == "judge",
-            "judges_per_version": int(round_judges(ctx, r)),
-            "judges_enabled": spec or JUDGES_ENABLED_ALL,
-            "integrators": f"0x{round_integrators(ctx, r):X}",
-            "field": field,
-            "field_exact": bool(field),
-            "judges_selected": bool(judge_selected),
-            "producing": producing,
-            "judge": judges,
-        })
-    # Round 1 filtered out by --only (e.g. `--only 2`), but `run` still starts
-    # the template-first stage first: attach the session to the first listed
-    # round so the preview's session count is truthful.
-    if _tpl_entry is not None and rows \
-            and not any(s.get("id") == TEMPLATE_REWRITE_DIRNAME
-                        for s in rows[0]["producing"]):
-        rows[0]["producing"].insert(0, dict(_tpl_entry))
-    return rows
-
-
-def cmd_agents(args) -> None:
-    """`agents`: list the agent-session names every round plans.
-
-    A DRY plan: no sandbox is materialized, no agent is launched, no document is
-    hashed (see agent_session_plan). `--only` previews exactly the sessions the
-    equivalent `run --only` invocation would drive.
-    """
-    ctx = Ctx(Path(args.root).resolve(),
-              strict_venue=bool(getattr(args, "strict_venue", False)))
-    # `--json` must stay parseable: keep everything `load()` prints (the
-    # pipeline-identity note) out of the JSON body and hand it back as a field.
-    captured = io.StringIO()
-    with contextlib.redirect_stdout(captured):
-        ctx.load()
-    notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
-    only = parse_only_spec(getattr(args, "only", None))
-    if only is not None and only.is_everything():
-        only = None
-    if only is not None:
-        resolve_judge_run_ids(ctx, only, label="[agents]", sink=notes)
-        only.validate(ctx.rounds_count())
-        validate_only_selectors(ctx, only)
-        # The SAME template-first-mode guard `run` applies: `agents --only
-        # 1:conform` reported a successful empty plan where `run` refuses the
-        # selection (F34).
-        if (only_is_template_stage_only(only)
-                or only_names_explicit_stage(only, "conform")) \
-                and journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER,
-                                                 JOURNAL_MODE_INIT):
-            die("--only conform is the template-first stage of the transfer and init "
-                f"revision modes: this root's revision mode is {journal_mode_of(ctx)!r}",
-                code=2)
-    rows = agent_session_plan(ctx, only)
-    if getattr(args, "pending", False):
-        for row in rows:
-            row["producing"] = [s for s in row["producing"] if s["status"] != "done"]
-            row["judge"] = [s for s in row["judge"] if s["status"] != "done"]
-    if getattr(args, "json", False):
-        print_raw(json.dumps({"root": str(ctx.root),
-                              "only": (only.label() if only is not None else None),
-                              "notes": notes,
-                              "rounds": rows}, indent=2))
-        return
-    for note in notes:
-        print(note)
-    np_ = sum(len(x["producing"]) for x in rows)
-    nj = sum(len(x["judge"]) for x in rows)
-    what = (f"--only {only.label()}" if only is not None else
-            "every planned session")
-    print(f"[agents] root: {ctx.root}")
-    print(f"[agents] {what}: {np_} producing + {nj} judge session(s) over "
-          f"{len(rows)} of {ctx.rounds_count()} round(s)"
-          + ("  [--pending: finished sessions hidden]" if getattr(args, "pending", False) else ""))
-    candidates = []
-    for row in rows:
-        print()
-        print(f"round {row['round']}/{ctx.rounds_count()}  status={row['status']}  "
-              f"champion={row['champion'] or '-'}  integrators={row['integrators']}")
-        for s in row["producing"]:
-            note = "" if s["agent"] else "   (no agent: the round's base copy)"
-            print(f"  {s['id']:<26} {s['label'] or s['stage']:<22} {s['status']}{note}")
-        if row["judge"]:
-            head = (f"judge sessions ({row['judges_per_version']} per version; --only judge "
-                    f"sessions: {row['judges_enabled']}):")
-            print(f"  {head:<64} {len(row['judge'])}")
-            for s in row["judge"]:
-                label = f"-> {s['target']}  (judge {s['judge_index']}/{row['judges_per_version']})"
-                print(f"  {s['id']:<26} {label:<22} {s['status']}")
-            if not row["field_exact"]:
-                candidates.append(row["round"])
-        elif not row.get("judge_panel", True):
-            print(f"  judge sessions: none -- --champion-select {row.get('champion_select')} "
-                  f"runs NO judge panel (the decision is PROVISIONAL)")
-        elif not row["judges_selected"]:
-            print("  judge sessions: NOT selected by this invocation's --only")
-    if candidates:
-        print()
-        print(f"[agents] round(s) {', '.join(str(r) for r in candidates)}: the judge ids above "
-              f"are the CANDIDATES. The judge "
-              f"field keeps one member per distinct document set, so a candidate whose package is "
-              f"content-identical to another member's is dropped before judging and its sessions "
-              f"never start (`run` prints the dropped members). Everything else is exact: no "
-              f"document was hashed to produce this listing.")
-    else:
-        print()
-        print("[agents] every id above is exact: the rounds' fields are already deduplicated, so "
-              "no session here is a candidate whose membership can still change.")
-    print("[agents] every id above can be fed back to `run --only` as printed: the producing ids "
-          "(`--only r1_a2_revise`, `--only r1_w1`) and the judge ids (`--only "
-          "judge_t497f106d_j1`, or `--only judge_1` for judge 1 of every version). The base copy's "
-          "`a1` line is the only exception: it is not an agent session.")
-
-

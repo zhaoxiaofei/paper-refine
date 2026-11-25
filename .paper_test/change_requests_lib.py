@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from write_quality_fixture_lib import audit_fixture
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import xfix as xf  # noqa: E402
 
@@ -238,6 +239,7 @@ def build_round1_root(tmp: Path, judges=1, pristine: Path = None):
     shutil.copytree(pristine, root / "runs" / a1 / "base")
     rec = ctx.register(a1, "a1", 1, f"runs/{a1}", source_id=nb.ORIGINAL_ID)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, "a1")
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, "a1")
     return ctx
@@ -253,6 +255,7 @@ def register_fresh(ctx, vid: str, text: str):
         write(out / "DIFF_LEDGER.md", "# ledger\n")
     rec = ctx.register(rid, kind, 1, f"runs/{rid}", source_id="a1", produces=vid)
     rec["status"] = "done"
+    audit_fixture(nb, ctx, rec)
     rec["corpus_digest"] = nb.recompute_corpus_digest(ctx, 1, vid)
     rec["content_fingerprint"] = nb.corpus_content_fingerprint(ctx, 1, vid)
     rec["summary"] = {"critical_remaining": 0, "manual_items": 0}
@@ -420,6 +423,7 @@ def test_rewrite_and_revise_arms():
           nb.upstream_deps(rev) == ["r1_a1"])
     write(ctx.sandbox_of(rev) / "guided_review" / "findings.json", "{}")
     rev["status"] = "done"
+    audit_fixture(nb, ctx, rev)
     # N revisions from the same frozen review
     a2 = nb.materialize_revise(ctx, 1, "a2")
     a3 = nb.materialize_revise(ctx, 1, "a3")

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 03/25 of the pipeline -- executed by the
+# Part 03/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -37,8 +37,8 @@ coverage you must guarantee on top of the full workflow.
 ATTACHED_PHASE1 = """## Phase 1 — $paper-review (identification only; never modify any file in "non_revised/")
 
 Run the complete review workflow as specified by the skill: Phase 0 setup (corpus conversion and
-inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M36, the judgment
-passes J1–J5, and the discovery round D0–D5 — including its proposal of new sweeps for issue
+inventory via convert_corpus.py), the EXHAUSTIVE MANDATORY mechanical sweeps M1–M17, the judgment
+passes J1–J4, and the discovery round D0–D5 — including its proposal of new sweeps for issue
 classes the checklist itself misses. Adhere to the skill's core discipline throughout:
 ENUMERATE → ARTIFACT → AUDIT → REPORT for every mechanical check; every instance gets a row in
 its artifact table (a sweep with zero findings is invalid without a fully disposed artifact); one
@@ -67,9 +67,8 @@ At minimum — and not limited to — the review must surface:
 6. Formatting that violates best practice for manuscript preparation — including but not limited
    to justified alignment of main text (use left alignment), fonts that are too small or too
    large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter outside the range the venue's own M19 rule states (when the venue
-   states no cover-letter preference, report that instead of applying a default) — unless such
-   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
+   part of the cover letter less than 300 or more than 500 words — unless such formatting is
+   required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
 7. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
    (including but not limited to: repeating fully expanded long-forms after their first use;
    presenting short-forms without their corresponding long-forms at initial mention; failing to
@@ -82,9 +81,8 @@ At minimum — and not limited to — the review must surface:
    dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
    (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
    (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
-   states no spacing rule must not be measured against a blanket default (figure captions are
-   single-spaced only where the venue says so).
+   or formatting discrepancies. The entire manuscript should be 1.5-spaced (except that figure
+   caption texts are single-spaced).
 
 Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
 word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
@@ -97,10 +95,9 @@ it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-pyzotero-cli first when it is available; then the Zotero MCP service when your session
-exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
-both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 At the end of Phase 1, present the complete findings list and automatically begin the revision (do
 not stop for my confirmation).
@@ -112,7 +109,7 @@ Proceed immediately after finishing Phase 1 (which found issues) without asking 
 Run the complete revision workflow as specified by the skill — R0 through V5 — including
 the programmatic A1 ledger (every finding ID from findings.json and findings_extra.json must
 appear exactly once; "not addressed" is not a status), the CAREFUL re-verification of every finding
-with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E13, consistency
+with a recorded verdict and rationale, the sequenced edit plan, the edit rules E1–E12, consistency
 propagation P1 with the conflict-priority order, the code-revision step C if source code is in
 scope, and validation V1–V5 (round-trip integrity, diff locality with no unmapped hunks, full
 mechanical rescan of the revised corpus, checksum re-verification of the untouched originals,
@@ -162,10 +159,9 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-pyzotero-cli first when it is available; then the Zotero MCP service when your session
-exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
-both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 Final deliverables of Phase 2: the revised/ package (CHANGELOG.md, MANUAL_STEPS.md,
 REVISION_REPORT.md and any other artifacts the skill specifies), the code/ directory and rerun
@@ -173,88 +169,9 @@ instructions if applicable, and a summary of what was fixed, what was left for m
 why. Files that remain unchanged should be copied from "non_revised/" to "revised/".
 """
 
-# The rewrite/integrate builders must NOT receive ATTACHED_PHASE1/ATTACHED_PHASE2
-# wholesale: those blocks assign the REVIEW and REVISE roles and their products
-# (a review artifact, a finding ledger, revised/), which directly contradicts the
-# rewrite/integrate contract (AGENTS rule 1). This stage-scoped brief carries the
-# master prompt's applicable STYLE, FORMAT and EVIDENCE rules, names only the
-# stage's own output directory, and assigns no review/revision artifact.
-ATTACHED_WRITE_STAGE_BRIEF = """## Master-prompt STYLE, FORMAT and EVIDENCE rules (for the @@STAGE@@ stage only)
-
-This is NOT the review and NOT the revision. The master prompt's identification and revision
-workflows are deliberately not attached to this stage: they assign another role's products and
-output directory. Do not run either workflow, do not build a review artifact or a finding ledger,
-and do not write a package under any directory other than @@OUTPUT_DIR@@/. Your ONE product is
-@@OUTPUT_DIR@@/ (see the stage directive above and the end-of-prompt reminder below).
-
-The master prompt's STYLE, FORMAT and EVIDENCE discipline does govern @@OUTPUT_DIR@@/:
-
-1. Formatting that violates best practice for manuscript preparation — including but not limited
-   to justified alignment of main text (use left alignment), fonts that are too small or too
-   large for their part of the manuscript, fancy styles in the cover letter, and the persuading
-   part of the cover letter outside the range the venue's own M19 rule states (when the venue
-   states no cover-letter preference, report that instead of applying a default) — unless such
-   formatting is required or recommended by @@VENUE_REQUIREMENT_AUTHORITY@@.
-2. Micro-formatting and consistency defects, including but not limited to: acronym-related errors
-   (including but not limited to: repeating fully expanded long-forms after their first use;
-   presenting short-forms without their corresponding long-forms at initial mention; failing to
-   place the short-form parenthetically immediately after the long-form exactly at first use; and,
-   crucially, not accounting for hyphenated variants of the same long-form [e.g., “copy number” vs
-   “copy-number”] – i.e., either neglecting to define both forms in the acronym’s first definition,
-   or subsequently mixing the abbreviation with the un-abbreviated hyphenated/unhyphenated forms
-   inconsistently); spacing irregularities (including but not limited to: inconsistent
-   figure-to-legend spacing, uneven paragraph breaks, and improper use of hyphens, en dashes, or em
-   dashes [e.g., using a hyphen for a range instead of an en dash]); unit and style inconsistencies
-   (e.g., mixed unit styles for the same quantity, and inconsistent citation formatting); font
-   (size, normal, bold, italic, etc., properties) inconsistencies, and any other similar stylistic
-   or formatting discrepancies. Spacing follows the venue template's own style; a venue that
-   states no spacing rule must not be measured against a blanket default (figure captions are
-   single-spaced only where the venue says so).
-
-Length rule (withdraws this master prompt's blanket preference): the "never flag abstract/main-text
-word limits" preference is WITHDRAWN here -- the M19 rule above governs the abstract and main text,
-the M18 caption suggestion governs figure legends, and the cover letter keeps its own M19 rule.
-Never make length-driven cuts outside those M18/M19 rules.
-
-Never invent content, citations, numbers, or accession IDs (unresolvable items become
-"manual verification required"). `base/` and `non_revised/` are READ-ONLY and hash-verified; never
-edit them. Report unfixable issues — for any problem that cannot be resolved due to technical
-limitations (e.g., unreadable Zotero live fields, ambiguous numbers visible only inside figures) or
-that requires subjective scientific judgment, never guess: report it clearly and give me precise,
-step-by-step manual instructions so I can intervene personally. These unfixable issues should be
-grouped by issue type.
-
-Zotero live fields: if you cannot properly read or handle a live field, ignore the field contents
-and add it to a manual-verification list for me to verify in Word. Zotero tooling, when this run
-enables it, is installed by this checkout's `install_dependencies.sh`: the Zotero helper is
-`$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
-`$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
-`zot` command from pyzotero-cli -- are available as needed.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-pyzotero-cli first when it is available; then the Zotero MCP service when your session
-exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
-both unavailable.
-"""
-
-
-def attached_write_stage_brief(stage: str, profile=None) -> str:
-    """The stage-scoped style/format brief for a WRITE stage (rewrite/integrate)."""
-    stage = str(stage).lower()
-    out_dir = {"rewrite": REWRITTEN_DIR, "integrate": INTEGRATED_DIR}[stage]
-    text = (ATTACHED_WRITE_STAGE_BRIEF
-            .replace("@@STAGE@@", stage.upper())
-            .replace("@@OUTPUT_DIR@@", out_dir))
-    return render_venue_tokens(text, profile)
-
-
 # The three ATTACHED_* blocks are TEMPLATES (they carry @@VENUE_*@@ tokens);
 # the masters below are the renderings a caller appends to a prompt.
 ATTACHED_FULL = ATTACHED_HEAD + "\n" + ATTACHED_PHASE1 + "\n" + ATTACHED_PHASE2
-
-
-# An operator-supplied venue value keeps its own `@@` sequences verbatim: they
-# are encoded while the prompt's template passes run and decoded at the end.
-_VENUE_LITERAL_AT_AT = "\x00PIPELINE_VENUE_LITERAL_AT_AT\x00"
 
 
 def render_venue_tokens(text: str, profile=None) -> str:
@@ -267,36 +184,15 @@ def render_venue_tokens(text: str, profile=None) -> str:
     """
     prof = _as_profile(profile)
     prompt = prof.prompt
-    # Hold every profile value in its own sentinel until ALL eight replacements
-    # are done: a chained buffer let a venue field that itself carries a
-    # `@@VENUE_*@@`/`@@SELFCHECK@@` token be rewritten by a later pass (double
-    # substitution or template injection -- F97). The value is operator data,
-    # never template syntax.
-    values = (("@@VENUE_SUBJECT@@", prompt["subject"]),
-              ("@@VENUE_EDITOR@@", prompt["editor"]),
-              ("@@VENUE_REQUIREMENTS@@", prompt["requirements"]),
-              ("@@VENUE_REQUIREMENT_AUTHORITY@@", prompt["requirement_authority"]),
-              ("@@VENUE_GUIDELINES_SOURCE@@", prompt["guidelines_source"]),
-              ("@@VENUE_LABEL@@", prof.label),
-              ("@@VENUE_ID@@", prof.id),
-              ("@@VENUE_SHORT@@", prof.short))
-    held = []
-    for index, (token, value) in enumerate(values):
-        holder = f"\x00PIPELINE_VENUE_LITERAL_{index}\x00"
-        # The value is operator data: an `@@...@@` sequence inside it must not be
-        # seen by the builder's later placeholder passes, so it is encoded here
-        # and decoded once the prompt is fully assembled (`restore_venue_literals`
-        # runs from page_stage_prompt, the single finalisation point -- F97).
-        held.append((holder, str(value).replace("@@", _VENUE_LITERAL_AT_AT)))
-        text = text.replace(token, holder)
-    for holder, value in held:
-        text = text.replace(holder, value)
-    return text
-
-
-def restore_venue_literals(text: str) -> str:
-    """Decode the `@@` sequences held out of operator-supplied venue values (F97)."""
-    return str(text).replace(_VENUE_LITERAL_AT_AT, "@@")
+    return (text
+            .replace("@@VENUE_SUBJECT@@", prompt["subject"])
+            .replace("@@VENUE_EDITOR@@", prompt["editor"])
+            .replace("@@VENUE_REQUIREMENTS@@", prompt["requirements"])
+            .replace("@@VENUE_REQUIREMENT_AUTHORITY@@", prompt["requirement_authority"])
+            .replace("@@VENUE_GUIDELINES_SOURCE@@", prompt["guidelines_source"])
+            .replace("@@VENUE_LABEL@@", prof.label)
+            .replace("@@VENUE_ID@@", prof.id)
+            .replace("@@VENUE_SHORT@@", prof.short))
 
 
 def attached_head(profile=None) -> str:
@@ -359,10 +255,7 @@ def pipeline_fallback_paths() -> list:
         # The pipeline's OWN file: read with the default revive (its Infinity/NaN
         # sentinels must survive), never leniently -- a state file that does not
         # parse exactly is not guessed at.
-        # State is the pipeline's OWN registry: read it with the state cap
-        # (256 MiB), not the 64 MiB agent-output cap, or a valid large registry
-        # looked like "no usable state" and the fallback vanished (F69).
-        state, _state_problem = load_state_file(module_path.parent / "state.json")
+        state = read_json(module_path.parent / "state.json")
     except Exception:                                           # noqa: BLE001
         # A prompt must never fail to render because a state file is unreadable.
         return []
@@ -393,29 +286,17 @@ def pipeline_fallback_paths() -> list:
 
 
 def marker_root_rule(out_dir: str = "") -> str:
-    """WHERE and HOW the completion marker is written, stated in every prompt.
+    """WHERE the completion marker goes, stated the same way in every prompt.
 
     The location is part of the contract (the postcheck reads the sandbox root),
     and a real audit session wrote the marker one directory down because its own
     directives said "write everything inside `audit/`" one sentence before the
     marker instruction -- see SIGNAL_ALT_DIRS.
-
-    HOW is the other half.  On 2026-11-12 three revise attempts left a complete
-    package (revision_report.json, work/R6_language.md, a fully disposed M30)
-    and failed on the missing marker alone: the model ended its last turn with a
-    prose summary instead of a file write, and a turn cap or a stalled session
-    then lost a 2.5-hour stage over one line of JSON.  The stage blocks still
-    say WHEN (after the self-check); this rule adds that the marker is a tool
-    call before any closing message, which is a mechanism, not a reordering.
     """
     inside = f" (not inside `{out_dir}/`, and not anywhere else)" if out_dir else ""
     return (f"LOCATION, and it is part of the contract: `{MARKER_FILE}` goes in the SANDBOX ROOT "
             f"-- the directory that holds `PROMPT.md` (and `base/` for the stages that have "
-            f"one){inside}. "
-            f"HOW: it is written with your file-write tool, as the last ACTION of the session -- "
-            f"never as prose. A closing summary is not a step of the work: if you are about to "
-            f"send one and the marker is not on disk, write the marker first. A stage whose "
-            f"deliverables are complete but whose marker is missing is unfinished.")
+            f"one){inside}.")
 
 
 # The contradiction rule EVERY agent prompt carries. Prompts restate rules (the
@@ -446,150 +327,28 @@ conflict belongs.
 
 """
 
-# The REVIEW, AUDIT and COLD-START prompts receive the package-production hand-off
-# rule verbatim (one shared text, so the modes cannot drift). Those roles are
-# identification-only, so the same prompt carries this override: the bullets that
-# tell a package-producing stage to edit are report-only there. It is a separate
-# token, not text appended to the shared block, so the profile paging still moves
-# the shared block unchanged (AGENTS.md rule 12).
-READ_ONLY_HANDOFF_NOTE = """READ-ONLY STAGE -- THE HAND-OFF BULLETS ABOVE ARE REPORT-ONLY HERE.
-This stage never edits a package: `base/` is read-only and hash-verified after your run, and your
-product is a finding, an observation or a manual item, never a document edit. Dispose a
-`searchable` lookup row whose verdict is `found` or `absent` by REPORTING the value (or the
-verified negative) and its basis in the finding or the manual list; never write it into a
-document. Dispose an existing marker by reporting the underlying gap as a finding; never fill,
-remove or reword the marker. The package-producing stages (revise / rewrite / integrate) apply
-the hand-off, not this one."""
 
-
-def _contract_deliverable(rel: str, author_to_complete: str = None) -> str:
-    """The postcheck's own path for one table entry.
-
-    `MANUAL_STEPS.md` is the table's placeholder for the hand-off list, whose
-    real name depends on the run's author-to-complete policy (the default
-    `readme` policy writes `README-AUTHOR-TO-COMPLETE.md`). The postcheck and
-    the pre-flight map it through `handoff_target`; the printed contract must
-    print the same name or it would ask for a file the policy does not produce.
-    """
-    path = Path(str(rel))
-    if path.name != "MANUAL_STEPS.md":
-        return str(rel)
-    target = handoff_target(author_to_complete or DEFAULT_AUTHOR_TO_COMPLETE)
-    return (path.parent / target).as_posix()
-
-
-def review_prompt_scope(prompt_text: str = None, sb: Path | None = None) -> tuple:
-    """(scope, split_mode, part_b) the review prompt itself declares.
-
-    The pre-flight has no `ctx` to read the round plan from, so it derives the
-    same two facts the prompt states: a "formatting-writing" round runs no
-    discovery phase, and a split session owns only its half's checks/artifacts.
-    `part_b` comes from the prompt's own "YOUR SCOPE (B)" line; the sandbox
-    name is the fallback for a prompt that carries the split marker without the
-    half line (the postcheck derives it from the sandbox name).
-    """
-    text = str(prompt_text or "")
-    scope = ("formatting-writing"
-             if "FORMATTING AND WRITING ONLY" in text else "full")
-    split = "off"
-    if "SPLIT REVIEW" in text:
-        split = ("aspects"
-                 if ("PACKAGING/compliance" in text
-                     or "CONTENT/scientific" in text) else "phases")
-    part_b = "YOUR SCOPE (B)" in text
-    if split != "off" and "YOUR SCOPE (A)" not in text and "YOUR SCOPE (B)" not in text:
-        part_b = bool(sb is not None and Path(sb).name.endswith("_review_b"))
-    return scope, split, part_b
-
-
-def _postcheck_contract(kind: str, author_to_complete: str = None,
-                        scope: str = "full", split: str = "off",
-                        part_b: bool = False) -> str:
-    """The stage's acceptance contract, generated from the postcheck's tables.
-
-    Printed in the prompt so a session never has to infer -- or read the
-    implementation to discover -- what the postcheck will require. The text is
-    stage contract, not profile guidance, so it is byte-identical in `high` and
-    `medium` (rule 12).
-
-    The review's contract is the POSTCHECK'S contract, not the full-package
-    one: a formatting-writing round runs no discovery phase (so the discovery
-    deliverable is not expected) and a split half owns only its half's sweep
-    artifacts. Printing the full set told a scoped/split session to leave
-    artifacts its own prompt forbids -- the postcheck does not require them.
-    """
-    table = STAGE_DELIVERABLES.get(kind) or {}
-    required = tuple(table.get("required") or ())
-    expected = tuple(table.get("expected") or ())
-    no_discovery = bool(kind == "guided_review"
-                        and (scope != "full" or (split != "off" and not part_b)))
-    if no_discovery:
-        expected = tuple(rel for rel in expected
-                         if Path(rel).name != "findings_extra.json")
-    lines = ["", "=== WHAT THE POSTCHECK REQUIRES OF THIS STAGE "
-                 "(generated from its own tables -- do not infer it) ==="]
-    if required:
-        lines.append("REQUIRED files: an attempt that lacks any one of them FAILS.")
-        lines += [f"  * {_contract_deliverable(rel, author_to_complete)}"
-                  for rel in required]
-    if expected:
-        lines.append("EXPECTED files: reported as a warning when absent.")
-        lines += [f"  * {_contract_deliverable(rel, author_to_complete)}"
-                  for rel in expected]
-    if kind == "guided_review":
-        lines.append(f"EVERY check id below must carry exactly ONE coverage row in "
-                     f"{FINDINGS_REL} (a real disposition and its basis); a missing "
-                     f"row fails the attempt:")
-        lines.append("  " + ", ".join(required_review_check_ids()))
-        if scope != "full" or split != "off":
-            lines.append("A check this session's review scope or split does not run is "
-                         "disposed 'out of scope -- <reason>'; silence is still a missing row.")
-        in_scope = set(scoped_review_checks(scope))
-        artifacts = [(cid, name) for cid, name in SWEEP_ARTIFACTS.items()
-                     if (not in_scope or cid in in_scope)
-                     and (split == "off" or _split_check_owned(split, part_b, cid))]
-        if artifacts:
-            lines.append("Each mechanical check below must also leave its enumeration table:")
-            lines += [f"  * {cid} -> {ARTIFACTS_REL}/{name}"
-                      for cid, name in artifacts]
-    return "\n".join(lines) + "\n"
-
-
-def selfcheck_block(kind: str, run_id: str, r: int, sb: Path | None = None,
-                    prompt_text: str | None = None,
-                    author_to_complete: str = None) -> str:
+def selfcheck_block(kind: str, run_id: str, r: int) -> str:
     """The pre-marker pre-flight command for one stage's prompt.
 
     The session can run the orchestrator's OWN paperwork detectors inside the
-    sandbox before it declares completion, so a table row, an audit sheet or a
-    misplaced marker the postcheck would reject is fixed while the context is
-    still live, instead of costing a rebuilt attempt. It is a pre-flight, not a
-    second verdict: the content checks that need the root's state stay in the
-    postcheck.
+    sandbox before it declares completion (`cmd_selfcheck`), so a table row, an
+    audit sheet or a misplaced marker that the postcheck would reject is fixed
+    while the session's context is still live, instead of costing a rebuilt
+    20-minute attempt. It is a pre-flight, not a second verdict: the content
+    checks that need the root's state stay in the postcheck.
 
-    The pre-flight is normally answered OUT OF PROCESS: the sandbox carries a
-    small client (`SELFCHECK_CLIENT_REL`) that drops a request in its mailbox,
-    and the orchestrator (`_serve_selfcheck`) runs `sandbox_selfcheck` from its
-    own frozen copy and writes the verdict back. The sandbox therefore never has
-    to hold a readable copy of the implementation -- the 2026-11-13 review read
-    `p06_postchecks.py` in 207 tool calls instead of running the pre-flight.
-    `PAPER_PIPELINE_SELFCHECK_COPY=1` restores the self-contained bundle for an
-    operator who runs the agent by hand (no orchestrator waiting); when that
-    bundle IS staged (a manual run sets it), the staged driver is named FIRST
-    because nothing would answer the client.
-
-    The ROOT's frozen copy stays authoritative (rule 11); the exported
-    `PAPER_PIPELINE_SELF`/`PAPER_PIPELINE_MOUNT`/`PAPER_PIPELINE_ORIGIN` paths
-    remain the fallbacks when the client is absent or unanswered.
+    The ROOT's frozen copy is authoritative (AGENTS.md rule 11). A harness that
+    jails the session can mount the run root read-only SOMEWHERE ELSE, so a
+    hard-coded absolute path is not guaranteed to resolve (the 2026-11-01 audit
+    ran `ls` on it, got "No such file or directory", and spent its whole attempt
+    "verified manually"). Every sandbox also carries its own copy of the frozen
+    driver and parts (`SELFCHECK_DRIVER_REL`, staged by `_copy_session_tools`),
+    and the orchestrator exports the root/mount/snapshot locations to the
+    session (`PAPER_PIPELINE_SELF`, `PAPER_PIPELINE_MOUNT`,
+    `PAPER_PIPELINE_ORIGIN`), so the prompt names env vars instead of baking a
+    machine path into its text.
     """
-    driver_rel = SELFCHECK_DRIVER_REL
-    driver_staged = bool(sb is not None and (Path(sb) / driver_rel).is_file())
-    client_rel = SELFCHECK_CLIENT_REL
-    client_staged = bool(sb is not None and (Path(sb) / client_rel).is_file())
-    staged_cmd = (f"    python {driver_rel} selfcheck --sandbox . --stage {kind} "
-                  f"--run-id {run_id} --round {int(r)}")
-    client_cmd = (f"    python {client_rel} --sandbox . --stage {kind} "
-                  f"--run-id {run_id} --round {int(r)}")
     alt_lines = [
         f'    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} '
         f'--run-id {run_id} --round {int(r)}',
@@ -604,43 +363,23 @@ def selfcheck_block(kind: str, run_id: str, r: int, sb: Path | None = None,
     except Exception:                                           # noqa: BLE001
         pass
     alternate = "\n".join(alt_lines)
-    first = staged_cmd if driver_staged else (client_cmd if client_staged else alt_lines[0])
-    if driver_staged:
-        how = ("The driver is staged in THIS sandbox (the same frozen bytes as the ROOT's copy),\n"
-               "so the pre-flight needs no orchestrator answer; the ROOT's frozen copy stays\n"
-               "authoritative (AGENTS.md rule 11).\n")
-    elif client_staged:
-        how = ("The pre-flight is answered by the orchestrator from its own frozen copy of the\n"
-               "driver; the client above carries no pipeline code (it drops a request in the sandbox\n"
-               "and prints the verdict).\n")
-    else:
-        how = "Run the ROOT's frozen driver (AGENTS.md rule 11).\n"
-    state = ""
-    # Only a sandbox that EXISTS has a verdict: in a render/test context the path may
-    # not be created, and 'the sandbox <random path> does not exist' would make the
-    # prompt size depend on the temp-directory name (the size table and the golden
-    # must be deterministic).
-    if sb is not None and Path(sb).is_dir():
-        try:
-            _ok, _errs, _warns = sandbox_selfcheck(
-                Path(sb), kind, run_id, int(r), prompt_text=prompt_text)
-            shown = [str(e) for e in _errs][:20]
-            if shown:
-                state = ("\n=== THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX ===\n"
-                         + "\n".join(f"  [FAIL] {e}" for e in shown)
-                         + (f"\n  ... and {len(_errs) - 20} more" if len(_errs) > 20 else "")
-                         + "\nA finished attempt must leave none of these behind; the list "
-                           "shrinks as you write.\n")
-            else:
-                state = ("\n=== THE PRE-FLIGHT'S CURRENT VERDICT FOR THIS SANDBOX ===\n"
-                         "  (no problems right now)\n")
-        except Exception:                                       # noqa: BLE001
-            state = ""
-    _scope, _split, _part_b = review_prompt_scope(prompt_text, sb)
+    alt_text = (f"IF THAT PATH DOES NOT EXIST OR CANNOT BE READ in this session (a sandboxed or\n"
+                f"jailed harness may mount the run root elsewhere), run the SAME frozen driver from\n"
+                f"the exported ROOT copy, the harness's read-only mount, or the verified snapshot:\n"
+                f"{alternate}\n"
+                f"`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the\n"
+                f"harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the snapshot this\n"
+                f"root was set up from. It is the same bytes; the verdict is the same.\n")
     return (f"""
 SELF-CHECK BEFORE THE MARKER (run this BEFORE you write `{MARKER_FILE}`, from the sandbox root):
-{first}
-{how}It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
+    python {SELFCHECK_DRIVER_REL} selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+The driver is staged in THIS sandbox at `{SELFCHECK_DRIVER_REL}` (the same frozen bytes as the ROOT's
+copy), so run that first. The ROOT's frozen copy is authoritative (AGENTS.md rule 11); if the staged
+copy is missing (an older or resumed sandbox), run it instead:
+    python "$PAPER_PIPELINE_SELF" selfcheck --sandbox . --stage {kind} --run-id {run_id} --round {int(r)}
+(In a manual run, set `PAPER_PIPELINE_SELF` to the ROOT's `paper_pipeline.py`; set
+`PAPER_PIPELINE_MOUNT` or `PAPER_PIPELINE_ORIGIN` only when you use those lines.)
+It applies the postcheck's OWN detectors to this sandbox -- the marker and its location, every
 required deliverable, the seeded decision tables' dispositions, the audit sheet, the manual TODO
 inventory and source gates of a package-producing stage, the M30 ledger when the round carries an
 M30 finding, and the journal letter/ledger -- and prints what the postcheck would reject for every
@@ -650,19 +389,10 @@ a judge's M20 and the journal ledger a response is checked against) still run at
 so a PASS HERE IS A PREVIEW, NEVER A CERTIFICATION. Fix everything it reports, run it again until it
 says OK, and only THEN write the completion marker. An attempt that ends with its problems still in
 the files does not get repaired: it FAILS and the whole stage is re-run in a rebuilt sandbox.
-IF THE CLIENT OR THAT PATH DOES NOT RESOLVE in this session (a sandboxed or jailed harness may mount
-the run root elsewhere), run the SAME frozen driver from the exported ROOT copy, the harness's
-read-only mount, or the verified snapshot:
-{alternate}
-`PAPER_PIPELINE_SELF` is the ROOT's frozen driver; `PAPER_PIPELINE_MOUNT` is the
-harness's mount; `PAPER_PIPELINE_ORIGIN` (when listed above) is the snapshot this
-root was set up from. It is the same bytes; the verdict is the same.
-THE POSTCHECK'S ERROR LIST IS YOUR INPUT; ITS IMPLEMENTATION IS NOT. Do not read
-`paper_pipeline.py` or `paper_pipeline_parts/` in this sandbox or in the run root: the
-contract you must satisfy is printed below and in the pre-flight's own output. Reading the
-implementation is not a step of this stage, it cannot change a verdict, and it spends the
-context the deliverables need.
-{_postcheck_contract(kind, author_to_complete, _scope, _split, _part_b)}{state}""")
+{alt_text}Do not skip the self-check because the first path is missing: a session that cannot run it
+says so in its final report AND re-reads every deliverable schema by hand.
+""")
+
 
 def judge_selfcheck_block(run_id: str) -> str:
     """The judge session's pre-flight (blinding-safe wording).
@@ -719,22 +449,7 @@ judged again from scratch, which wastes the whole session and leaves the panel i
 """)
 
 
-ORCHESTRATION_DIRECTIVES_HEADER = (
-    "ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below "
-    "where they conflict):\n"
-    "\n"
-    "SKILL FILES — the $paper-review and $paper-revise packs are READ-ONLY. "
-    "Read SKILL.md and its references from the skill location the run "
-    "provides; when it provides none, the pack is the pipeline root's "
-    "paper-skills/paper-review/ and paper-skills/paper-revise/. Use absolute "
-    "paths. NEVER run `find /`, `grep -r /`, `du /` or any other scan that "
-    "starts at the filesystem root: a root scan is never authorized, and a "
-    "sandboxed run may stop the session for a containment violation. A file "
-    "you cannot find at those locations does not authorize a root scan."
-)
-
-
-REVIEW_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+REVIEW_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REVIEW run @@RUN_ID@@ — round @@ROUND@@, PHASE 1 OF 2 — inside an isolated orchestration
 pipeline. Your sandbox is:
@@ -900,7 +615,6 @@ Skill discipline that the orchestrator will check for:
     reports/) but does not apply the proposals itself.
 
 @@PLACEHOLDER_RULE@@
-@@READ_ONLY_HANDOFF@@
 
 @@AUX_FILES_RULE@@
 
@@ -952,10 +666,9 @@ enables it, is installed by this checkout's `install_dependencies.sh`: the Zoter
 `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
 `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
 `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-pyzotero-cli first when it is available; then the Zotero MCP service when your session
-exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
-both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 === COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
 
@@ -990,67 +703,19 @@ not create revised/, do not edit base/ or non_revised/, and do not ask the user 
 """
 
 
-def _soft_deletions_policy_lines() -> list:
-    """The MIDDLE content-edit policy: deletions of removable units only.
-
-    Between `--disable-deletions` (nothing may go) and the historical
-    permissive default (any unit may go). It exists because some revisions
-    genuinely require a removal -- a verbatim duplicate, a leaked prompt, a
-    placeholder -- while a sentence that carries a claim does not: the defect is
-    corrected in place, and deleting the sentence silently drops the claim.
-    """
-    return [
-        "SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS.",
-        "",
-        "A content UNIT is a sentence, a paragraph, a heading, a caption, or one",
-        "table/figure row. The base package (`base/`, or `self/` for an integration)",
-        "is the reference set.",
-        "",
-        "YOU MAY REMOVE ONLY: a verbatim duplicate whose other copy survives; a",
-        "leaked model prompt, instruction or internal working note; an unresolved",
-        "placeholder (`[CITE]`, `TBD`, `XXX`, lorem ipsum); a unit whose content is",
-        "fully present in one delivered sentence (a merge); or a pointer-only",
-        "sentence the orchestrator itself removes. A hand-off marker the placeholder",
-        "rule requires is a scaffold, not manuscript content.",
-        "",
-        "YOU MAY NOT REMOVE a unit that carries a claim, value, number, measurement,",
-        "definition, method step, limitation, result, conclusion, citation,",
-        "identifier or author-metadata field. Correct it in place with the right",
-        "value: deleting it is not a repair and leaves the claim with no carrier.",
-        "When no honest in-place correction exists, record the finding",
-        "`manual-required` and LEAVE the unit in the package.",
-        "",
-        "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY: its postcheck compares the",
-        "delivered package with the base and fails a deletion that is not one of the",
-        "removable units above.",
-        "",
-    ]
-
-
 def content_edit_policy_block(insertions_allowed: bool = True,
                               deletions_allowed: bool = True,
-                              prefer_rewrite: bool = False,
-                              soft_deletions: bool = False) -> str:
+                              prefer_rewrite: bool = False) -> str:
     """The benchmark-only content-edit policy block.
 
-    The OFF path is the verbatim pre-feature function (`_legacy_…`): when no
-    mode is enabled, the prompt bytes are identical to the pipeline before the
-    feature existed. The strict directions are unchanged; each mode only adds
-    its own text. `--enable-soft-deletions` adds the middle section on top of
-    whichever block the other modes produced (a strict `NO DELETIONS` run does
-    not need it: nothing may be removed at all).
+    The OFF path is the verbatim pre-feature function (`_legacy_…`): when the
+    prefer-rewrite mode is not enabled, the prompt bytes are identical to the
+    pipeline before the mode existed. Only the ON path adds the extra
+    prefer-rewrite text; the strict directions are unchanged.
     """
-    if prefer_rewrite:
-        base = _prefer_rewrite_policy_block(insertions_allowed, deletions_allowed)
-    else:
-        base = _legacy_content_edit_policy_block(insertions_allowed, deletions_allowed)
-    if not soft_deletions or not deletions_allowed:
-        return base
-    section = "\n".join(_soft_deletions_policy_lines())
-    if base:
-        return base.rstrip("\n") + "\n\n" + section
-    return ("=== CONTENT-EDIT POLICY (operator benchmark constraint) ===\n\n"
-            + section)
+    if not prefer_rewrite:
+        return _legacy_content_edit_policy_block(insertions_allowed, deletions_allowed)
+    return _prefer_rewrite_policy_block(insertions_allowed, deletions_allowed)
 
 
 def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
@@ -1106,41 +771,6 @@ def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
             "rule says and record it in the hand-off list.",
             "",
         ]
-    # Key the repair/precedence paragraphs on the direction THIS block actually
-    # forbids. With --disable-insertions only, a deletion is still allowed, so
-    # telling the agent that removing text is banned (or that a later removal
-    # instruction is overridden) contradicts the mechanical gate; the
-    # prefer-rewrite builder was already fixed for exactly this asymmetry (R01),
-    # the off path used by every non-prefer strict run was not (F01).
-    if not insertions_allowed and not deletions_allowed:
-        repair_ban = "removing or adding"
-        precedence_lines = [
-            "PRECEDENCE: this block overrides every later instruction that would add or",
-            "remove a unit, including the language pass's split/merge/add-sibling repairs,",
-            "a rewrite's requested transitions, and an integration port that would replace",
-            "a unit. Where a later mandate can be met without adding or removing a unit,",
-            "make that in-place edit; otherwise record the item as manual-required/unable",
-            "and leave the unit unchanged.",
-        ]
-    elif not insertions_allowed:
-        repair_ban = "adding"
-        precedence_lines = [
-            "PRECEDENCE: this block overrides every later instruction that would add a",
-            "unit, including a later split, add-sibling, transition or integration port",
-            "that would create one. Where a later mandate can be met without adding a",
-            "unit, make that in-place edit; a deletion remains allowed when it is",
-            "honestly the best repair; otherwise record the item as manual-required/unable",
-            "and leave the unit unchanged.",
-        ]
-    else:
-        repair_ban = "removing"
-        precedence_lines = [
-            "PRECEDENCE: this block overrides every later instruction that would remove a",
-            "unit, including a later merge, transition or integration port that would",
-            "drop one. Where a later mandate can be met without removing a unit, make",
-            "that in-place edit; otherwise record the item as manual-required/unable and",
-            "leave the unit unchanged.",
-        ]
     lines += [
         "WHAT IS STILL ALLOWED: rewriting the words INSIDE an existing unit, and",
         "replacing an existing statement with a corrected statement of the same unit",
@@ -1151,12 +781,19 @@ def _legacy_content_edit_policy_block(insertions_allowed: bool = True,
         "THE ORCHESTRATOR ENFORCES THIS MECHANICALLY. Its postcheck compares the",
         "delivered package with the base and fails the attempt for every sentence it",
         "finds violating this policy. A failed attempt is retried with that message;",
-        (f"make the repair in place rather than {repair_ban} text. The mechanical"),
+        "make the repair in place rather than removing or adding text. The mechanical",
         "comparison is sentence-level: the paragraph/heading/caption/row/document",
         "classes above are policy guidance, so a heading- or row-only change may not",
         "be caught by the postcheck. Keep them anyway; the policy still applies.",
         "",
-    ] + precedence_lines + [""]
+        "PRECEDENCE: this block overrides every later instruction that would add or",
+        "remove a unit, including the language pass's split/merge/add-sibling repairs,",
+        "a rewrite's requested transitions, and an integration port that would replace",
+        "a unit. Where a later mandate can be met without adding or removing a unit,",
+        "make that in-place edit; otherwise record the item as manual-required/unable",
+        "and leave the unit unchanged.",
+        "",
+    ]
     return "\n".join(lines) + "\n"
 
 
@@ -1209,8 +846,8 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
             "",
         ]
     lines += [
-        "An in-place correction PRESERVES the claim a deletion would remove.",
-        "Before you record a finding as `manual-required` — or leave the",
+        "The benchmark credits a restored claim, not a removed one. Before you",
+        "record a finding as `manual-required` — or leave the",
         "unit unchanged — because it \"can only be removed\", try an in-place rewrite of",
         "that SAME unit:",
         "",
@@ -1243,8 +880,8 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
             "Record `manual-required` only when neither an honest in-place rewrite nor a",
             "justified deletion solves the finding — for example, when the only honest",
             "repair would invent a fact, citation, dataset or claim. Say exactly why.",
-            "A deletion is a last resort, not the default: a rewrite preserves the",
-            "claim a removal would lose, so a rewrite is preferred. A unit may be",
+            "A deletion is a last resort, not the default: the benchmark credits a",
+            "restored claim, not a removed one, so a rewrite is preferred. A unit may be",
             "rewritten in full, but the unit must survive unless a deletion is honestly",
             "the best repair and the content-edit policy permits it. This preference is",
             "part of the precedence above: try the rewrite before the deletion, and the",
@@ -1335,8 +972,7 @@ def _prefer_rewrite_policy_block(insertions_allowed: bool = True,
 
 def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = True,
                                         deletions_allowed: bool = True,
-                                        prefer_rewrite: bool = False,
-                                        soft_deletions: bool = False) -> bool:
+                                        prefer_rewrite: bool = False) -> bool:
     """Does an already-materialized PROMPT.md state the CURRENT policy?
 
     Prompt files are written once, when a sandbox is materialized. If the
@@ -1351,20 +987,16 @@ def prompt_content_edit_policy_matches(prompt: Path, insertions_allowed: bool = 
     if text is None:
         return False
     has_block = "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" in text
-    if (insertions_allowed and deletions_allowed and not prefer_rewrite
-            and not soft_deletions):
+    if insertions_allowed and deletions_allowed and not prefer_rewrite:
         return not has_block
     if not has_block:
         return False
     # The block names each forbidden direction exactly once, in its own
-    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph, the prefer mode once in its
-    # heading, and the middle mode once in its own heading. A strict prompt
-    # without the heading is the old policy.
+    # `NO INSERTIONS:` / `NO DELETIONS:` paragraph, and the prefer mode once in
+    # its heading. A strict prompt without the heading is the old policy.
     return (("NO INSERTIONS:" in text) == (not insertions_allowed)
             and ("NO DELETIONS:" in text) == (not deletions_allowed)
-            and (("PREFER REWRITE OVER DELETION." in text) == prefer_rewrite)
-            and (("SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS." in text)
-                 == bool(soft_deletions and deletions_allowed)))
+            and (("PREFER REWRITE OVER DELETION." in text) == prefer_rewrite))
 
 
 def content_edit_policy_from_prompt(prompt: Path):
@@ -1409,46 +1041,13 @@ def prefer_rewrite_for_sandbox(ctx, rec, prompt: Path) -> bool:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict) and "prefer_rewrite_over_deletion" in policy:
-        return content_edit_prefer_flag(policy["prefer_rewrite_over_deletion"])
+        return bool(policy["prefer_rewrite_over_deletion"])
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = prefer_rewrite_from_prompt(prompt)
         if from_prompt is not None:
             return from_prompt
     return prefer_rewrite_over_deletion(ctx)
-
-
-def soft_deletions_from_prompt(prompt: Path):
-    """Does an existing PROMPT.md state the removable-only deletion policy, or None.
-
-    A prompt without the policy block is the historical default (off); a prompt
-    with the block states the mode in its `SOFT DELETIONS ARE LIMITED TO
-    REMOVABLE UNITS.` heading. A missing/unreadable prompt returns None so the
-    caller can fall back to the invocation.
-    """
-    text = read_text_bounded(prompt)
-    if text is None:
-        return None
-    if "=== CONTENT-EDIT POLICY (operator benchmark constraint) ===" not in text:
-        return False
-    return "SOFT DELETIONS ARE LIMITED TO REMOVABLE UNITS." in text
-
-
-def soft_deletions_for_sandbox(ctx, rec, prompt: Path) -> bool:
-    """The removable-only deletion policy an already-materialized sandbox used.
-
-    The same binding rule as the other two policy axes: the run record wins,
-    then the prompt the sandbox carries, then the current invocation.
-    """
-    policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
-    if isinstance(policy, dict) and "soft_deletions" in policy:
-        return content_edit_prefer_flag(policy["soft_deletions"])
-    prompt = Path(prompt)
-    if prompt.is_file():
-        from_prompt = soft_deletions_from_prompt(prompt)
-        if from_prompt is not None:
-            return from_prompt
-    return soft_deletions(ctx)
 
 
 def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
@@ -1462,11 +1061,8 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
     """
     policy = (rec or {}).get("content_edit_policy") if isinstance(rec, dict) else None
     if isinstance(policy, dict):
-        # Parse the documented string spellings exactly as the postcheck does;
-        # bool('false') is True and prompted the session under the opposite
-        # policy from the one enforced (F132).
-        return (content_edit_flag(policy.get("insertions", True)),
-                content_edit_flag(policy.get("deletions", True)))
+        return (bool(policy.get("insertions", True)),
+                bool(policy.get("deletions", True)))
     prompt = Path(prompt)
     if prompt.is_file():
         from_prompt = content_edit_policy_from_prompt(prompt)
@@ -1477,31 +1073,28 @@ def content_edit_policy_for_sandbox(ctx, rec, prompt: Path) -> tuple:
 
 def apply_content_edit_policy(text: str, insertions_allowed: bool = True,
                               deletions_allowed: bool = True,
-                              prefer_rewrite: bool = False,
-                              soft_deletions: bool = False) -> str:
+                              prefer_rewrite: bool = False) -> str:
     """Fill the policy placeholder WITHOUT perturbing a default prompt.
 
     The placeholder sits on its own line after the prior-attempt block. When
-    both kinds are allowed and no mode is on the block is empty and the whole
-    placeholder LINE is removed, so the default prompt is byte-identical to the
-    pre-feature one (the hard constraint: defaults must not change behaviour or
-    output).
+    both kinds are allowed the block is empty and the whole placeholder LINE is
+    removed, so the default prompt is byte-identical to the pre-feature one
+    (the hard constraint: defaults must not change behaviour or output).
     """
     block = content_edit_policy_block(insertions_allowed, deletions_allowed,
-                                      prefer_rewrite, soft_deletions)
+                                      prefer_rewrite)
     if block:
         return text.replace("@@CONTENT_EDIT_POLICY@@", block)
     return text.replace("@@CONTENT_EDIT_POLICY@@\n", "")
 
 
-REVISE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+REVISE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REVISE run @@RUN_ID@@ — round @@ROUND@@, PHASE 2 OF 2, revision @@REVISE_INDEX@@ of
 @@REVISE_TOTAL@@ — inside an isolated orchestration pipeline. Your sandbox is:
   @@SANDBOX@@
 This round has @@REVISE_TOTAL@@ reviewed-and-then-revised candidates. They are independent sessions
-that all consume the SAME frozen finding list (the guided review's `guided_review/` copy, or the
-cold-start review's X-9xx list under `--no-guided-review`) and all start from the
+that all consume the SAME frozen guided_review/ copy (one review pass per round) and all start from the
 same base/; you cannot see the other revise sessions and must not try to guess or duplicate what
 they did. Your own package is judged on its merits.
 @@PRIOR_FAILURE@@
@@ -1528,12 +1121,8 @@ Layout (paths relative to the sandbox root):
                   DO NOT MODIFY ANYTHING UNDER guided_review/ — not one byte. The orchestrator verifies
                   guided_review/ is byte-identical after your run and a single changed byte FAILS this run.
 @@AUDIT_BLOCK@@
-  revised/      — the revision package: revised documents, CHANGELOG.md,
-                  MANUAL_STEPS.md, REVISION_REPORT.md, work/. The pipeline has
-                  ALREADY seeded `revised/revision_report.json` (one empty row
-                  per frozen finding id) and `revised/work/R6_language.md` (the
-                  L1-L11 coverage rows); fill them in place and never remove or
-                  recreate `revised/` wholesale.
+  revised/      — YOU create this; your revision package goes here (revised documents, CHANGELOG.md,
+                  MANUAL_STEPS.md, REVISION_REPORT.md, revision_report.json, work/).
                   Your OWN report files are pipeline bookkeeping, not submission content: writing
                   them is required, but never edit manuscript text to make a report look better,
                   and never let them change a scientific claim. (The next round, the judges and
@@ -1566,20 +1155,17 @@ Run the complete $paper-revise workflow -- R0 through V5 -- as specified by the 
 the artifacts landing in ./revised. Read the skill's SKILL.md and its references first
 (references/ledger.md, references/edit_rules.md). Required procedure, in order:
   R0  setup/safety: inventory + sha256 of every original; load guided_review/findings.json and, when
-      present, guided_review/round2/findings_extra.json. The pipeline has ALREADY seeded the A1
-      revision-ledger skeleton at revised/revision_report.json -- one row per frozen finding id,
-      every verdict/rationale/evidence cell EMPTY. Fill those rows IN PLACE (F-* and X-* are
-      separate namespaces; every id appears exactly once, "not addressed" is not a status); never
-      delete, reorder, rename or replace the seeded rows, and never recreate revised/ wholesale
-      (it also carries the seeded language-pass skeleton). The machine-readable ledger must NAME
-      every one of those ids as structured data -- a row's id field, a mapping key, or an id list
-      -- because the orchestrator reads the ids from that file and re-runs this stage when an id
-      is missing. Any container name is accepted (the skill's coverage table, `findings`,
-      `ledger`, `rows`, ...); an id that only appears inside a prose sentence is NOT accepted as
-      naming it. An X-* discovery finding is treated exactly like an F-* one -- same ledger row,
-      same evidence bar -- and the V3 rescan re-locates its quoted defect in revised/: a
-      resolution whose evidence is still present after your edits is not resolved, and every X id
-      is reported the same way the F-* list is.
+      present, guided_review/round2/findings_extra.json; build the A1 revision-ledger skeleton
+      PROGRAMMATICALLY so that no finding id can be silently dropped (F-* and X-* are separate
+      namespaces; every id appears exactly once, "not addressed" is not a status). The
+      machine-readable ledger (revised/revision_report.json) must NAME every one of those ids as
+      structured data -- a row's id field, a mapping key, or an id list -- because the orchestrator
+      reads the ids from that file and re-runs this stage when an id is missing. Any container name
+      is accepted (the skill's coverage table, `findings`, `ledger`, `rows`, ...); an id that only
+      appears inside a prose sentence is NOT accepted as naming it. An X-* discovery finding is
+      treated exactly like an F-* one -- same ledger row, same evidence bar -- and the V3 rescan
+      re-locates its quoted defect in revised/: a resolution whose evidence is still present after
+      your edits is not resolved, and every X id is reported the same way the F-* list is.
   R1  re-verify every finding against the sources; record a verdict with a location-checked
       rationale (empty rationale = invalid). False positives are discarded only with a concrete
       recorded rationale; ambiguous wording becomes "clarification"; unverifiable becomes
@@ -1588,9 +1174,7 @@ the artifacts landing in ./revised. Read the skill's SKILL.md and its references
       (the audit block above is authoritative); the ledger still NAMES its id so nothing is
       silently dropped.
   R2  copy the editable documents into revised/ (doc/docx/tex/bib/md/txt/xlsx; never pdf/png).
-      revised/ already exists with the seeded ledger and language-pass files: copy INTO it,
-      never delete or recreate it first.
-  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E13; P propagation A6
+  R3  sequenced edit plan A4; E apply the edits one at a time under rules E1-E12; P propagation A6
       (supplementary tables > supplementary figures/notes > main figures & legends > Methods >
       main text > abstract > cover letter) for every corrected number/label/term/claim; C code
       revisions if in scope; V1-V5 validation (round-trip integrity, diff locality with no unmapped
@@ -1613,8 +1197,8 @@ Explicit requirements that override skill defaults where they conflict:
      payload files (your own reports, the difference-tracking auxiliaries -- current
      *.tracking-<token>.<ext> / *.logging-<token>.<ext> auxiliaries -- and the
      work/ scratch are excluded; file NAMES do not enter the hash, and existing version-token
-     references inside file contents are REMOVED first (the marker and its separator), so
-     APPLYING the token does not change it). Run the tool BEFORE renaming; then call it again with
+     references inside file contents are normalized to "<VERSION>" first, so APPLYING the token
+     does not change it). Run the tool BEFORE renaming; then call it again with
      `--verify <token>` after the rename/repoint pass and require the OK line.
      Apply the token to EVERY editable manuscript document (doc/docx/tex/bib/md/txt/xlsx):
        * an existing trailing version token is REPLACED: "...-a.docx" -> "...-<token>.docx",
@@ -1669,10 +1253,9 @@ Explicit requirements that override skill defaults where they conflict:
      `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other installed skills under
      `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`, which provides the
      `zot` command from pyzotero-cli -- may be read.
-     ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-     pyzotero-cli first when it is available; then the Zotero MCP service when your session
-     exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service
-     are both unavailable.
+     ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service
+     first when your session exposes it; then the Zotero skill; the `zot` command from
+     pyzotero-cli is the FALLBACK when the MCP service and the skill are both unavailable.
   7. @@M18_REVISE_RULE@@
   8. Acronym long-form repetition findings (review check M1, rule (k); evidence: the M1b instance
      table in guided_review/artifacts/M1_acronyms.md, one row per un-abbreviated long-form occurrence that
@@ -1703,22 +1286,7 @@ Explicit requirements that override skill defaults where they conflict:
      available remedy would remove a fact, leave the fact in the package and mark the finding
      manual-required -- do not trade the fact for a green finding. When a value is corrected,
      propagate the correction to every occurrence of the same quantity in every document; a
-     single-site fix is incomplete. Two spellings of one identity value in one package are never
-     both correct: a statement in the package that declares itself authoritative for the identity
-     fields decides, so the other occurrence is corrected to it -- an identity typo is a decidable
-     correction, never an author query. Two surfaces that describe the same display must also
-     agree: a caption and the body sentence that references it state the same quantity, and the
-     body's claim decides when they differ -- this check does NOT depend on a figure file being
-     shipped. Resolve every Section/Table/Figure pointer against the object it names and read that
-     object; a pointer whose target does not carry the claim is corrected to the right number,
-     never deleted.
-     Where the content-edit policy allows a deletion, removing a sentence is a permitted
-     revision choice (a strict `NO DELETIONS` block above overrides this). What is not permitted
-     is accounting for the removal as a repair.
-     If a finding's quoted sentence is no longer in the package, record that finding
-     `manual-required` (not `fixed`), with the removed claim and its location in the manual list,
-     so the author decides. The revise postcheck re-reads every finding's evidence sentence and
-     fails a `fixed` row whose sentence is gone.
+     single-site fix is incomplete.
 
 @@REWRITE_PARITY@@
 
@@ -1806,7 +1374,7 @@ to "clean up" by guessing.
 """
 
 
-AUDIT_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are AUDIT run @@RUN_ID@@ — round @@ROUND@@ — the INDEPENDENT AUDITOR between the reviewer and
 the revisers, inside an isolated orchestration pipeline. Your sandbox is:
@@ -1903,8 +1471,7 @@ times in a cover letter) were inside that pile. Your job is to attack exactly th
    `searchable` hand-off marker that was carried forward although work/PLACEHOLDER_LOOKUP.md
    answers it (verdict found/absent) or work/IDENTIFIERS.md verifies/refutes the locator; a number
    in the abstract or a legend whose `source` cell is empty in work/NUMBERS_LEDGER.md while the
-   shipped data files prove it; a term family competing for one concept (the reviewer's disposed
-   `guided_review/artifacts/M24_concepts.md`, against this audit's own `work/M24_concepts.md`).
+   shipped data files prove it; a term family competing for one concept (work/M24_concepts.md).
    Each is recorded in `audit/UNRESOLVED.md` as an observation when it is a defect, not a note.
 3g. ATTACK THE DISCOVERY ROUND'S PROBE DISPOSITIONS. When the frozen review carries
    guided_review/round2/probe_results.md, every probe row is a disposition the reviewer wrote and
@@ -1976,8 +1543,7 @@ treated as unfinished).
 @@SELFCHECK@@
 
 === RULES ===
-@@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@
-@@READ_ONLY_HANDOFF@@@@AUX_FILES_RULE@@
+@@DEFECT_CLASS_RULE@@@@STANDING_EXEMPTIONS@@@@PLACEHOLDER_RULE@@@@AUX_FILES_RULE@@
 @@DERIVED_OUTPUTS_RULE@@@@VALIDATION_RULE@@@@VISUAL_INSPECTION_RULE@@@@DOCX_CLI_RULE@@@@ZOTERO_CLI_RULE@@
 * You never edit the corpus, the review, or a candidate package; you only read them and write your
   records in `audit/` (the completion marker goes in the sandbox ROOT, not in `audit/`). The
@@ -2019,7 +1585,7 @@ next to PROMPT.md, NOT inside `audit/` -- carrying
 """
 
 
-INTEGRATE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+INTEGRATE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are INTEGRATION run @@RUN_ID@@ — round @@ROUND@@ — inside an isolated orchestration pipeline.
 Your sandbox is:
@@ -2046,8 +1612,7 @@ Layout (paths relative to the sandbox root):
                   reference: nothing in integrated/ may be worse than this.
   integrated/   — YOU create this; YOUR INTEGRATED PACKAGE goes here.
   code/         — revised analysis code + rerun instructions, if the imported fixes require them.
-  frozen_discovery/ — when this round carries a frozen discovery list (the guided review's D0-D5
-                  round, or the cold-start review under `--no-guided-review`), its FROZEN X-* finding list
+  frozen_discovery/ — when this round ran a discovery round, the round's FROZEN X-* finding list
                   (findings_extra.json + findings_extra.md), READ-ONLY and byte-verified: the
                   one review artifact this sandbox consumes -- see THE ROUND'S DISCOVERY FINDINGS
                   below. Absent when the round carries no discovery findings.
@@ -2138,7 +1703,7 @@ token to every editable document by replacing its trailing version token or appe
 when it has none, repoint every LaTeX
 \\input/\\include/\\includegraphics/\\addbibresource/\\bibliography reference and build script, and
 record the rename in integrated/DIFF_LEDGER.md; verify with `revision_token.py <integrated>
---verify <token>` (it must print OK -- the tool REMOVES version-token references, so applying
+--verify <token>` (it must print OK -- the tool normalizes version-token references, so applying
 the token does not change it). A trailing NUMBER that is part of a document's identity
 (SI-Table-1.csv, Figure-3.xlsx) is not a version token and never shifts; never renumber siblings.
 The only other rename allowed is the collision fallback -- when the destination already holds a
@@ -2155,13 +1720,13 @@ revised.
 
 === LEDGER (required) ===
 
-Write integrated/DIFF_LEDGER.md in exactly the schema of the INTEGRATION DIFFERENCE LEDGER above --
-that section defines the required columns, the verdict vocabulary and the mandatory `revalidated`
-cell, and it is the table the postcheck reads. One row per (a)/(b) difference and a row for every
-difference you deliberately did not port. EVERY donor must appear in the ledger; a donor that
-contributed nothing gets an explicit "no ported difference" row, so the orchestrator and the author
-can see it was actually read. Also summarize the ledger inside integrated/CHANGELOG.md, because
-downstream judges and the human gate receive only the package.
+Write integrated/DIFF_LEDGER.md with one row per (a)/(b) item and a row for every difference you
+deliberately did not port, each carrying: diff id, the DONOR it came from, class (a)-(f), file +
+section/location, what the base has, what the donor has, the decision (PORTED / KEPT-BASE /
+IGNORED / LEFT-SHARED), and the hierarchy-based justification (one line). EVERY donor must appear
+in the ledger; a donor that contributed nothing gets an explicit "no ported difference" row, so the
+orchestrator and the author can see it was actually read. Also summarize the ledger inside
+integrated/CHANGELOG.md, because downstream judges and the human gate receive only the package.
 
 === WHAT DOES NOT APPLY IN THIS SANDBOX (explicit carve-outs — read before the excerpts) ===
 
@@ -2170,8 +1735,7 @@ downstream judges and the human gate receive only the package.
     IDs, do NOT look for those files, and do NOT stop to ask the user for a review (the skill's
     "findings files missing -> STOP and ask the user" rule does not apply here).
     integrated/DIFF_LEDGER.md, described above, IS this run's ledger.
-    THE ONE EXCEPTION: when this round carries a frozen discovery list (the guided review's D0-D5
-    round, or the cold-start review under `--no-guided-review`), its X-* findings ARE handed
+    THE ONE EXCEPTION: when this round ran a discovery round, its frozen X-* findings ARE handed
     to you, read-only, under `frozen_discovery/` -- see THE ROUND'S DISCOVERY FINDINGS below. That
     list is what the round's revision arms resolved, so it is the round's shared defect landscape
     for exactly the classes no frozen sweep owns, and it must be reconciled (ported / kept-base /
@@ -2275,7 +1839,7 @@ as a defect or as a difference worth scoring.
 """
 
 
-REWRITE_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+REWRITE_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are REWRITE run @@RUN_ID@@ — round @@ROUND@@, rewrite @@REWRITE_INDEX@@ of @@REWRITE_TOTAL@@ —
 inside an isolated orchestration pipeline, and you run FIRST in this round, before the review. Your
@@ -2353,9 +1917,9 @@ the original.
      rewrite the FORM, not the science. Anything missing from the submission (a whole mandatory
      file, a statement, an accession number) is scaffolded ONLY with the literal
      "[AUTHOR TO COMPLETE: ...]" marker and listed for the author.
-  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE VENUE TEMPLATE FIXES THEM: left-aligned main text,
-     the venue template's own spacing (single-spaced figure captions where the venue says so),
-     the manuscript's fonts/sizes, figure placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
+  3. STYLE AND FORMAT ARE UNCHANGED WHERE THE MASTER PROMPT FIXES THEM: left-aligned main text,
+     1.5-spaced text (single-spaced figure captions), the manuscript's fonts/sizes, figure
+     placement, numbering and cross-references. If your reorganization moves a reference, UPDATE
      the cross-reference so numbering stays coherent; never renumber a family of items.
   4. ONE COPY OF EACH DOCUMENT, ONE CONTENT-HASH VERSION TOKEN PER PACKAGE: every document you
      carry into rewritten/ keeps its ROLE and body, and the whole package gets ONE token -- the
@@ -2367,7 +1931,7 @@ the original.
      of a document's identity (SI-Table-1.csv, Figure-3.xlsx) is not a version token and never
      shifts. Repoint every LaTeX \\input/\\include/\\includegraphics/\\addbibresource/\\bibliography
      reference and every build script, list the rename in rewritten/CHANGELOG.md, and verify with
-     `revision_token.py <rewritten/> --verify <token>` (the tool removes version-token
+     `revision_token.py <rewritten/> --verify <token>` (the tool normalizes version-token
      references, so applying the token does not change it; it must print OK). The only other rename
      allowed is the collision fallback -- rewritten/ already holds a same-named file (a re-run, or
      two source versions) -- in which case the NEW copy gets "_rev2", "_rev3", … before the
@@ -2426,10 +1990,9 @@ tooling, when this run enables it, is installed by this checkout's `install_depe
 the Zotero helper is `$ZOTERO_SKILL` (from https://github.com/openai/plugins.git); other
 installed skills under `$CODEX_HOME/skills` and `$DSH_HOME/skills` -- such as `$zotero-use`,
 which provides the `zot` command from pyzotero-cli -- are available as needed -- read-only.
-ROUTE ORDER (when Zotero tooling is enabled for this run): use the `zot` command from
-pyzotero-cli first when it is available; then the Zotero MCP service when your session
-exposes it; the Zotero skill is the FALLBACK when the `zot` command and the MCP service are
-both unavailable.
+ROUTE ORDER (when Zotero tooling is enabled for this run): use the Zotero MCP service first
+when your session exposes it; then the Zotero skill; the `zot` command from pyzotero-cli is
+the FALLBACK when the MCP service and the skill are both unavailable.
 
 === CANONICAL OUTPUTS (these exact paths; the pipeline reads them) ===
   rewritten/REWRITE_REPORT.md — REQUIRED. Four sections:
@@ -2718,12 +2281,6 @@ Zotero helper (`$ZOTERO_SKILL`), the `$zotero-use` skill and the READ routes of 
 when a citation must be resolved. There is no other judge's sheet and no other pipeline sandbox
 anywhere in your reach -- do not go looking.
 
-SKILL FILES — the $paper-review pack is READ-ONLY. Read SKILL.md and its references from the
-skill location the run provides; when it provides none, the pack is the pipeline root's
-paper-skills/paper-review/. Use absolute paths. NEVER run `find /`, `grep -r /`, `du /` or any
-other scan that starts at the filesystem root: a root scan is never authorized, and a sandboxed
-run may stop the session for a containment violation.
-
 Layout (paths relative to the sandbox root):
   target/       — the ONE package you judge, as a complete document corpus at its top level.
                   READ-ONLY (hash-verified before and after). SUBMISSION_DIR for the skill = ./target
@@ -2777,13 +2334,14 @@ absolute ratings re-compress into noise and the comparison this design exists to
 3. Write scores.json (schema below), verify it parses as JSON, and then write the completion marker.
 
 Matching documents: match documents between target/ and field/* by CONTENT and ROLE, not by filename
-alone. In the source packages a name carries ONE content-hash version token in the version slot, but
-every name you can see here is anonymized -- no digest, no version token, no letter/digit increment
-and no collision suffix is visible. A filename difference is therefore NOT missing content and must
-not be scored as one, as long as the content survives. DO score as defects: a file's own TEXT
-(prose, caption, legend, table cell) still naming an old file name or label that the same package
-no longer carries, duplicate pre/post-rename siblings inside one package, and a renamed file whose
-content was lost or truncated. Score such a stale reference from
+alone. Compliant packages carry ONE content-hash version token in the version slot
+(e.g. "...-4f3a9c1.docx", the same 7-hex token for every document of a package), which identifies
+their package and nothing about how it was produced; a LEGACY package may still carry a
+letter/digit token ("-b", "_v2") or a collision "_revN" suffix. A filename difference is therefore
+NOT missing content and must not be scored as one, as long as the content survives. DO score as
+defects: a file's own TEXT (prose, caption, legend, table cell) still naming an old file name or
+label that the same package no longer carries, duplicate pre/post-rename siblings inside one
+package, and a renamed file whose content was lost or truncated. Score such a stale reference from
 the package's visible text; a path that merely FAILS TO RESOLVE is not evidence (see the next
 paragraph).
 
@@ -3064,9 +2622,8 @@ which one, if any, is a starting version. A positive score means only that the t
 than that opponent; a negative score means it is worse. Judge preservation defects on the two
 packages in front of you, using the shared tier and severity scale.
 
-If two packages are byte-identical, the comparison is 0 with an empty resolved list and an empty
-introduced list. There is no evidence exception: identical bytes have identical admitted evidence,
-and the pipeline treats content-identical candidates as ONE candidate.
+If two packages are byte-identical, judge that comparison like any other: the score is zero unless
+a real difference in the admitted evidence justifies otherwise.
 
 @@PLACEHOLDER_RULE@@
 
@@ -3184,16 +2741,15 @@ def apply_m18(text: str, limit: int) -> str:
 # Renderers, in the order the prompts tell the agents to try them. A probe value
 # is either a PATH executable (checked with shutil.which) or "mcp:<server>",
 # meaning "the Codex MCP server <server> is configured and its script exists".
-# The FIRST entry is `docx2pdf.sh`, the terminal Word-fidelity converter: the
-# prompts tell the agents to run it before any other docx->pdf converter. The
-# docx-converter MCP tool that wraps it comes second; being installed is not
-# enough for that call to succeed, it also has to be pre-approved for the
-# non-interactive session (MCP_APPROVALS below).
+# The FIRST entry is the machine's docx-converter MCP service: it must be tried
+# before any other docx->pdf converter (the call is
+# convert_docx_to_pdf(docxPath), which renders through Microsoft Word). Being
+# installed is not enough for that call to succeed: it also has to be
+# pre-approved for the non-interactive session (MCP_APPROVALS below).
 DOCX_MCP_SERVER = "docx-converter"
 DOCX_MCP_TOOL = "convert_docx_to_pdf"
-# The machine's Word-native COMPARE MCP service: the FIRST choice for the
-# pipeline's own redline chain whenever it has to track the differences between
-# two .docx files.
+# The machine's Word-native COMPARE MCP service: the FIRST choice whenever the
+# pipeline (or an agent) has to track the differences between two .docx files.
 # The tool wraps `docxcompare.sh`, which drives
 # `Word.Application.CompareDocuments` through COM automation -- the comparison
 # engine of Word itself -- and writes the redline next to the pair it was
@@ -3203,8 +2759,8 @@ DOCX_MCP_TOOL = "convert_docx_to_pdf"
 DOCX_COMPARE_MCP_SERVER = "docx-compare"
 DOCX_COMPARE_MCP_TOOL = "compare_docx"
 VISUAL_TOOL_PROBES = (
-    ("docx2pdf.sh", "docx2pdf.sh"),
     (f"docx-converter MCP tool (`{DOCX_MCP_TOOL}`)", f"mcp:{DOCX_MCP_SERVER}"),
+    ("docx2pdf.sh", "docx2pdf.sh"),
     ("docx (`docx render`) command", "docx"),
     ("soffice (LibreOffice)", "soffice"),
     ("libreoffice", "libreoffice"),
@@ -3303,13 +2859,7 @@ def mcp_server_unusable_reason(name: str) -> str:
     header = re.compile(
         r"^\s*\[\s*mcp_servers\s*\.\s*(?:\"" + quoted + r"\"|'" + quoted + r"'|" + quoted +
         r")\s*\]\s*(?:#.*)?$", re.MULTILINE)
-    # A phantom `[mcp_servers.x]` inside a multiline string must not configure
-    # the probe, but a QUOTED real header (`[mcp_servers."x"]`) contains a
-    # string and must still be found: search the raw text and accept only a
-    # header whose `[` sits outside a string/comment (F221).
-    _masked = _toml_unquoted_mask(text)
-    m = next((cand for cand in header.finditer(text)
-              if _masked[cand.start()] != "\x00"), None)
+    m = header.search(text)
     if not m:
         return f"{name!r} is not configured in {cfg}"
     rest = text[m.end():]
@@ -3366,10 +2916,8 @@ def mcp_server_configured(name: str) -> bool:
 
     The MCP tools are used by the AGENT sessions the pipeline launches, which
     inherit the operator's Codex configuration; the orchestrator itself also
-    drives this one server (see `mcp_stdio_tool_call`) so the template renders
-    IT seeds use the orchestrator's first-choice converter (the agent prompts
-    put `docx2pdf.sh` first, with this MCP tool as their fallback). What the
-    probe answers is
+    drives this one server (see `mcp_stdio_tool_call`) so the template renders IT
+    seeds use the same first-choice converter. What the probe answers is
     therefore "can the agents we are about to start actually call this server?",
     by checking the config written by `codex mcp add`
     (`[mcp_servers.<name>]`) and verifying that the files the entry names still
@@ -3476,13 +3024,7 @@ def agent_argv(agent_name: str) -> list:
     argv = list(AGENT_PRESETS[agent_name])
     if agent_name != "codex" or len(argv) < 2:
         return argv
-    overrides = list(codex_mcp_overrides())
-    effort = _model_runtime.reasoning_effort_override()
-    if effort:
-        # The legacy codex preset is config-owned; an explicit level still
-        # reaches it through codex's own `-c` override.
-        overrides.append('model_reasoning_effort="%s"' % effort)
-    return [*argv[:2], *overrides, *argv[2:]]
+    return [*argv[:2], *codex_mcp_overrides(), *argv[2:]]
 
 
 # The adapter harness names: the public `--agent-harness` names are the
@@ -3842,29 +3384,6 @@ PRIOR_AUDIT_RULE = """PRIOR-AUDIT OBSERVATIONS (read-only):
     staged record."""
 
 
-# The discovery-round task and canonical-output blocks in REVIEW_DIRECTIVES are
-# written for a FULL review. A scoped review and split-A do not run D0-D5 (their
-# own scope/split block says so, and `_postcheck_contract` drops
-# findings_extra.json from their expected files), so `review_prompt` swaps these
-# two blocks for the not-owned variants below. Keep them verbatim: the
-# substitution is exact.
-REVIEW_DISCOVERY_TASK = '4. The discovery round D0-D5 (references/discovery.md): the checklist-gap table, the probes and\n   their EXECUTED dispositions, the X-* findings and the proposed new sweeps, all written under\n   guided_review/round2/. The orchestrator verifies this phase\'s deliverables as a contract:\n   D0 known_index.md names the frozen class range; D1 gap_table.md carries >=25 class rows, each\n   marked COVERED (by which check) or UNCOVERED, with at least one UNCOVERED row; D2 probes.md\n   turns EVERY uncovered row into a probe (P2-...) or records it as an analysis limitation, and\n   every probe row carries its status; D3 probe_results.md executes every probe with a\n   disposition -- a clean probe says "no anomalies -- checked: <locations>", an `unable` probe\n   says why; D4 findings_extra.json and findings_extra.md carry the standard finding shape (id X-NNN, location,\n   category 0-5, check = the gap-row class label, severity, evidence quote, explanation) and no\n   row that merely re-reports a frozen F-* finding; D5 new_sweeps.md carries sweeps.md-shaped\n   proposals (Purpose, Enumeration, Artifact, Finding rules) numbered from M37, or states\n   explicitly that there were no proposals and why; round2_summary.md reports the counts and the\n   round\'s honest limits. A placeholder "# none" round fails the postcheck. The SAME frozen list\n   (verbatim) is handed to the stages that need it: the auditor disposes every X id and the\n   integration stage must reconcile each one in its ledger (ported / kept-base / no-donor-fix), so\n   whatever the revisers resolve from this list is also integrated. The judge panel is COMPLETELY\n   blind to provenance and is never handed your list: it re-derives its own discovery findings\n   over every side, so keep every id stable and every evidence quote exactly locatable in case a\n   judge\'s own pass re-finds the same defect.\n   Discovery findings obey shared rule D8: do not invent a structural requirement (a sentence\n   that reports a fact is not an orphan merely because it lacks its own subheading or reads like\n   a table row). A genuine cohesion/placement finding must name the reader-facing break and\n   propose a CONNECT or RELOCATE fix, never deletion of the fact.'
-
-REVIEW_DISCOVERY_TASK_NOT_OWNED = """4. DISCOVERY ROUND D0-D5 -- NOT RUN in this session: this
-   session's review scope or split does not own it (see the scope/split block below). Do NOT
-   create guided_review/round2/ and do NOT run D0-D5. The postcheck contract printed below is
-   this session's own contract and does not expect the discovery deliverables. Record every
-   discovery-owned check id in the coverage table with the out-of-scope disposition the scope
-   block requires.
-"""
-
-REVIEW_DISCOVERY_OUTPUTS = '  guided_review/round2/        — the complete D0-D5 set: known_index.md, gap_table.md, probes.md,\n                          probe_results.md, findings_extra.json, findings_extra.md, new_sweeps.md and\n                          round2_summary.md (the D0-D5 section below and the postcheck use\n                          this same list; do not deliver only a subset).'
-
-REVIEW_DISCOVERY_OUTPUTS_NOT_OWNED = """  guided_review/round2/        -- NOT produced by this session: its scope/split does not own the
-                          discovery round D0-D5 (so no findings_extra.json/findings_extra.md here).
-"""
-
-
 def review_prompt(sandbox: Path, run_id: str, r: int,
                   caption_limit: int = DEFAULT_CAPTION_LIMIT,
                   zotero: str = DEFAULT_ZOTERO_MODE,
@@ -3936,31 +3455,15 @@ the surface, and the revisers may not change a claim here."""
         ("@@CAPTION_RULE@@", "CAPTION RULE", caption_rule_text(caption_limit, prof)),
     ]
     text = REVIEW_DIRECTIVES
-    # The SAME predicate the generated postcheck contract uses (see
-    # `_postcheck_contract`): a scoped review and split-A do not own the D0-D5
-    # discovery round, so their task list and canonical-output list must not
-    # order it. Leaving those blocks unconditional made one prompt both forbid
-    # the discovery round (in its scope/split block) and call it a verified
-    # contract (in the shared task list).
-    no_discovery = bool(str(scope).strip().lower() != "full"
-                        or (split is not None and split != "b"))
-    if no_discovery:
-        text = text.replace(REVIEW_DISCOVERY_TASK, REVIEW_DISCOVERY_TASK_NOT_OWNED)
-        text = text.replace(REVIEW_DISCOVERY_OUTPUTS,
-                            REVIEW_DISCOVERY_OUTPUTS_NOT_OWNED)
     if split:
         # The canonical schema below is part of REVIEW_DIRECTIVES and names
         # F-001; a split reviewer must see its OWN namespace there too, or the
         # same prompt gives it two incompatible primary id examples.
         first_id = "FA-001" if split == "a" else "FB-001"
-        prefix = first_id.split("-")[0]
         text = text.replace('"id": "F-001"', f'"id": "{first_id}"')
         text = text.replace("(F-001, F-002, ...)", f"({ids})")
-        text = text.replace('"detail": "F-003, F-004"',
-                            f'"detail": "{prefix}-003, {prefix}-004"')
     for token, _title, value in blocks:
         text = text.replace(token, value)
-    text = text.replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
     text = text.replace("@@RUN_ID@@", run_id)
     # Hold the literal, operator-supplied values until every global placeholder
     # pass is complete: a legitimate sandbox name containing `@@ROUND@@`, or a
@@ -3980,14 +3483,7 @@ the surface, and the revisers may not change a claim here."""
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(GUIDED_REVIEW_DIR))
-    # The pre-flight preview reads THIS session's scope and split from the prompt
-    # text; the blocks that declare them are appended below, so pass them too.
-    # Without them the preview would demand the full package's discovery round
-    # from a formatting-writing or split-A session (its own scope block forbids
-    # it) while the client, reading the finished PROMPT.md, would not.
-    text = text.replace("@@SELFCHECK@@", selfcheck_block(
-        "guided_review", run_id, r, sandbox, text + split_block + scope_block,
-        author_to_complete=author_to_complete))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("guided_review", run_id, r))
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     text = text + shared + split_block + scope_block + attached_head(prof) + "\n" \
@@ -4041,8 +3537,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                   guided_review_off: bool = False,
                   insertions_allowed: bool = True,
                   deletions_allowed: bool = True,
-                  prefer_rewrite: bool = False,
-                  soft_deletions: bool = False) -> str:
+                  prefer_rewrite: bool = False) -> str:
     """Phase 2 prompt: $paper-revise, consuming the round's frozen guided_review/ copy."""
     prof = _as_profile(venue)
     audit_block = ("""
@@ -4075,7 +3570,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
             .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite, soft_deletions)
+                                     prefer_rewrite)
     text = apply_rewrite_parity(text, "revise")
     text = apply_hierarchy_reconcile(text, "revise")
     text = apply_evidence_integrity(text, "revise")
@@ -4088,8 +3583,7 @@ def revise_prompt(sandbox: Path, run_id: str, r: int,
                         LANGUAGE_PASS_RULE.replace("@@R6_PATH@@", "revised/work/R6_language.md"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REVISED_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r, sandbox, text,
-                                       author_to_complete=author_to_complete))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("revise", run_id, r))
     text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     shared = shared_blocks()
@@ -4122,13 +3616,12 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     prof = _as_profile(venue)
     text = (AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
-            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE)
+            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
-            .replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
             .replace("@@AUX_FILES_RULE@@", AUX_FILES_RULE)
             .replace("@@DERIVED_OUTPUTS_RULE@@", derived_outputs_rule(prof))
             .replace("@@VALIDATION_RULE@@", validation_block("audit"))
@@ -4142,12 +3635,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     text = apply_evidence_integrity(text, "audit")
     text = render_venue_tokens(text, prof)
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule("audit"))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r, sandbox, text,
-                                      author_to_complete=author_to_complete))
-    # Restore the operator-supplied values only after every @@...@@ pass: a retry
-    # diagnostic that quotes a token must stay verbatim data, not become a rule.
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("audit", run_id, r))
     text = page_stage_prompt(sandbox, AUDIT_NO_NEW_FINDINGS + text + shared_blocks()
                              + AUDIT_TAIL + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
@@ -4157,7 +3645,7 @@ def audit_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
     return apply_author_to_complete_prompt(text, author_to_complete)
 
 
-COLD_START_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+COLD_START_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are the COLD-START REVIEW run @@RUN_ID@@ — round @@ROUND@@ — an INDEPENDENT DISCOVERY
 session inside an
@@ -4371,15 +3859,6 @@ The finding vocabulary below is the one every session uses — classify each fin
 @@DEFECT_CLASS_RULE@@
 @@STANDING_EXEMPTIONS@@
 @@PLACEHOLDER_RULE@@
-@@READ_ONLY_HANDOFF@@
-
-=== COMPLETION MARKER — WRITE IT AS THE VERY LAST STEP ===
-
-@@MARKER_ROOT@@
-Write `_pipeline_done.json` there as the last action, after the pre-flight check below, carrying the
-object the end-of-prompt reminder prints. Your deliverables live in `cold_start_review/`; the
-MARKER does not.
-
 @@SELFCHECK@@
 """
 
@@ -4420,8 +3899,7 @@ Two consequences for this session:
 
 
 def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: str = "",
-                 venue=None, venue_norm: str = "",
-                 author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
+                 venue=None, author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
                  execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                  guided_review_off: bool = False) -> str:
     """The COLD-START REVIEW prompt: a generic, cold-context independent discovery pass.
@@ -4435,29 +3913,22 @@ def cold_start_review_prompt(sandbox: Path, run_id: str, r: int, prior_failure: 
     prof = _as_profile(venue)
     text = (COLD_START_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            # Hold the operator-supplied values until every @@...@@ pass is done:
-            # a sandbox path or retry diagnostic carrying `@@ROUND@@`/`@@SELFCHECK@@`
-            # must not be reinterpreted as template syntax (F95/F96).
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@VERIFIER_MAX@@", str(int(COLD_START_REPRO_MAX_VERIFIERS)))
             .replace("@@VERIFIER_SECONDS@@", str(int(COLD_START_REPRO_TOTAL_BUDGET)))
-            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE)
+            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE)
             .replace("@@DEFECT_CLASS_RULE@@", defect_class_rule(prof))
             .replace("@@STANDING_EXEMPTIONS@@", standing_exemptions_text(prof))
             .replace("@@PLACEHOLDER_RULE@@", placeholder_rule_text(author_to_complete))
-            .replace("@@READ_ONLY_HANDOFF@@", READ_ONLY_HANDOFF_NOTE)
-            .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r, sandbox,
-                                             author_to_complete=author_to_complete)))
+            .replace("@@SELFCHECK@@", selfcheck_block("cold_start_review", run_id, r)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(COLD_START_DIR))
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     # This role is handed NO checklist: it gets the shared taxonomy and evidence
     # rules, not ADOPTED_SWEEPS_BLOCK. `pageable_rule_blocks` also carries the
     # with-checklist block, which no longer occurs in this prompt; the clean
     # variant is registered separately so `medium` still pages it correctly.
     cold_shared = shared_blocks(include_checks=False)
-    text = page_stage_prompt(sandbox, text + cold_shared + COLD_START_TAIL + venue_norm,
+    text = page_stage_prompt(sandbox, text + cold_shared + COLD_START_TAIL,
                              pageable_rule_blocks(prof, author_to_complete)
                              + [("SHARED DECISION RULES", cold_shared)],
                              "cold_start_review", execution_profile)
@@ -4476,8 +3947,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
                      execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                      insertions_allowed: bool = True,
                      deletions_allowed: bool = True,
-                     prefer_rewrite: bool = False,
-                     soft_deletions: bool = False) -> str:
+                     prefer_rewrite: bool = False) -> str:
     """Integration prompt: self/ reworked with ALL the other pool members.
 
     One run per pool member (there are no pairwise arms): the base stays the
@@ -4486,7 +3956,7 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     prof = _as_profile(venue)
     text = (INTEGRATE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@SELF_ID@@", self_id)
             .replace("@@OTHER_IDS@@", ", ".join(other_ids))
@@ -4502,9 +3972,9 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@ZOTERO_CLI_RULE@@",
                      zotero_cli_block("edit", zotero, ZOTERO_LEDGER_INTEGRATED))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
-            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
+            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite, soft_deletions)
+                                     prefer_rewrite)
     text = text.replace("@@DISCOVERY_PARITY@@",
                         discovery_parity_integrate_block(discovery_ids, discovery_dropped))
     text = render_venue_tokens(text, prof)
@@ -4520,13 +3990,9 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@DIFF_LEDGER_RULE@@", DIFF_LEDGER_RULE)
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(INTEGRATED_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r, sandbox, text,
-                                          author_to_complete=author_to_complete))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("integrate", run_id, r))
     text = apply_hierarchy_reconcile(text, "integrate")
     text = apply_evidence_integrity(text, "integrate")
-    # Restore the operator-supplied values only after every @@...@@ pass (F80).
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
     # The policy transform must run BEFORE paging: `page_stage_prompt` writes
     # each matched block into INSTRUCTIONS/PROFILE_RULES.md, so a transform
     # applied only to the returned prompt left the authoritative paged block
@@ -4534,8 +4000,8 @@ def integrate_prompt(sandbox: Path, run_id: str, r: int,
     # file. Transform the assembled text AND the block bodies the page step will
     # match, so both sides stay identical.
     text = apply_author_to_complete_prompt(
-        text + shared_blocks() + "\n" + attached_write_stage_brief("integrate", prof)
-        + INTEGRATE_TAIL + venue_norm,
+        text + shared_blocks() + attached_phase1(prof)
+        + "\n" + ATTACHED_PHASE2 + INTEGRATE_TAIL + venue_norm,
         author_to_complete)
     pageable = [(title, apply_author_to_complete_prompt(block, author_to_complete))
                 for title, block in pageable_rule_blocks(prof, author_to_complete)]
@@ -4552,8 +4018,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
                    execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                    insertions_allowed: bool = True,
                    deletions_allowed: bool = True,
-                   prefer_rewrite: bool = False,
-                   soft_deletions: bool = False) -> str:
+                   prefer_rewrite: bool = False) -> str:
     """The rewrite prompt: one of the round's M rewritten candidates.
 
     Staged FIRST in the round (before the review), and it is a CANDIDATE like
@@ -4563,7 +4028,7 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     level = level if level in REWRITE_LEVELS else rewrite_level_of(index, total)
     text = (REWRITE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@REWRITE_INDEX@@", str(int(index)))
             .replace("@@REWRITE_TOTAL@@", str(int(total)))
@@ -4580,9 +4045,9 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
             .replace("@@DOCX_CLI_RULE@@", docx_cli_block())
             .replace("@@ZOTERO_CLI_RULE@@", zotero_cli_block("rewrite", zotero))
             .replace("@@CAPTION_RULE@@", caption_rule_text(caption_limit, prof))
-            .replace("@@PRIOR_FAILURE@@", _LITERAL_PRIOR_FAILURE))
+            .replace("@@PRIOR_FAILURE@@", prior_failure or PRIOR_FAILURE_NONE))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite, soft_deletions)
+                                     prefer_rewrite)
     text = render_venue_tokens(text, prof)
     text = apply_m19(text, prof)
     text = apply_m20(text, prof)
@@ -4591,15 +4056,11 @@ def rewrite_prompt(sandbox: Path, run_id: str, r: int,
     text = text.replace("@@EVIDENCE_PACK_RULE@@", evidence_pack_block("stage"))
     text = apply_m18(text, caption_limit).replace("@@CAPTION_LIMIT@@", str(int(caption_limit)))
     text = text.replace("@@MARKER_ROOT@@", marker_root_rule(REWRITTEN_DIR))
-    text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r, sandbox, text,
-                                        author_to_complete=author_to_complete))
+    text = text.replace("@@SELFCHECK@@", selfcheck_block("rewrite", run_id, r))
     text = apply_hierarchy_reconcile(text, "rewrite")
     text = apply_evidence_integrity(text, "rewrite")
-    # Restore the operator-supplied values only after every @@...@@ pass (F80).
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    text = text.replace(_LITERAL_PRIOR_FAILURE, prior_failure or PRIOR_FAILURE_NONE)
-    text = page_stage_prompt(sandbox, text + shared_blocks() + "\n"
-                             + attached_write_stage_brief("rewrite", prof)
+    text = page_stage_prompt(sandbox, text + shared_blocks() + attached_head(prof) + "\n"
+                             + attached_phase1(prof) + "\n" + ATTACHED_PHASE2
                              + REWRITE_TAIL + journal_block + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "rewrite", execution_profile)
@@ -4618,7 +4079,7 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
     labels = ", ".join(opponent_labels)
     text = (JUDGE_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
             .replace("@@TARGET_ID@@", target_id)
             .replace("@@JUDGE_INDEX@@", str(int(judge_index)))
@@ -4663,7 +4124,6 @@ def judge_prompt(sandbox: Path, run_id: str, r: int, target_id: str, judge_index
         # The OPT-IN structured-location dedup needs machine-locatable evidence
         # rows; in the default mode this block is never concatenated.
         text += DEDUP_LOCATION_JUDGE_RULE
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
     text = page_stage_prompt(sandbox, text + shared_blocks() + venue_norm,
                              pageable_rule_blocks(prof, author_to_complete),
                              "judge", execution_profile)
@@ -4690,7 +4150,7 @@ JUDGE_PROMPT = judge_prompt
 # REVISION AUDIT + BOUNDED REPAIR (after revise, before integrate/judge)
 # =====================================================================
 
-REVISION_AUDIT_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+REVISION_AUDIT_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are the REVISION AUDITOR — run @@RUN_ID@@, round @@ROUND@@ — inside an orchestrated
 manuscript-revision pipeline. Your sandbox is:
@@ -4758,10 +4218,6 @@ WHAT TO AUDIT — one row per CONFIRMED defect in the revision:
      `work/FACT_VERIFICATION.json` for an identifier; a newly ADDED identifier for new content is
      not a correction, but its own lookup still governs it).
 
-A WRONG-VALUE row (task 3) is decided by the SOURCE HIERARCHY, not by whichever editable surface
-the revision happened to touch:
-@@HIERARCHY_RECONCILE@@
-
 DELETED-PARAGRAPH AUDIT — mandatory, and it is not satisfied by the plan alone:
 `revision_audit/DELETED_PARAGRAPHS.md` lists every base prose paragraph whose normalised text is
 absent from `revised/`. A moved, merged or lightly reworded paragraph appears there too: decide
@@ -4773,12 +4229,7 @@ is seeded truncated to a fixed character budget: keep that truncated text exactl
   * `OK — <why no fact is lost>` for a duplicate, artifact or obsolete paragraph, or for a paragraph
     whose every fact, number, definition and claim survives at a NAMED location in `revised/`
     (`OK — merged into Results paragraph 3; all values survive`). Do not write a bare `OK` or repeat
-    one generic sentence: the orchestrator treats repeated boilerplate as an undisposed row. This
-    disposition is CHECKED, not taken on trust: the orchestrator re-reads every `OK` row against the
-    delivered package's own prose, and a numeric value or identifier the paragraph carried that
-    appears nowhere in that prose fails the audit (a value recorded only in
-    `README-AUTHOR-TO-COMPLETE.md` or `MANUAL_STEPS.md` is `manual-required`, not `OK`). A value
-    that must go is `fact removed — RP-xxx` or `manual-required`, never `OK`.
+    one generic sentence: the orchestrator treats repeated boilerplate as an undisposed row.
   * `fact removed — RP-xxx` when a fact, number, definition, method step or claim has no surviving
     carrier, AND add that row to `REPAIR_PLAN.json` with the exact restoration/rewrite. A paragraph
     carrying a fact may not be removed to resolve a finding.
@@ -4787,19 +4238,8 @@ is seeded truncated to a fixed character budget: keep that truncated text exactl
 The audit FAILS (and the stage is retried) while any row's disposition cell is empty. An empty plan
 is still a valid result only after every deleted-paragraph row is disposed.
 
-Every row MUST carry all SIX keys, and the plan reader REJECTS THE WHOLE PLAN -- not merely the
-offending row, which would silently drop a defect you found -- when any row omits a key, leaves
-`location`, `basis`, `edit` or `evidence` empty, quotes neither `wrong` nor `correct`, or names a
-directory instead of ONE file. The six are `location`, `wrong`, `correct`, `basis`, `edit` and
-`evidence`: a LOCATION, the WRONG text or value, the CORRECT value, the BASIS (the exact
-file/line/table/identifier that decides it, re-runnable by another session), the EDIT (the exact
-repair to apply) and the EVIDENCE (what you re-read or re-ran to prove the row). `wrong` and
-`correct` are LITERAL text, not a description: `wrong` quotes the shortest verbatim fragment of the
-named file that contains the change, with its own characters and spacing; `correct` is the exact
-replacement text to write there (it need not already appear in the file). Put the location in
-`location` and the reasoning in `basis`/`edit`. A `wrong` that carries a line number, a parenthetical,
-several separated quotes or an ellipsis is not the text the bounded repair can find or apply, so the
-repair fails on it. A PURE
+For every row you must give a LOCATION, the WRONG text or value, the CORRECT value, and the BASIS
+(the exact file/line/table/identifier that decides it, re-runnable by another session). A PURE
 DELETION has no correct value: put the deleted text in `wrong`, leave `correct` as the empty string
 `""`, and state the deletion in `edit` (`delete the duplicated sentence`); at least one of
 `wrong`/`correct` must be non-empty. If you cannot decide a candidate row, do not guess: put it in
@@ -4816,7 +4256,6 @@ the bounded repair write a new error.
 
 Write only under `revision_audit/`. Never touch `base/`, `revised/`, `guided_review/`, `audit/`, `raw_data/`
 or `code/`.
-@@PLACEHOLDER_RULE@@
 """
 
 
@@ -4824,10 +4263,7 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
                           execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                           insertions_allowed: bool = True,
                           deletions_allowed: bool = True,
-                          prefer_rewrite: bool = False,
-                          soft_deletions: bool = False,
-                          author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE,
-                          journal_block: str = "") -> str:
+                          prefer_rewrite: bool = False) -> str:
     """The REVISION AUDITOR prompt: audit the revision, write the repair plan only.
 
     The audit's REPAIR_PLAN drives the bounded repair, and the repair prompt
@@ -4837,12 +4273,10 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     """
     text = (REVISION_AUDIT_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
-            .replace("@@ROUND@@", str(int(r)))
-            .replace("@@PLACEHOLDER_RULE@@",
-                     placeholder_rule_text(author_to_complete)))
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
+            .replace("@@ROUND@@", str(int(r))))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite, soft_deletions)
+                                     prefer_rewrite)
     # The audit is a full session: it gets the shared decision rules, the source
     # hierarchy and the context-budget rule -- but NOT the general review's
     # adopted-sweeps checklist. This role's object is the REVISION's own delta
@@ -4850,20 +4284,14 @@ def revision_audit_prompt(sandbox: Path, run_id: str, r: int,
     # M1-M36/J1-J5 worklist is a conflicting second mandate rather than useful
     # shared vocabulary (PR151-081).
     shared = shared_blocks(include_checks=False)
-    text = apply_hierarchy_reconcile(text + shared, "revision_audit")
+    text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)
-    text = apply_author_to_complete_prompt(text, author_to_complete)
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    if journal_block:
-        text = text + "\n" + journal_block
-    return page_stage_prompt(
-        sandbox, text,
-        [("SHARED DECISION RULES", shared),
-         ("PLACEHOLDER RULE", placeholder_rule_text(author_to_complete))],
-        "revision_audit", execution_profile)
+    text = apply_author_to_complete_prompt(text)
+    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
+                             "revision_audit", execution_profile)
 
 
-REVISION_REPAIR_DIRECTIVES = ORCHESTRATION_DIRECTIVES_HEADER + """
+REVISION_REPAIR_DIRECTIVES = """ORCHESTRATION DIRECTIVES — READ FIRST (these override anything below where they conflict):
 
 You are the BOUNDED REPAIR session — run @@RUN_ID@@, round @@ROUND@@ — a REVISE-class session inside
 an orchestrated manuscript-revision pipeline. Your sandbox is:
@@ -4876,7 +4304,6 @@ confirmed row(s). You apply that plan to `revised/` and produce the arm's revise
 for the arm before integration. You do not re-review the submission, do not run a discovery hunt,
 and do not re-audit.
 @@CONTENT_EDIT_POLICY@@
-@@PLACEHOLDER_RULE@@
 
 RE-VALIDATE EVERY PLANNED REPAIR BEFORE YOU APPLY IT. The plan is a set of CLAIMS, not instructions.
 For each row: re-read the cited location in `revised/`, compare it with `base/` and the source
@@ -4889,7 +4316,6 @@ with a `rows` list (an empty plan's ledger is `{"rows": []}`):
 Apply only `confirmed` rows. A rejected row gets its exact contradicting evidence in `reason`; do not
 apply it, and do not invent a different repair. A row you cannot check is `rejected` with the missing
 check named. Never accept a plan row merely because the auditor wrote it.
-@@HIERARCHY_RECONCILE@@
 `before` and `after` are QUOTES of the applied text, not a summary of the edit: copy the exact text
 from `revised/` as it stood before the edit and as it stands after it (for a pure insertion leave
 `before` empty and quote the added text as `after`; for a pure deletion leave `after` empty). The
@@ -4926,29 +4352,21 @@ def revision_repair_prompt(sandbox: Path, run_id: str, r: int, rows: int,
                            execution_profile: str = EXECUTION_PROFILE_DEFAULT,
                            insertions_allowed: bool = True,
                            deletions_allowed: bool = True,
-                           prefer_rewrite: bool = False,
-                           soft_deletions: bool = False,
-                           author_to_complete: str = DEFAULT_AUTHOR_TO_COMPLETE) -> str:
+                           prefer_rewrite: bool = False) -> str:
     """The BOUNDED REPAIR prompt: re-validate the plan, apply only confirmed rows."""
     text = (REVISION_REPAIR_DIRECTIVES
             .replace("@@RUN_ID@@", run_id)
-            .replace("@@SANDBOX@@", _LITERAL_SANDBOX)
+            .replace("@@SANDBOX@@", str(sandbox.resolve()))
             .replace("@@ROUND@@", str(int(r)))
-            .replace("@@ROWS@@", str(int(rows)))
-            .replace("@@PLACEHOLDER_RULE@@",
-                     placeholder_rule_text(author_to_complete)))
+            .replace("@@ROWS@@", str(int(rows))))
     text = apply_content_edit_policy(text, insertions_allowed, deletions_allowed,
-                                     prefer_rewrite, soft_deletions)
+                                     prefer_rewrite)
     shared = shared_blocks()
-    text = apply_hierarchy_reconcile(text + shared, "revision_repair")
+    text = apply_hierarchy_reconcile(text + shared, "revise")
     text = with_context_budget(text)
-    text = apply_author_to_complete_prompt(text, author_to_complete)
-    text = text.replace(_LITERAL_SANDBOX, str(sandbox.resolve()))
-    return page_stage_prompt(
-        sandbox, text,
-        [("SHARED DECISION RULES", shared),
-         ("PLACEHOLDER RULE", placeholder_rule_text(author_to_complete))],
-        "revision_repair", execution_profile)
+    text = apply_author_to_complete_prompt(text)
+    return page_stage_prompt(sandbox, text, [("SHARED DECISION RULES", shared)],
+                             "revision_repair", execution_profile)
 
 REVISION_AUDIT_PROMPT = revision_audit_prompt
 REVISION_REPAIR_PROMPT_FN = revision_repair_prompt

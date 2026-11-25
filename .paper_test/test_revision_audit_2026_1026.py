@@ -10,9 +10,9 @@ The general round is:
   → bounded repair (only when the plan is non-empty; re-validating every row)
   → each arm's pre-integration revised version → integration / judge / decision.
 
-The two auditors are optional: `--audit off` skips the review audit, and
-`PAPER_REVISION_AUDIT=off` skips the revision audit (the revised version is then
-final). The suite pins the prompts, the skip, the empty-plan path and the
+The review audit is optional; the post-write revision audit is mandatory.
+Legacy opt-outs cannot suppress it. The suite pins the prompts, the mandatory
+audit, the empty-plan path and the
 one-row repair path against the repo's stub agent.
 """
 from __future__ import annotations
@@ -194,12 +194,12 @@ def test_chain_guards():
     rec["revision_audit"] = {"status": "failed", "error": "bad plan"}
     check("F07 a failed audit is retried", pp.revision_chain_pending(rec))
     rec["revision_audit"] = {"status": "skipped", "reason": "revision audit off"}
-    check("F07 a terminal skip is not re-entered", not pp.revision_chain_pending(rec))
+    check("F07 a legacy skip still owes its mandatory audit", pp.revision_chain_pending(rec))
     rec["revision_audit"] = {"status": "skipped", "reason": "manual mode: re-run that round"}
     check("F07 a manual-mode skip resumes on an automated run",
           pp.revision_chain_pending(rec))
     rec["revision_audit"] = {"status": "done", "rows": 0}
-    check("F07 an empty plan is complete", not pp.revision_chain_pending(rec))
+    check("F07 an empty plan still owes independent final verification", pp.revision_chain_pending(rec))
     rec["revision_audit"] = {"status": "done", "rows": 2}
     check("F07 a non-empty plan with no repair record is pending",
           pp.revision_chain_pending(rec))
@@ -207,17 +207,18 @@ def test_chain_guards():
     check("F07 a finished repair whose postcheck never ran is pending",
           pp.revision_chain_pending(rec))
     rec["revision_chain"] = "complete"
+    rec["write_quality"] = {"status": "done"}
     check("F07 a completed chain is not re-entered", not pp.revision_chain_pending(rec))
 
 
 def test_skip():
-    print("\n== skipping the revision audit leaves the revision final ==")
+    print("\n== legacy opt-outs do not skip the mandatory revision audit ==")
     _, root, r = setup_and_run("rev_audit_skip_", env={"PAPER_REVISION_AUDIT": "off"})
     check("the round completes", r.returncode == 0, (r.stdout or r.stderr)[-300:])
     run_rec = revive(root / "runs" / "r1_a2_revise")
-    check("the skip is recorded", (run_rec.get("revision_audit") or {}).get("status") == "skipped")
+    check("the mandatory audit ran", (run_rec.get("revision_audit") or {}).get("status") == "done")
     sb = root / "runs" / "r1_a2_revise"
-    check("no audit plan is written", not (sb / "revision_audit" / "REPAIR_PLAN.json").exists())
+    check("an audit plan is written", (sb / "revision_audit" / "REPAIR_PLAN.json").exists())
     check("no pre-repair copy is made", not (sb / "revised_prerepair").exists())
 
 
@@ -304,12 +305,10 @@ def test_crash_after_audit_resumes():
           run_rec.get("status") == "done", str(run_rec.get("status")))
 
 
-def test_failed_repair_is_not_fatal():
-    print("\n== a failed bounded repair is recorded, and the postcheck decides ==")
-    # The verification ledger rejected making a failed bounded repair fatal
-    # (F02 is NOT_A_BUG): the repository documents the stage postcheck as the
-    # authority. The wrapper lets the stub write a VALID package, then exits 1
-    # so the repair record is `failed`; the revision must still be accepted.
+def test_failed_repair_blocks_acceptance():
+    print("\n== a failed mandatory bounded repair blocks acceptance ==")
+    # The mandatory quality contract supersedes the previous permissive policy:
+    # even valid-looking output cannot mask a failed repair process.
     tmp = scratch("rev_audit_repair_fail_")
     src = make_source(tmp)
     root = tmp / "root"
@@ -327,16 +326,16 @@ def test_failed_repair_is_not_fatal():
     r = run(["run", "--root", str(root), "--retries", "0",
              "--agent-cmd", json.dumps([sys.executable, str(wrapper)])],
             env={"PAPER_STUB_REVISION_AUDIT_ROWS": "1"})
-    check("the round still completes after the failed repair", r.returncode == 0,
+    check("the round is blocked after the failed repair", r.returncode != 0,
           (r.stdout or r.stderr)[-400:])
     run_rec = revive(root / "runs" / "r1_a2_revise")
     check("the repair failure is recorded",
           (run_rec.get("revision_repair") or {}).get("status") == "failed",
           str(run_rec.get("revision_repair")))
-    check("the failed repair does not fail the accepted revision",
-          run_rec.get("status") == "done", str(run_rec.get("status")))
-    check("the post-repair postcheck ran and completed the chain",
-          run_rec.get("revision_chain") == "complete", str(run_rec.get("revision_chain")))
+    check("the failed repair fails the revision",
+          run_rec.get("status") == "failed", str(run_rec.get("status")))
+    check("the failed chain cannot be marked complete",
+          run_rec.get("revision_chain") == "failed", str(run_rec.get("revision_chain")))
 
 
 def cleanup():
@@ -352,7 +351,7 @@ def main() -> int:
         test_empty_plan()
         test_one_row_repair()
         test_crash_after_audit_resumes()
-        test_failed_repair_is_not_fatal()
+        test_failed_repair_blocks_acceptance()
     finally:
         cleanup()
     print()

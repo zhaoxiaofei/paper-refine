@@ -1960,7 +1960,7 @@ def test_init_mode_conform_stage():
     prompt2 = (root2 / "template_rewrite" / "PROMPT.md").read_text(encoding="utf-8")
     check("init without an official template falls back to guidelines, then convention",
           code2 == 1 and "author guidelines" in out2.getvalue()
-          and "NO official Word template" in prompt2 and "academic convention" in prompt2
+          and "NO applicable official Word template" in prompt2 and "academic convention" in prompt2
           and "COPY each template FILE" not in prompt2
           and not (ctx2.state.get("runs") or {}),
           (out2.getvalue() + err2.getvalue())[-200:])

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 14/25 of the pipeline -- executed by the
+# Part 14/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -98,23 +98,6 @@ def tracking_manifest(ctx: Ctx, tool: str, extra_notes=()) -> dict:
             "notes": list(TRACKING_MANIFEST_NOTES) + list(extra_notes)}
 
 
-def stored_tracking_entries(out_root: Path) -> dict:
-    """{(round, version): entry} from the stored manifest, shape-hardened.
-
-    `read_json` returns whatever JSON value is on disk, and a non-empty JSON
-    list (or scalar) is truthy, so `stored.get("versions")` raised
-    AttributeError out of `track`/`run_difference_tracking`/the template stage
-    instead of rebuilding the auxiliary tree (F019). A non-object manifest is an
-    empty registry; non-object version rows are dropped as stale.
-    """
-    stored = read_json(out_root / TRACKING_MANIFEST) or {}
-    if not isinstance(stored, dict):
-        stored = {}
-    return {(str(v.get("round")), str(v.get("version"))): v
-            for v in stored.get("versions") or []
-            if isinstance(v, dict)}
-
-
 def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
                            extra_notes=()) -> dict:
     """Merge freshly written entries into <root>/tracking/ (manifest + README).
@@ -124,8 +107,10 @@ def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
     disk is replaced by the fresh one.
     """
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
     manifest = tracking_manifest(ctx, tool, extra_notes=extra_notes)
-    prev = stored_tracking_entries(out_root)
+    prev = {(str(v.get("round")), str(v.get("version"))): v
+            for v in stored.get("versions") or []}
     order = list(prev)
     for entry in entries:
         key = (str(entry.get("round")), str(entry.get("version")))
@@ -167,13 +152,7 @@ def tracking_previous_baseline(ctx: Ctx, r: int, vid: str) -> tuple:
     arm = arm_of_vid(vid)
     if arm == "integrate":
         rec = ctx.run(rid_for_fresh(r, vid)) or {}
-        self_id = str(rec.get("self_id") or "")
-        if not self_id:
-            # A pruned/corrupt integration record must not fall back to a1: that
-            # would label the comparison against the wrong version as valid.
-            return "", [], ("the integration record carries no self/ member id "
-                            f"(run {rid_for_fresh(r, vid)} is missing or corrupt): the "
-                            "comparison baseline is UNKNOWN and was skipped")
+        self_id = str(rec.get("self_id") or A1_ID)
         return self_id, corpus_sources(ctx, r, self_id), (
             f"the integration's own base (self/{self_id}: the version this "
             f"integration reworked)")
@@ -239,17 +218,9 @@ def latexdiff_one_pair(base: Path, cand: Path, out: Path,
         rc, stdout, err = None, b"", f"exec error: {e}"
     ok = bool(rc == 0 and stdout.strip())
     if ok:
-        try:
-            out.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write_bytes(tmp_path_for(out), out,
-                                lambda f: f.write(stdout), binary=True)
-        except OSError as e:
-            # The function promises "never raises": a read-only or full
-            # destination used to abort the whole tracking manifest (F257).
-            ok = False
-            err = f"could not write the diff: {e}"
-            with contextlib.suppress(OSError):
-                out.unlink()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_bytes(tmp_path_for(out), out,
+                            lambda f: f.write(stdout), binary=True)
     else:
         with contextlib.suppress(OSError):
             out.unlink()
@@ -344,14 +315,8 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
     note = (f"[LOGGING FALLBACK -- not a tracked-changes document] difference tracking "
             f"against the {baseline} version failed: {reason}")
     try:
-        # The package is agent-written: read it through the regular-file guard
-        # and the payload budget instead of an unbounded `read_bytes()` (F021).
-        # `_docx_root` returns the DOCUMENT PART bytes and its parsed root;
-        # passing the whole ZIP (the old `read_regular_file`) made the
-        # serializer scan the archive for xmlns declarations it cannot see.
-        # Keep the no-follow/size guard before opening the archive.
-        read_regular_file(cand, MAX_PAYLOAD_BYTES)
-        cand_raw, cand_root = _docx_root(cand)
+        cand_raw = cand.read_bytes()
+        _, cand_root = _docx_root(cand)
         body = cand_root.find(_w("body"))
         if body is None:
             raise RuntimeError("the revised document carries no w:body")
@@ -413,14 +378,6 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
             else:
                 new_body.append(copy.deepcopy(_note_para(
                     "[no textual difference found between the two documents]")))
-        # CT_Body requires the body-level `w:sectPr` to be the LAST child. The
-        # copied candidate body carries it before the notes appended above, so
-        # the fallback wrote a w:p AFTER the sectPr -- schema-invalid OOXML that
-        # Word refuses, while the fallback recorded ok=True (F015). Move the
-        # section properties back to the end; everything else keeps its order.
-        for sect in [c for c in list(new_body) if c.tag == _w("sectPr")]:
-            new_body.remove(sect)
-            new_body.append(sect)
         body.clear()
         for child in list(new_body):
             body.append(child)
@@ -428,35 +385,10 @@ def write_docx_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
         out.parent.mkdir(parents=True, exist_ok=True)
 
         def _write_tracked(f) -> None:
-            # The candidate is an AGENT-written package: never decompress a part
-            # just because the central directory declares it small. Inflate each
-            # part through a bounded stream and refuse an over-budget part, so
-            # the outer handler records the copy as unverifiable instead of a
-            # zip-bomb being materialized whole in memory (F131).
-            total = 0
             with zipfile.ZipFile(cand) as zin, \
                     zipfile.ZipFile(f, "w", zipfile.ZIP_DEFLATED) as zout:
                 for item in zin.infolist():
-                    try:
-                        info = zin.getinfo(item.filename)
-                    except KeyError:
-                        continue
-                    if int(info.file_size) > MAX_DOCX_PART_BYTES:
-                        raise ValueError(
-                            f"tracking copy refused: part {item.filename} declares "
-                            f"{info.file_size} decompressed bytes (budget "
-                            f"{MAX_DOCX_PART_BYTES})")
-                    with zin.open(info) as fh:
-                        data = fh.read(MAX_DOCX_PART_BYTES + 1)
-                    if len(data) > MAX_DOCX_PART_BYTES:
-                        raise ValueError(
-                            f"tracking copy refused: part {item.filename} exceeds the "
-                            f"{MAX_DOCX_PART_BYTES}-byte decompression budget")
-                    total += len(data)
-                    if total > MAX_DOCX_TOTAL_BYTES:
-                        raise ValueError(
-                            f"tracking copy refused: the package exceeds the "
-                            f"{MAX_DOCX_TOTAL_BYTES}-byte decompression budget")
+                    data = zin.read(item.filename)
                     if item.filename == "word/document.xml":
                         data = payload
                     zout.writestr(item, data)
@@ -477,44 +409,27 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
                                 reason: str) -> dict:
     """The `.logging-*` fallback for a `.tex`/`.bib` pair (never raises).
 
-    A `.tex` fallback is inert because every line is commented out. BibTeX has
-    NO line-comment character, so a `%`-prefixed `.bib` still parses the diff's
-    `@entry` lines; a `.bib` fallback is therefore wrapped in one balanced
-    `@comment{...}` entry (BibTeX ignores it), with the diff's own braces shown
-    as parentheses so the comment cannot close early.
+    Every emitted line is commented out, so the file is inert if a build tool
+    picks it up; the content is a unified before/after diff the reader can
+    inspect without any LaTeX toolchain.
     """
     def read_lines(p: Path) -> list:
-        # The diff reads two AGENT-written files; bound each one exactly like
-        # every other package read (F021).
-        text = read_text_bounded(p, limit=PACKAGE_TEXT_BYTES_LIMIT)
-        if text is None:
-            return [f"[unreadable: non-regular, symlinked or over the "
-                    f"{PACKAGE_TEXT_BYTES_LIMIT}-byte budget: {Path(p).name}]"]
-        return text.splitlines()
+        try:
+            return p.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError as e:                                    # noqa: BLE001
+            return [f"[unreadable: {type(e).__name__}: {e}]"]
 
-    is_bib = out.suffix.lower() == ".bib"
     lines = [
         f"LOGGING FALLBACK -- not a latexdiff copy of {cand.name}",
         f"difference tracking against the {baseline} version failed: {reason}",
-        ("the unified diff below is inside one balanced @comment entry (BibTeX has no "
-         "line-comment character; braces in the diff are shown as parentheses)"
-         if is_bib else
-         "the unified diff below is commented out (TeX treats a leading % as a comment)"),
+        "the unified diff below is commented out (both TeX and BibTeX treat a leading % as "
+        "a comment)",
         "", f"--- {base.name}", f"+++ {cand.name}"]
     lines += list(difflib.unified_diff(read_lines(base), read_lines(cand),
                                        fromfile=base.name, tofile=cand.name, lineterm=""))[2:]
-    if is_bib:
-        text = "@comment{\n" + "\n".join(lines).replace("{", "(").replace("}", ")") + "\n}\n"
-    else:
-        text = "\n".join("% " + ln for ln in lines) + "\n"
+    out.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # The parent mkdir used to sit OUTSIDE the guard and the try: a regular
-        # file at the parent raised FileExistsError out of a function documented
-        # to never raise, and a symlinked per-version dir created a directory
-        # outside --root before the write was refused (F118).
-        _refuse_symlinked_parent(out)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(out, text)
+        write_text_atomic(out, "\n".join("% " + ln for ln in lines) + "\n")
     except OSError as e:                                        # noqa: BLE001
         return {"ok": False, "error": f"the logging fallback could not be written: {e}"}
     return {"ok": True, "out": out}
@@ -522,10 +437,8 @@ def write_text_logging_fallback(base: Path, cand: Path, out: Path, baseline: str
 
 def redline_index(manifest: dict) -> dict:
     """{(round, version, source, revised_rel): comparison} from a redlines manifest."""
-    if not isinstance(manifest, dict):
-        return {}
     out = {}
-    for v in manifest.get("versions") or []:
+    for v in (manifest or {}).get("versions") or []:
         for c in v.get("comparisons") or []:
             out[(int(v.get("round") or 0), str(v.get("version") or ""),
                  str(c.get("source") or ""), str(c.get("revised_rel") or ""))] = c
@@ -564,34 +477,15 @@ def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
         entry["skipped"].append({"baseline": token, "reason": "no base corpus"})
         return
     for ext in TRACKABLE_EXTS:
-        unreadable_base, unreadable_cand = [], []
-        pairs, unmatched_base, unmatched_cand = match_track_pairs(
-            base_sources, srcs, ext, base_problems=unreadable_base,
-            cand_problems=unreadable_cand)
-        # An unreadable file is not an absent counterpart: record the real
-        # error instead of blaming the other side (same defect as F173).
-        bad_base = {p["rel"] for p in unreadable_base}
-        bad_cand = {p["rel"] for p in unreadable_cand}
+        pairs, unmatched_base, unmatched_cand = match_track_pairs(base_sources, srcs, ext)
         for rel in unmatched_base:
-            if rel in bad_base:
-                continue
             entry["skipped"].append({
                 "baseline": token, "base_rel": rel,
                 "reason": f"no corresponding {ext} in this version"})
         for rel in unmatched_cand:
-            if rel in bad_cand:
-                continue
             entry["skipped"].append({
                 "baseline": token, "revised_rel": rel,
                 "reason": f"new {ext} with no counterpart in the {token} baseline"})
-        for prob in unreadable_base:
-            entry["skipped"].append({
-                "baseline": token, "base_rel": prob["rel"],
-                "reason": f"unreadable trackable file (not compared): {prob['error']}"})
-        for prob in unreadable_cand:
-            entry["skipped"].append({
-                "baseline": token, "revised_rel": prob["rel"],
-                "reason": f"unreadable trackable file (not compared): {prob['error']}"})
         for pair in pairs:
             # Which redlines-tree label may stand in for THIS pair: the original
             # baseline is `from-original`; a baseline that really is the round
@@ -654,7 +548,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     """
     rounds = [int(r) for r in (rounds if rounds is not None
                                else range(1, ctx.rounds_count() + 1))]
-    versions = None if versions is None else list(versions)
+    versions = list(versions) if versions else None
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
     index = redline_index(redlines_manifest)
     manifest = tracking_manifest(ctx, tool)
@@ -667,26 +561,13 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     # copies themselves persist, so dropping their rows would make the manifest
     # claim the tree is empty. A full `run` therefore ends with one manifest
     # covering every round it tracked.
-    prev_versions = stored_tracking_entries(out_root)
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    prev_versions = {(str(v.get("round")), str(v.get("version"))): v
+                     for v in stored.get("versions") or []}
     version_order = [k for k in prev_versions]
 
     def put_version(entry: dict) -> None:
         key = (str(entry.get("round")), str(entry.get("version")))
-        old = prev_versions.get(key)
-        if entry.get("status") == "not materialized" and old \
-                and (old.get("comparisons") or []):
-            # A version whose sources are temporarily absent must not REPLACE
-            # its accumulated rows with a placeholder: keep the real rows and
-            # record the missing source as a skip.
-            row = {
-                "source": "this invocation",
-                "reason": "the version's sources were not found; the earlier rows were kept"}
-            skipped = old.setdefault("skipped", [])
-            # Re-running after a prune must not append the IDENTICAL skip row
-            # again: the manifest grew without bound (F085).
-            if row not in skipped:
-                skipped.append(row)
-            return
         if key not in prev_versions:
             version_order.append(key)
         prev_versions[key] = entry
@@ -736,12 +617,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
         # previous round's winner (the `winner<r-1>` token).
         wrec = ctx.round_get(r) or {}
         wname = str(wrec.get("winner_dir") or "")
-        # `winner_dir` is a state record, not a trusted path: an absolute or
-        # `../` value must not make tracking read (and docx-parse) outside the
-        # root. `contained_under` is the same guard `decide` applies.
-        # A tracking copy is an audit aid: a damaged state path must be a
-        # skipped row, never a SystemExit out of the run (F213).
-        wdir = contained_under_or_none(ctx.root, wname) if wname else None
+        wdir = (ctx.root / wname) if wname else None
         if wdir is None or not wdir.is_dir():
             continue
         winner_srcs = [(wdir, "", ())]
@@ -821,23 +697,14 @@ def _tracking_write_copy(src, dest) -> None:
     if dest.is_symlink():
         dest.unlink()
     dest.parent.mkdir(parents=True, exist_ok=True)
-    src = Path(src)
+    tmp = dest.with_name(f".{dest.name}.track-{os.getpid()}-{time.time_ns()}")
     try:
-        src_mode = stat.S_IMODE(os.stat(src).st_mode)
-    except OSError:
-        src_mode = None
-
-    def _copy(f) -> None:
-        with open(src, "rb") as sf:
-            shutil.copyfileobj(sf, f)
-
-    # tmp_path_for reserves a random O_EXCL|O_NOFOLLOW sibling and
-    # _atomic_write_bytes reopens it without following a path swap. A fixed
-    # `.{name}.track-{pid}-{time_ns}` name was predictable: an agent that can
-    # write the tracking directory pre-created a symlink there and copy2 then
-    # overwrote the link's target outside the root.
-    _atomic_write_bytes(tmp_path_for(dest), dest, _copy, binary=True,
-                        mode=src_mode)
+        shutil.copy2(src, tmp)
+        os.replace(tmp, dest)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def tracking_summary_line(entry: dict, where: str = "") -> str:
@@ -851,19 +718,6 @@ def tracking_summary_line(entry: dict, where: str = "") -> str:
             + (f", {skipped} skipped" if skipped else "")
             + (f", {failed} FAILED" if failed else ""))
     return line + (f" -> {where}" if where else "")
-
-
-def _tracking_regular_file(p: Path) -> bool:
-    """Is `p` a REGULAR file (never a symlink)?
-
-    The freshness check used `Path.is_file()`, which follows a link a staged
-    agent can plant at the recorded output path, making a missing/stale copy
-    look fresh so the round-close pass never regenerates it (F209).
-    """
-    try:
-        return stat.S_ISREG(Path(p).lstat().st_mode)
-    except OSError:
-        return False
 
 
 def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) -> bool:
@@ -885,15 +739,7 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
             if not token or not any(s.is_dir() for s, _p, _e in base_sources):
                 continue
             for ext in TRACKABLE_EXTS:
-                # An unreadable document is a PROBLEM, not an absence:
-                # list_track_files drops it, expected and have then agree, and
-                # a stale entry was declared fresh (F212).
-                base_problems, cand_problems = [], []
-                pairs, _ub, _uc = match_track_pairs(
-                    base_sources, srcs, ext,
-                    base_problems=base_problems, cand_problems=cand_problems)
-                if base_problems or cand_problems:
-                    return False
+                pairs, _ub, _uc = match_track_pairs(base_sources, srcs, ext)
                 for pair in pairs:
                     expected[(token, ext, pair["base_rel"], pair["cand_rel"])] = (
                         pair["base_digest"], pair["cand_digest"])
@@ -903,23 +749,8 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                 return False
             fallback = bool(c.get("fallback"))
             out_rel = c.get("fallback_out") if fallback else c.get("out")
-            # `ctx.root / "/etc/passwd"` discards the root: a tampered or merged
-            # manifest row certified a pipeline copy outside --root (F145).
-            out_path = contained_under_or_none(ctx.root, out_rel)
-            if out_path is None:
+            if not out_rel or not (ctx.root / str(out_rel)).is_file():
                 return False
-            # Stat the RECORDED path, not its resolved target: a symlink at the
-            # copy path must read as stale (F209) even when it points inside
-            # the root.
-            _raw_out = Path(str(out_rel))
-            out_check = _raw_out if _raw_out.is_absolute() else ctx.root / _raw_out
-            if not _tracking_regular_file(out_check):
-                return False
-            in_pkg_path = (contained_under_or_none(ctx.root, c.get("in_package"))
-                           if c.get("in_package") else None)
-            if c.get("in_package"):
-                if in_pkg_path is None:
-                    return False
             in_pkg = c.get("in_package")
             if in_pkg:
                 if fallback:
@@ -927,39 +758,34 @@ def tracking_entry_is_fresh(ctx: Ctx, entry: dict, baselines: list, srcs: list) 
                     # suffix (the recorded `in_package` path names the real
                     # copy's name), so it is derived, never assumed. A stale
                     # REAL copy beside it means the fallback is not fresh.
-                    _raw_in = Path(str(in_pkg))
-                    in_chk = _raw_in if _raw_in.is_absolute() else ctx.root / _raw_in
-                    if _tracking_regular_file(in_chk):
+                    if (ctx.root / str(in_pkg)).is_file():
                         return False
-                    sib = in_chk.parent / (
+                    sib = (ctx.root / str(in_pkg)).parent / (
                         Path(str(c.get("revised_rel"))).stem
                         + tracking_aux_suffix(str(c.get("baseline")), str(c.get("ext")),
                                               fallback=True))
                 else:
-                    _raw_in = Path(str(in_pkg))
-                    sib = _raw_in if _raw_in.is_absolute() else ctx.root / _raw_in
-                if not _tracking_regular_file(sib):
+                    sib = ctx.root / str(in_pkg)
+                if not sib.is_file():
                     return False
             if c.get("pdf_ok"):
                 # The compiled marked-up PDF is part of the same auxiliary
                 # family: a row whose PDF vanished is refreshed, not reused.
                 for field in ("pdf", "pdf_in_package"):
-                    if contained_under_or_none(ctx.root, c.get(field)) is None:
-                        return False
-                    _raw_pdf = Path(str(c.get(field)))
-                    pdf_path = _raw_pdf if _raw_pdf.is_absolute() else ctx.root / _raw_pdf
-                    if not _tracking_regular_file(pdf_path):
+                    rel = c.get(field)
+                    if not rel or not (ctx.root / str(rel)).is_file():
                         return False
             elif c.get("ext") == ".tex" and c.get("in_package") \
-                    and not c.get("fallback") \
+                    and not c.get("fallback") and not c.get("pdf_error") \
                     and not str(c.get("pdf_skipped") or "").startswith("not a LaTeX root"):
-                # A .tex row with NO recorded PDF outcome -- or one whose
-                # compile FAILED (a transient latexmk/package/disk problem) --
-                # predates a usable PDF. Retrying on the next round-close pass
-                # is bounded by the round count; keeping a recorded pdf_error
-                # fresh meant the PDF was never retried (F258). A
-                # LOGGING-FALLBACK row is excluded: compile_tracking_pdfs never
-                # compiles one (a commented-out diff is not a document).
+                # A .tex row with NO recorded PDF outcome -- or one skipped for
+                # a reason the current code no longer uses ("the copy carries no
+                # latexdiff markup") -- predates the tracking-PDF step: refresh
+                # it instead of keeping a PDF-less entry. A LOGGING-FALLBACK row
+                # is excluded: compile_tracking_pdfs never compiles one (a
+                # commented-out diff is not a document), so judging it by the
+                # missing PDF would make every fallback row permanently stale and
+                # the round-close pass would re-drive the tools it exists to skip.
                 return False
             have[(c.get("baseline"), c.get("ext"), c.get("base_rel"),
                   c.get("revised_rel"))] = (c.get("base_digest"), c.get("cand_digest"))
@@ -1031,7 +857,9 @@ def track_template_stage(ctx: Ctx, sb, *, quiet: bool = False) -> dict:
     baselines = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
                   "the pre-conformed submission (non_revised/)")]
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
-    prev = stored_tracking_entries(out_root)
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    prev = {(str(v.get("round")), str(v.get("version"))): v
+            for v in stored.get("versions") or []}
     key = ("1", A1_ID)
     if key in prev and tracking_entry_is_fresh(ctx, prev[key], baselines, srcs):
         return {"ok": True, "entry": prev[key], "skipped": True}
@@ -1116,8 +944,7 @@ def _track_tex_ref_target(name: str, cmd: str) -> tuple:
     return p.as_posix() + target, target
 
 
-def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict,
-                        pkg_root: Path = None) -> tuple:
+def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict) -> tuple:
     """Point a latexdiff copy's file references at the TRACKED siblings.
 
     `tracked` maps a usable tracked file's ORIGINAL corpus-relative path
@@ -1143,19 +970,6 @@ def rewire_tracking_tex(text: str, tex_path: Path, tracked: dict,
                 continue
             rel, _ext = _track_tex_ref_target(name, cmd)
             target = tracked.get(rel) or tracked.get(name)
-            if target is None and pkg_root is not None:
-                # A reference written from a SUBDIRECTORY master
-                # (`\input{../sections/intro}`) must resolve against the
-                # master's package-relative directory before lookup, or the
-                # tracked include is never found and the PDF renders the
-                # untracked file (F256).
-                try:
-                    _dir = Path(tex_path).parent.relative_to(Path(pkg_root)).as_posix()
-                except (OSError, ValueError):
-                    _dir = ""
-                if _dir:
-                    _cand = os.path.normpath(os.path.join(_dir, rel)).replace(os.sep, "/")
-                    target = tracked.get(_cand)
             if target is None:
                 new_names.append(name)
                 continue
@@ -1209,14 +1023,7 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
             if rel:
                 # Keyed by (baseline token, rel path): the tracked include/
                 # bibliography for a token is only valid for that token's copy.
-                # A row records the INTENDED in-package path even when writing
-                # the copy failed, so only an existing file may be rewired.
-                _p = ctx.root / str(c["in_package"])
-                if _p.is_file():
-                    tracked[(str(c.get("baseline") or ""), rel)] = _p
-                else:
-                    c["pdf_error"] = (f"the in-package tracking copy {c['in_package']} "
-                                      f"is missing; the include pointer was left untouched")
+                tracked[(str(c.get("baseline") or ""), rel)] = ctx.root / str(c["in_package"])
     memo = {}
     for c in rows:
         if not c.get("ok") or c.get("ext") != ".tex" or not c.get("tool"):
@@ -1227,29 +1034,18 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
             continue
         src = ctx.root / str(c["in_package"])
         token = str(c.get("baseline") or "")
-        # The package root is the ancestor the row's own rel path descends to
-        # (the file name is the tracked spelling, so the depth is unchanged).
-        pkg = src
-        for _part in Path(str(c.get("revised_rel") or "")).parts:
-            pkg = pkg.parent
         if not src.is_file():
             c["pdf_ok"], c["pdf_error"] = False, "the tracking .tex is missing"
             continue
         try:
-            # An agent-written tracking .tex: bounded/regular-file read (F021).
-            text = read_text_bounded(src, limit=PACKAGE_TEXT_BYTES_LIMIT)
-            if text is None:
-                c["pdf_ok"] = False
-                c["pdf_error"] = ("the tracking .tex is non-regular, symlinked or over "
-                                  "the text budget")
-                continue
+            text = src.read_text(encoding="utf-8", errors="replace")
             if not re.search(r"\\documentclass\b", text):
                 # A fragment is compiled through its master; standalone it is
                 # not a document (`!\begin{document}`).
                 c["pdf_skipped"] = "not a LaTeX root (a fragment compiled through its master)"
                 continue
             token_refs = {rel: path for (tok, rel), path in tracked.items() if tok == token}
-            new_text, rewrites = rewire_tracking_tex(text, src, token_refs, pkg_root=pkg)
+            new_text, rewrites = rewire_tracking_tex(text, src, token_refs)
             if rewrites:
                 c["ref_rewrites"] = rewrites
                 for target in (src, ctx.root / str(c.get("out") or "")):
@@ -1272,13 +1068,9 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
         digest = sha256_file(src)
         earlier = memo.get(digest)
         if earlier is not None:
-            try:
-                shutil.copy2(earlier, out_pdf)
-                res = {"ok": True, "tool": "copied-from-identical-tracking-tex",
-                       "pages": _pdf_page_count(out_pdf), "error": None}
-            except OSError as e:
-                res = {"ok": False, "tool": "copied-from-identical-tracking-tex",
-                       "pages": 0, "error": f"could not copy the identical PDF: {e}"}
+            shutil.copy2(earlier, out_pdf)
+            res = {"ok": True, "tool": "copied-from-identical-tracking-tex",
+                   "pages": _pdf_page_count(out_pdf), "error": None}
         else:
             try:
                 rel_in_pkg = src.relative_to(pkg).as_posix()
@@ -1298,18 +1090,10 @@ def compile_tracking_pdfs(ctx: Ctx, entry: dict, *, quiet: bool = False) -> None
         c["pdf_in_package"] = out_pdf.relative_to(ctx.root).as_posix()
         if c.get("out"):
             mirror_pdf = (ctx.root / str(c["out"])).with_suffix(TRACKING_PDF_EXT)
-            try:
-                mirror_pdf.parent.mkdir(parents=True, exist_ok=True)
-                tracking_force_writable(mirror_pdf)
-                shutil.copy2(out_pdf, mirror_pdf)
-                c["pdf"] = mirror_pdf.relative_to(ctx.root).as_posix()
-            except OSError as e:
-                # A mirror is a convenience; the in-package PDF exists. Record
-                # the failure instead of aborting the whole manifest (F257).
-                c["pdf_mirror_error"] = str(e)
-                if not quiet:
-                    print(f"  [track] PDF WARNING: could not mirror "
-                          f"{c.get('revised_rel')}: {e}")
+            mirror_pdf.parent.mkdir(parents=True, exist_ok=True)
+            tracking_force_writable(mirror_pdf)
+            shutil.copy2(out_pdf, mirror_pdf)
+            c["pdf"] = mirror_pdf.relative_to(ctx.root).as_posix()
         memo.setdefault(digest, out_pdf)
 
 
@@ -1343,9 +1127,6 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     persist_root = ctx.root / TRACKING_DIRNAME / (out_key or f"r{r}_{vid}") / token
     persist_out = persist_root / rel_dir / f"{cand.stem}{suffix}"
     persist_fallback = persist_root / rel_dir / f"{cand.stem}{fb_suffix}"
-    # A planted symlink at tracking/<ver>/<token>/... redirected the plain
-    # mkdir+copy2 writes outside the root; only the in-package copy was guarded
-    # (F021).
     # The in-package copy: written beside the candidate document, EXCEPT for the
     # a1 base, whose `base/` is a raw hash-verified input manifest (writing into
     # it would read as a modified input). a1 keeps its copies under <root>/tracking/.
@@ -1364,29 +1145,10 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
            "base_digest": pair.get("base_digest"), "cand_digest": pair.get("cand_digest"),
            "fallback": None, "fallback_out": None, "tool": None, "ok": False,
            "attempts": [], "warning": None, "identical": False, "reused_from": None}
-    # A planted symlink at tracking/<ver>/<token>/... must not redirect the
-    # plain mkdir+copy2 writes outside the root (F021). A refusal is a RECORDED
-    # attempt, never a raise (the tracking pass reports, the round continues).
-    try:
-        _refuse_symlinked_parent(persist_out)
-        _refuse_symlinked_parent(persist_fallback)
-    except OSError as e:
-        rec["warning"] = f"difference tracking failed: {e}"
-        rec["attempts"] = [{"backend": "output-guard", "cmd": [], "rc": None,
-                            "ok": False, "detail": str(e)}]
-        return rec
     if tool == "none":
         # `--tool none` asks for NO difference tool at all (the same contract as
         # `redline --tool none`): the row is reported as skipped and no copy --
         # not even a logging fallback -- is written for the pair.
-        # `tool=none` must also REMOVE an older real copy at this pair's
-        # destination: leaving it there makes the manifest's "skipped" row
-        # contradict a tracked copy that still sits beside the candidate.
-        for _stale in (persist_out, persist_fallback, in_pkg_out):
-            if _stale is not None:
-                for _p in (Path(_stale), Path(_stale).with_suffix(TRACKING_PDF_EXT)):
-                    with contextlib.suppress(OSError):
-                        _p.unlink(missing_ok=True)
         rec["skipped"] = True
         rec["reason"] = "tool=none: only the manifest/report was requested"
         return rec
@@ -1402,7 +1164,7 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     key = (pair["base_digest"], pair["cand_digest"], ext, memo_dir)
     if memo is not None and memo.get(key):
         earlier = ctx.root / str(memo[key])
-        if earlier.is_file() and earlier.resolve() != persist_out.resolve():
+        if earlier.is_file():
             persist_out.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(earlier, persist_out)
             rec["ok"] = True
@@ -1469,13 +1231,10 @@ def track_one_pair(ctx: Ctx, r: int, vid: str, token: str, ext: str, pair: dict,
     # A failed re-track must not leave the PREVIOUS real tracking copy beside
     # the new document: its name says "tracked copy of this version", and the
     # fallback branch of the freshness gate only looked at the logging sibling.
-    # The PDF siblings of an earlier SUCCESSFUL run say "tracked copy" too; the
-    # fallback path used to leave them beside the document.
     for _stale in (persist_out, in_pkg_out):
         if _stale is not None:
-            for _p in (Path(_stale), Path(_stale).with_suffix(TRACKING_PDF_EXT)):
-                with contextlib.suppress(OSError):
-                    _p.unlink(missing_ok=True)
+            with contextlib.suppress(OSError):
+                Path(_stale).unlink(missing_ok=True)
     if ext == ".docx":
         fb = write_docx_logging_fallback(base, cand, persist_fallback, token, reason)
     else:
@@ -1565,12 +1324,8 @@ def tracking_readme(manifest: dict) -> str:
     if not skipped:
         L.append("- (none)")
     for r, vid, s in skipped:
-        # The table rows above go through `_md_cell`; these bullets interpolated
-        # the reason RAW, so an OSError or a tool's stderr carrying a newline
-        # injected extra Markdown lines (F019). Escape path and reason alike.
-        L.append(f"- r{r} {vid}: "
-                 f"{_md_cell(s.get('base_rel') or s.get('revised_rel') or '', 80)} "
-                 f"({_md_cell(s.get('baseline'))}) -- {_md_cell(s['reason'], 240)}")
+        L.append(f"- r{r} {vid}: {s.get('base_rel') or s.get('revised_rel') or ''} "
+                 f"({s.get('baseline')}) -- {s['reason']}")
     L += ["", "## Notes", ""] + [f"- {n}" for n in manifest.get("notes") or []]
     L.append("")
     return "\n".join(L)
@@ -1591,47 +1346,26 @@ def _cmd_track_locked(ctx: Ctx, args) -> None:
         try:
             cmd_template = json.loads(args.redline_cmd)
         except ValueError:
-            die("--redline-cmd must be a JSON argv list", code=2)
+            die("--redline-cmd must be a JSON argv list")
         if not isinstance(cmd_template, list) or not cmd_template:
-            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}", code=2)
+            die("--redline-cmd must be a non-empty JSON argv list with {base}/{revised}/{out}")
     if args.round is not None and int(args.round) < 1:
-        die(f"--round takes a 1-based round number, got {args.round!r}", code=2)
-    if args.round is not None and int(args.round) > ctx.rounds_count():
-        die(f"--round {int(args.round)} does not exist: this pipeline root is configured "
-            f"with {ctx.rounds_count()} round(s) (rounds are 1-based)", code=2)
+        die(f"--round takes a 1-based round number, got {args.round!r}")
     rounds = [int(args.round)] if args.round else None
     versions = (None if args.version == "all"
-                else list(dict.fromkeys(
-                    v.strip() for v in str(args.version).split(",") if v.strip())))
+                else [v.strip() for v in str(args.version).split(",") if v.strip()])
     if versions is not None and not all(is_fresh_vid(v) for v in versions):
         bad = [v for v in versions if not is_fresh_vid(v)]
         die(f"--version takes a round-local candidate version id or a comma-separated list "
-            f"of them, or 'all'; got {', '.join(bad)}", code=2)
+            f"of them, or 'all'; got {', '.join(bad)}")
     print(f"[track] root={ctx.root} tool={args.tool} rounds={rounds or 'all'} "
           f"versions={versions or 'all versions of each round'}")
     manifest = run_difference_tracking(ctx, rounds=rounds, versions=versions, tool=args.tool,
                                        redline_cmd=cmd_template)
     tracking_summary(manifest, rounds=rounds)
-    # A requested version that was never materialized produces ZERO comparison
-    # rows, so the summary said "0 tracked copy(ies)" and `track` exited 0 while
-    # `redline` (fixed as F034) exited 4 for the same input. Mirror that check
-    # (F138).
-    selected_rounds = set(rounds or range(1, ctx.rounds_count() + 1))
-    have_versions = {(v.get("round"), str(v.get("version")))
-                     for v in manifest["versions"]
-                     if v.get("round") in selected_rounds
-                     and str(v.get("status") or "") != "not materialized"}
-    missing_versions = ([vid for vid in versions
-                         if not any(ver == vid for _r, ver in have_versions)]
-                        if versions is not None else [])
-    if missing_versions:
-        print(f"[track] {len(missing_versions)} requested version(s) were never materialized "
-              f"in the selected round(s): {', '.join(missing_versions)}")
     if not getattr(args, "no_pdf", False):
         pdfs = run_pdf_conversion(ctx, rounds=rounds, versions=versions)
         pdf_summary(pdfs, rounds=rounds)
-    if missing_versions:
-        sys.exit(4)
 
 
 def tracking_summary(manifest: dict, rounds=None) -> None:

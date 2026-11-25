@@ -20,6 +20,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from write_quality_fixture_lib import audit_fixture
 
 WS = Path(os.environ.get("PAPER_WS") or Path(__file__).resolve().parent.parent)
 spec = importlib.util.spec_from_file_location("paper_audit", str(WS / "paper_pipeline.py"))
@@ -160,6 +161,7 @@ def main() -> int:
             r = ctx1.register(sandbox, {"a2": "revise", "w1": "rewrite"}.get(vid, "integrate"), 1,
                               f"runs/{sandbox}", source_id="a1", produces=vid)
             r["status"] = "done"
+            audit_fixture(nb, ctx1, r)
             r["corpus_digest"] = nb.recompute_corpus_digest(ctx1, 1, vid)
             r["content_fingerprint"] = nb.corpus_content_fingerprint(ctx1, 1, vid)
             stamps[vid] = when

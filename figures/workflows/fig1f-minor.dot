@@ -1,0 +1,37 @@
+digraph workflow {
+graph [rankdir=TB, bgcolor="white", pad=0.18, nodesep=0.24, ranksep=0.33, fontname="DejaVu Sans", fontsize=15, labelloc=t, label="(f) Minor revision"];
+node [shape=box, style="rounded,filled", color="#475569", penwidth=0.8, fontname="DejaVu Sans", fontsize=10, margin="0.14,0.08"];
+edge [color="#475569", arrowsize=0.65, fontname="DejaVu Sans", fontsize=8];
+source [label="Original manuscript + read-only evidence", fillcolor="#F1F5F9"];
+feedback [label="Journal / permitted LLM feedback", fillcolor="#F1F5F9"];
+concerns [label="Concern assessor\nread/report only", fillcolor="#DCFCE7"];
+feedback -> concerns [label=""];
+source -> concerns [label=""];
+revise [label="Concern-scoped reviser", fillcolor="#DBEAFE"];
+revise_audit [label="Independent write auditor", fillcolor="#DCFCE7"];
+revise_repair [label="Bounded repair\nreverify every planned row", fillcolor="#DBEAFE"];
+revise_verify [label="Independent final verifier", fillcolor="#DCFCE7"];
+revise_accept [label="Code checks + exact-byte acceptance", fillcolor="#FEF3C7"];
+revise -> revise_audit [label=""];
+revise_audit -> revise_repair [label="repairable rows"];
+revise_repair -> revise_verify [label=""];
+revise_audit -> revise_verify [label="empty plan"];
+revise_verify -> revise_accept [label="passes"];
+concerns -> revise [label=""];
+source -> revise [label=""];
+response [label="Response writer\nletter + concern map", fillcolor="#DBEAFE"];
+response_audit [label="Independent write auditor", fillcolor="#DCFCE7"];
+response_repair [label="Bounded repair\nreverify every planned row", fillcolor="#DBEAFE"];
+response_verify [label="Independent final verifier", fillcolor="#DCFCE7"];
+response_accept [label="Code checks + exact-byte acceptance", fillcolor="#FEF3C7"];
+response -> response_audit [label=""];
+response_audit -> response_repair [label="repairable rows"];
+response_repair -> response_verify [label=""];
+response_audit -> response_accept [label="empty plan"];
+response_verify -> response_accept [label="passes"];
+revise_accept -> response [label="final manuscript"];
+concerns -> response [label="concern ledger"];
+output [label="Code publication\njournal submission + response", fillcolor="#F1F5F9"];
+revise_accept -> output [label=""];
+response_accept -> output [label=""];
+}

@@ -1,4 +1,4 @@
-# Part 19/25 of the pipeline -- executed by the loader, in order, in the
+# Part 19/21 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string
@@ -153,69 +153,12 @@ text seem to disagree, the CONTRADICTION RULE below decides, and a
 reading-economy hint never relaxes a stage obligation.
 """
 
-#: The contract for a prompt in which NOTHING was paged: the sentences that
-#: point at `INSTRUCTIONS/PROFILE_RULES.md` and its pointers are omitted, so a
-#: session is never told to read a file this stage never wrote (F200).
-MEDIUM_PROFILE_CONTRACT_INLINE = MEDIUM_PROFILE_CONTRACT.replace(
-    "This run states the stage contract inline and PAGES the long rule sections to\n"
-    "`INSTRUCTIONS/PROFILE_RULES.md` (see the pointers below), so the instruction\n"
-    "payload of every model call stays bounded.  This block is operating guidance for\n"
-    "a paged run: it restates no rule and it changes none.\n\n", "").replace(
-    "  5. THE PAGED RULES ARE BINDING. A pointer like\n"
-    "     `[PROFILE RULES — SECTION: see INSTRUCTIONS/PROFILE_RULES.md]` replaces\n"
-    "     rule text that this profile does not inline. Read the section your stage\n"
-    "     needs; it is authoritative and it is not optional.\n", "").replace(
-    # ... and the list must stay 1..N: deleting item 5 left a 4 -> 6 jump (F172).
-    "  6. THE POSTCHECKS ARE UNCHANGED.",
-    "  5. THE POSTCHECKS ARE UNCHANGED.")
-
 #: One stage's prompt pointer, substituted for a paged rule section.
 PROFILE_POINTER_TMPL = (
     "[PROFILE RULES — {section}: this rule section is NOT inlined by the "
     "`medium` execution profile. It is MANDATORY and it is authoritative. "
     "Read it in {rel} (section `{section}`) with `grep -n '^## '` then "
     "`sed -n`, in a slice of at most ~200 lines, before the work it governs.]")
-
-#: The literal marker a pointer is recognized by.  Operator/profile data is
-#: inlined verbatim into the prompt, so the same bytes in a note would forge a
-#: pointer to a section the pager never wrote (wave-2 F187).  Inline text gets
-#: the marker rewritten; the paged rule blocks keep it byte-for-byte.
-_PROFILE_POINTER_MARK = "[PROFILE RULES — "
-_PROFILE_POINTER_LITERAL = "[PROFILE RULES (literal) — "
-
-
-def _neutralize_pointer_markers(text: str, blocks) -> str:
-    """Make the pointer syntax inert in prompt text that is not a rule block.
-
-    `page_stage_prompt` recognizes a pointer by `_PROFILE_POINTER_MARK`.  Only
-    the blocks it MOVES may carry that syntax (they become the real pointers);
-    everywhere else -- a venue profile's per-limit note, a source line -- the
-    marker is literal data and must not read as a mandatory-read instruction.
-    Block bodies are located by their exact text so they stay byte-identical.
-    """
-    spans = []
-    for _title, body in blocks or ():
-        if not isinstance(body, str) or not body:
-            continue
-        start = 0
-        while True:
-            i = text.find(body, start)
-            if i < 0:
-                break
-            spans.append((i, i + len(body)))
-            start = i + 1
-    if not spans:
-        return text.replace(_PROFILE_POINTER_MARK, _PROFILE_POINTER_LITERAL)
-    spans.sort()
-    out, pos = [], 0
-    for m in re.finditer(re.escape(_PROFILE_POINTER_MARK), text):
-        if any(a <= m.start() < b for a, b in spans):
-            continue
-        out.append(text[pos:m.start()])
-        out.append(_PROFILE_POINTER_LITERAL)
-        pos = m.end()
-    out.append(text[pos:])
-    return "".join(out)
 
 #: The named gap a round records when `--no-guided-review` skipped the
 #: guided review.  It is written into the frozen review view, so every
@@ -231,9 +174,8 @@ GUIDED_REVIEW_OFF_NOTE = """=== THIS ROUND HAS NO GUIDED REVIEW (operator policy
 
 `--no-guided-review` was set at setup: the round's general checklist pass
 (M1-M36 / J1-J5 and its D0-D5 discovery round) DID NOT RUN.  The frozen finding
-list you were given is the cold-start review's independent, generic output
-(X-9xx/X-9xxx rows: X-901..X-999, or X-9001..X-9999 when there are more than 99)
-and nothing else.
+list you were given is the cold-start review's independent, generic output (X-9xx
+rows) and nothing else.
 
 What that means for you:
 
@@ -242,17 +184,9 @@ What that means for you:
     list as evidence that the corpus is clean, and do not report "no findings"
     for one of those classes.
   * Your mandate is unchanged in kind: dispose (audit) or resolve (revise, in
-    a re-validation ledger row) every frozen X-9xx/X-9xxx id you were given.
+    a re-validation ledger row) every frozen X-9xx id you were given.
   * This gap is recorded in the run's state and in the frozen
     `guided_review/findings.json` coverage table. It is not yours to close.
-  * The guided review's own surfaces DO NOT EXIST this round:
-    `guided_review/artifacts/` and `guided_review/work/` carry no seeded
-    sweep tables, because no sweep ran. The disposition mandate's list of
-    seeded tables (M18, M19, M20, M4/NUMBERS_LEDGER, M8, M24, GLOSSARY,
-    IDENTIFIERS, PLACEHOLDERS, PLACEHOLDER_LOOKUP, OUTLINE, CLAIM_STRENGTH,
-    M2_references, M30) therefore has nothing to dispose here: record the
-    M1-M36/J1-J5 classes as the named gap above, and do not invent a table,
-    an artifact or a disposition for one.
 """
 
 
@@ -339,19 +273,8 @@ def _stage_rules_rel(sb: Path, stage: str) -> str:
         if (sb / PROFILE_INSTRUCTIONS_DIR).is_symlink():
             return PROFILE_RULES_REL
         if base.is_file() and not base.is_symlink():
-            head = read_text_bounded(base)
-            if head is None:
-                # Over the agent-output budget (or no longer a regular file):
-                # treat it as another stage's/unusable file rather than reading
-                # the whole thing into memory before slicing. An auxiliary
-                # stage must still get its OWN sidecar: returning the reviser's
-                # relative path let it overwrite the reviser's paged file
-                # (PR6F7-036).
-                if stage in ("revision_audit", "revision_repair"):
-                    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
-                    return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
-                return PROFILE_RULES_REL
-            if f"_Stage: {stage}_" not in head[:4096]:
+            head = base.read_text(encoding="utf-8", errors="replace")[:4096]
+            if f"_Stage: {stage}_" not in head:
                 safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(stage)).strip("_") or "stage"
                 return f"{PROFILE_INSTRUCTIONS_DIR}/PROFILE_RULES_{safe}.md"
     except OSError:
@@ -387,17 +310,8 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     (the rule names no stage, mode, round or bookkeeping file, so it cannot
     break a judge's blinding).
     """
-    # Operator-supplied venue values carry their own `@@` sequences (F97): decode
-    # them before paging, and decode the block bodies too, because a paged
-    # section is written from the body a builder handed over.
-    text = restore_venue_literals(text)
-    blocks = [(title, restore_venue_literals(body)) for title, body in blocks]
     if profile != PROFILE_MEDIUM:
         return ensure_external_content_rule(CONTRADICTION_RULE + text)
-    # Profile notes/source lines are inlined into this prompt.  A note that
-    # carries the pointer syntax must NOT become a pointer (F187): neutralize
-    # the marker everywhere except inside the blocks this function moves.
-    text = _neutralize_pointer_markers(text, blocks)
     from pathlib import Path
 
     sb = Path(sandbox)
@@ -408,21 +322,12 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
     ordered = sorted(((t, b) for t, b in blocks if b and isinstance(b, str)),
                      key=lambda tb: -len(tb[1]))
     sections = []          # (title, body), in replacement order
-    # Section titles are the pointer's identity, so two blocks that share a
-    # title must not share a heading: the first keeps the title and each later
-    # one gets a suffix. Without this both pointers named one `## SAME` heading,
-    # the file was reordered to replacement order, and a section-bounded read
-    # could not select the block its pointer named (F201).
-    title_counts: dict = {}
     for title, body in ordered:
         if body not in text:
             continue
-        title_counts[title] = title_counts.get(title, 0) + 1
-        section = title if title_counts[title] == 1 \
-            else f"{title} [{title_counts[title]}]"
         text = text.replace(body, PROFILE_POINTER_TMPL.format(
-            section=section, rel=rel))
-        sections.append((section, body))
+            section=title, rel=rel))
+        sections.append((title, body))
     if sections:
         instr = sb / PROFILE_INSTRUCTIONS_DIR
         # The sandbox is agent-writable: a planted `INSTRUCTIONS -> /outside`
@@ -464,24 +369,17 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             # high prompt's rule sequence (AGENTS.md rule 12); trimming the
             # block here would join it to the next block on expansion.
             parts.append(f"\n## {title}\n\n{body}\n")
-        # The TARGET can itself be a directory (or a planted link) in a reused
-        # agent-writable sandbox; `write_text_atomic` then raised an unhandled
-        # IsADirectoryError instead of the intended fail-closed message (F023).
-        target = sb / rel
-        if target.is_symlink() or (target.exists() and not target.is_file()):
-            die(f"refusing to page the profile rules: {rel} is a symlink or not a "
-                f"regular file in the session sandbox ({sb}). Remove it and re-run.")
-        write_text_atomic(target, "".join(parts))
+        write_text_atomic(sb / rel, "".join(parts))
     # The profile contract first (the capacity discipline is the profile's
     # point), then the contradiction rule every stage prompt carries; the
     # contract defers to it explicitly, so the profile block is governed by the
     # same conflict-resolution order `high` uses (AGENTS.md rule 12).
     contract = _stage_contract_header(profile)
     if contract:
-        # No section written means no pointer and no paged file: use the
-        # inline-only variant instead of naming a file this prompt never wrote.
-        contract = (contract.replace(PROFILE_RULES_REL, rel) if sections
-                    else MEDIUM_PROFILE_CONTRACT_INLINE)
+        # No section written means no pointer either: keep the documented
+        # default path in the contract's example rather than naming a sidecar
+        # that does not exist.
+        contract = contract.replace(PROFILE_RULES_REL, rel if sections else PROFILE_RULES_REL)
     return contract + ensure_external_content_rule(CONTRADICTION_RULE + text)
 
 
@@ -511,68 +409,6 @@ def _frozen_review_doc(r: int) -> dict:
     }
 
 
-def _cold_start_findings_md(rows: list, level: int = 1) -> str:
-    """Render schema-valid cold-start X-9xx rows for the readable deliverables.
-
-    The cold-start finding schema has no `title` (p03's COLD_START_DIRECTIVES
-    defines id/location/category/check/severity/evidence/explanation/status/
-    verifier), so the old `r.get('title') or '(untitled)'` renderer discarded
-    every field a reader needs. The machine-readable JSON always carried the
-    row; these two markdown files are the human-readable copy, so they must
-    carry the row's own identity, location, check, severity and evidence.
-
-    `level` is the nesting depth of the finding's OWN bullet (1 = top level).
-    Every field, the Verifier included, is indented one level further so none of
-    them escapes the finding's list item; the parameter used to be ignored and
-    the Verifier was emitted at column 0, becoming a sibling top-level item
-    (F179).
-    """
-    if not rows:
-        return "- (none)"
-    # A finding bullet at depth N, its fields as a child list one level deeper.
-    depth = max(1, int(level or 1))
-    bullet = "  " * (depth - 1)
-    field = bullet + "  "
-    blocks = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        rid = str(row.get("id") or "").strip()
-        if not rid:
-            continue
-        severity = str(row.get("severity") or "").strip()
-        check = str(row.get("check") or "").strip()
-        location = str(row.get("location") or "").strip()
-        evidence = " ".join(str(row.get("evidence") or "").split())
-        explanation = " ".join(str(row.get("explanation") or "").split())
-        status = str(row.get("status") or "").strip()
-        title = " ".join(str(row.get("title") or "").split())
-        label_bits = [b for b in (severity, check) if b]
-        # The cold-start schema has no title; a row that carries one anyway (a
-        # caller-supplied/frozen row) still displays it, and a schema-valid row
-        # displays its severity/check instead of the old "(untitled)".
-        headline = title or (" / ".join(label_bits) if label_bits else "finding")
-        lines = [f"{bullet}- {rid} — {headline}", ""]
-        if title and label_bits:
-            lines.append(f"{field}- Check: {' / '.join(label_bits)}")
-        if location:
-            lines.append(f"{field}- Location: {location}")
-        if evidence:
-            lines.append(f"{field}- Evidence: {evidence}")
-        if explanation:
-            lines.append(f"{field}- Explanation: {explanation}")
-        if status:
-            lines.append(f"{field}- Status: {status}")
-        verifier = row.get("verifier")
-        # A verifier that COMPUTED 0 is a real result; a truthiness test
-        # dropped it from the markdown while the JSON row carried it (F28).
-        if isinstance(verifier, dict) and verifier.get("computed") is not None:
-            lines.append(f"{field}- Verifier: `{verifier.get('script')}` -> "
-                         f"`{verifier.get('computed')}`")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks) if blocks else "- (none)"
-
-
 def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     """Write the round's frozen review view into `sb` from the COLD-START review's findings.
 
@@ -591,24 +427,21 @@ def synthesize_frozen_review(ctx, r: int, sb) -> dict:
     rows = list(cold_start_findings_rows(ctx, r) or [])
     if journal_is_scoped(ctx):  # defensive: a scoped round never reaches here
         rows = []
-    target = safe_mkdir(sb / GUIDED_REVIEW_DIR)
-    safe_mkdir(target / "round2")
+    target = sb / GUIDED_REVIEW_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    (target / "round2").mkdir(parents=True, exist_ok=True)
     write_json_atomic(sb / FINDINGS_REL, _frozen_review_doc(r))
-    rows_md = _cold_start_findings_md(rows, level=1)
     write_text_atomic(sb / GUIDED_REVIEW_DIR / "findings.md",
                       "# Frozen finding list — cold-start review only\n\n"
                       f"{GUIDED_REVIEW_GAP}\n\n"
                       f"The {len(rows)} X-9xx row(s) below are the cold-start review's "
-                      f"findings (the same rows are in "
-                      f"`guided_review/round2/findings_extra.json`).\n\n"
-                      f"{rows_md}\n")
+                      f"findings, in `guided_review/round2/findings_extra.json`.\n")
     discovery_json = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
     write_json_atomic(sb / discovery_json,
                       {"findings": rows, "source": "cold_start_review",
                        "guided_review": "off", "named_gap": GUIDED_REVIEW_GAP})
     write_text_atomic(sb / f"{GUIDED_REVIEW_DIR}/round2/findings_extra.md",
-                      "# Discovery list (cold-start review)\n\n" + GUIDED_REVIEW_GAP
-                      + "\n\n" + rows_md + "\n")
+                      "# Discovery list (cold-start review)\n\n" + GUIDED_REVIEW_GAP + "\n")
     return {"rows": len(rows), "named_gap": GUIDED_REVIEW_GAP}
 
 
@@ -622,11 +455,6 @@ def frozen_review_is_synthesized(ctx) -> bool:
     predicate is never true there (`--no-guided-review` is refused with a scoped
     mode at setup).
     """
-    if journal_is_scoped(ctx):
-        # set-revision-mode can reach a scoped mode while the root still records
-        # guided_review=off; the scoped round has no cold-start review either, so
-        # there is no synthesized frozen view to write (F264).
-        return False
     return not guided_review_enabled(ctx)
 
 

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/25 of the pipeline -- executed by the
+# Part 09/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -9,38 +9,6 @@ from __future__ import annotations
 # SETUP
 # =====================================================================
 
-def _save_root_config(ctx: Ctx, event: str, *, detail: str) -> None:
-    """Persist the configuration and its registry mirror under the caller's lock."""
-    ctx.state["config"] = ctx.cfg
-    write_json_atomic(ctx.cfg_path, ctx.cfg)
-    ctx.log(event, detail=detail)
-    ctx.save_state()
-
-
-def _freeze_runtime_bundle(src: Path, root: Path) -> list:
-    """Copy the validated runtime into a new root and preserve file modes."""
-    try:
-        copied = copy_asset_dirs(src, root)
-        for name in PIPELINE_MODULE_FILES:
-            _safe_restore_copy(src / name, root / name, root)
-    except OSError as exc:
-        die(f"cannot freeze the runtime into {root}: {exc}. "
-            "Re-run setup with the same arguments after resolving the copy error.")
-    return copied
-
-
-def _setup_round_arg(args, key: str):
-    """The operator's per-round value, or the default only when the flag is ABSENT.
-
-    An explicitly supplied empty string is a usage error, not "use the
-    expensive default": `--judges ""` used to plan 2 judges because every
-    consumer wrote `value or DEFAULTS[...]` (F151). The parser stores None for
-    an absent flag, so only None falls back.
-    """
-    raw = getattr(args, key, None)
-    return DEFAULTS[key] if raw is None else raw
-
-
 def cmd_setup(args) -> None:
     rounds = int(args.rounds)
     # The venue is resolved BEFORE anything is created, so an unknown venue id
@@ -48,42 +16,19 @@ def cmd_setup(args) -> None:
     # optional here: without it the venue profile's own default applies (0 for
     # a venue that publishes no legend number), and the resolved value is what
     # the config records.
-    _raw_venue = getattr(args, "venue", None)
-    venue_arg = str(_raw_venue or "").strip()
-    if _raw_venue is not None and not venue_arg:
-        die("--venue needs a venue id; an explicitly empty value is not 'use the default'",
-            code=2)
+    venue_arg = str(getattr(args, "venue", None) or "").strip()
     venue_profile_file = str(getattr(args, "venue_profile", None) or "").strip()
-    _raw_journal = getattr(args, "journal", None)
-    journal_arg = str(_raw_journal or "").strip()
-    if _raw_journal is not None and not journal_arg:
-        # `--journal ''` was silently read as "flag absent" and recorded the
-        # profile default; refuse it like `--venue ''` (F29).
-        die("--journal needs a journal name; an explicitly empty value is not 'use the "
-            "profile default'", code=2)
-    if journal_arg:
-        # The same one-line/160-character rule `set-journal`/`set-venue` apply:
-        # setup is the ONLY route that reached the config (and every stage
-        # prompt) unvalidated, so a newline or an overlong name was accepted at
-        # root creation and rejected only afterwards.
-        journal_arg = _validate_journal_name(journal_arg)
-    _raw_article = getattr(args, "article_type", None)
-    article_arg = str(_raw_article or "").strip().lower()
-    if _raw_article is not None and not article_arg:
-        die("--article-type needs an article-type id; an explicitly empty value is not "
-            "'use the default'", code=2)
+    journal_arg = str(getattr(args, "journal", None) or "").strip()
+    article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     strict_venue = bool(getattr(args, "strict_venue", False))
     if venue_profile_file:
         # A brand-new venue on a FRESH root: setup had no way to accept a
         # profile file, while `set-venue --profile` needs an existing root --
         # the operator was told to do something impossible. Now `setup` loads
         # and installs the file into the new root itself.
-        pf = Path(venue_profile_file).expanduser()
+        pf = Path(venue_profile_file)
         if not pf.is_file():
             die(f"--venue-profile {venue_profile_file!r} is not a readable file", code=2)
-        if pf.is_symlink():
-            die(f"--venue-profile {venue_profile_file!r} is a symlink; pass the real file "
-                f"so the bytes validated here are the bytes installed", code=2)
         try:
             _pdata = json.loads(pf.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
@@ -125,7 +70,7 @@ def cmd_setup(args) -> None:
                 f"venue's rule set ({venue_profile.id}) applies. Run "
                 f"`set-journal <name>` at any time before or during a run to name it.")
         if strict_venue:
-            die("--strict-venue: " + note, code=2)
+            die("--strict-venue: " + note)
         print(f"[setup] venue note: {note}")
     elif not venue_profile.journal_matches(journal):
         note = (f"the journal {journal!r} is not one of the journals venue profile "
@@ -133,7 +78,7 @@ def cmd_setup(args) -> None:
                 f"the venue's rules still apply. Use `set-venue <id>` for another rule set or "
                 f"`set-journal <name>` to change the journal.")
         if strict_venue:
-            die("--strict-venue: " + note, code=2)
+            die("--strict-venue: " + note)
         print(f"[setup] venue warning: {note}")
     caption_limit = int(getattr(args, "caption_limit", None)
                         if getattr(args, "caption_limit", None) is not None
@@ -141,56 +86,12 @@ def cmd_setup(args) -> None:
     format_policy = {}
     if getattr(args, "format_policy", None):
         try:
-            format_policy = json.loads(
-                Path(args.format_policy).expanduser().read_text(encoding="utf-8"))
+            format_policy = json.loads(Path(args.format_policy).read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             die(f"--format-policy {args.format_policy!r} is not readable JSON: {e}", code=2)
         if not isinstance(format_policy, dict):
             die("--format-policy must be a JSON object of overrides, "
                 f"e.g. {{\"url_style\": \"plain\"}} (got {type(format_policy).__name__})", code=2)
-        # Validate against the formatter's own defaults: a typo (`url_stlye`)
-        # silently did nothing, and a wrong-typed value (`caption_line:
-        # "not-an-int"`) reached the fixer and corrupted the output. Reject both
-        # at setup, while the root does not exist yet.
-        _fmt_mod = _format_module()
-        _policy_defaults = dict(getattr(_fmt_mod, "POLICY_DEFAULTS", {}) or {}) \
-            if _fmt_mod is not None else {}
-        # Not a formatter POLICY_DEFAULTS member, but a documented BOOLEAN
-        # switch (README) that `_policy_flag` reads as bool(value): without a
-        # type entry a non-empty list/object/number was accepted and silently
-        # enabled the irreversible unlink (F011).
-        _policy_extra = {"unlink_zotero_fields_at_publish": "bool"}
-        _unknown = sorted(k for k in format_policy
-                          if k not in _policy_defaults and k not in _policy_extra)
-        if _unknown:
-            die(f"--format-policy has unknown key(s): {', '.join(_unknown)}; known keys are "
-                f"{', '.join(sorted(set(_policy_defaults) | set(_policy_extra)))}", code=2)
-        _bad_types = []
-        for _k, _v in format_policy.items():
-            if _k in _policy_extra:
-                _ok = isinstance(_v, bool)
-                _expected = _policy_extra[_k]
-            elif _k in _policy_defaults:
-                _d = _policy_defaults[_k]
-                if isinstance(_d, bool):
-                    _ok = isinstance(_v, bool)
-                elif isinstance(_d, (int, float)):
-                    _ok = isinstance(_v, (int, float)) and not isinstance(_v, bool)
-                elif isinstance(_d, str):
-                    _ok = isinstance(_v, str)
-                elif isinstance(_d, list):
-                    _ok = isinstance(_v, list)
-                elif isinstance(_d, dict):
-                    _ok = isinstance(_v, dict)
-                else:                                  # pragma: no cover
-                    _ok = True
-                _expected = type(_d).__name__
-            else:
-                continue
-            if not _ok:
-                _bad_types.append(f"{_k}={_v!r} (expected {_expected})")
-        if _bad_types:
-            die("--format-policy has invalid value(s): " + "; ".join(_bad_types), code=2)
     format_fix = str(getattr(args, "format_fix", DEFAULT_FORMAT_FIX) or
                      DEFAULT_FORMAT_FIX).strip().lower()
     # `--strict-artifacts [on|fix|off]` (absent = the default policy). The config
@@ -204,6 +105,10 @@ def cmd_setup(args) -> None:
         die(f"--format-fix must be one of {', '.join(FORMAT_FIX_MODES)} (got {format_fix!r})",
             code=2)
     zotero = str(getattr(args, "zotero", DEFAULT_ZOTERO_MODE) or DEFAULT_ZOTERO_MODE).strip().lower()
+    if rounds < 1:
+        # A post-parse USAGE error, like the argparse errors: the README's exit
+        # table says code 2 (F62).
+        die("--rounds must be >= 1", code=2)
     # ---- --round-indices: run a SUBSET of the built-in round schedule -------
     # `--round-indices 2 3` runs two rounds whose per-round plan follows the
     # built-in schedule's entries 2 and 3 (no rewrites); the pipeline's own
@@ -223,19 +128,7 @@ def cmd_setup(args) -> None:
             print(f"[setup] note: --round-indices implies --rounds {len(round_indices)} "
                   f"(was --rounds {args.rounds}); using {len(round_indices)}")
         rounds = len(round_indices)
-    if rounds < 1:
-        # A post-parse USAGE error, like the argparse errors: the README's exit
-        # table says code 2 (F62). Validated AFTER --round-indices: with an
-        # explicit schedule --rounds is discarded, so `--rounds 0
-        # --round-indices 2` must not be refused for the ignored value.
-        die("--rounds must be >= 1", code=2)
-    if rounds > MAX_ROUNDS:
-        # The per-round lists are materialized in full below; an unbounded
-        # --rounds allocated proportional memory and died with a raw
-        # MemoryError traceback before any validation could reject it (F242).
-        die(f"--rounds must be <= {MAX_ROUNDS} (got {rounds}): the per-round plan is "
-            f"materialized in full and a larger value is not a runnable schedule", code=2)
-    judges_list = parse_round_counts(_setup_round_arg(args, "judges"),
+    judges_list = parse_round_counts(getattr(args, "judges", None) or DEFAULTS["judges"],
                                      rounds, "--judges")
     if any(j < 1 for j in judges_list):
         die(f"--judges must be >= 1 per round, got {judges_list}", code=2)
@@ -256,7 +149,8 @@ def cmd_setup(args) -> None:
             code=2)
     integrators = ([ROUND_SCHEDULE[i - 1]["integrators"] for i in round_indices]
                    if round_indices else
-                   parse_round_masks(_setup_round_arg(args, "integrators"), rounds, "--integrators"))
+                   parse_round_masks(getattr(args, "integrators", None) or
+                                     DEFAULTS["integrators"], rounds, "--integrators"))
     if caption_limit < 0:
         die("--caption-limit must be >= 0 (0 = no caption suggestion at all, the default)",
             code=2)
@@ -281,11 +175,11 @@ def cmd_setup(args) -> None:
         die(f"--zotero must be one of {', '.join(ZOTERO_MODES)} (got {zotero!r})", code=2)
     rewrites = ([ROUND_SCHEDULE[i - 1]["rewrites"] for i in round_indices]
                 if round_indices else
-                parse_round_counts(_setup_round_arg(args, "rewrites"),
+                parse_round_counts(getattr(args, "rewrites", None) or DEFAULTS["rewrites"],
                                    rounds, "--rewrites"))
     revises = ([ROUND_SCHEDULE[i - 1]["revises"] for i in round_indices]
                if round_indices else
-               parse_round_counts(_setup_round_arg(args, "revises"),
+               parse_round_counts(getattr(args, "revises", None) or DEFAULTS["revises"],
                                   rounds, "--revises"))
     # ---- revision modes (init, options 1-4, continue) -----------------------
     # "continue" (the default) leaves every value below exactly as the operator
@@ -315,8 +209,7 @@ def cmd_setup(args) -> None:
     scoped_mode_restore = None
     journal_feedback = [str(x) for x in (getattr(args, "journal_feedback", None) or [])
                         if str(x).strip()]
-    journal_feedback_from = _validate_feedback_from(
-        getattr(args, "journal_feedback_from", None) or "")
+    journal_feedback_from = str(getattr(args, "journal_feedback_from", None) or "").strip()
     if revision_mode == JOURNAL_MODE_LLM and (journal_feedback or journal_feedback_from):
         print(f"[setup] note: revision mode {JOURNAL_MODE_LLM!r} reads ONLY "
               f"{LLM_FEEDBACK_DIR}/; --journal-feedback/--journal-feedback-from are ignored")
@@ -340,7 +233,6 @@ def cmd_setup(args) -> None:
             _saved_scope = [str(x).strip().lower() for x in _saved_scope if str(x).strip()]
             _saved_plan = {
                 "rounds": rounds,
-                "judges": list(judges_list),
                 "rewrites": list(rewrites),
                 "revises": list(revises),
                 "integrators": list(integrators),
@@ -365,11 +257,6 @@ def cmd_setup(args) -> None:
             if rounds != 1:
                 rounds = 1
                 forced.append("rounds=1 (the concerns are addressed once)")
-            if judges_list != [judges_list[0]]:
-                # The per-round judge list must not outlive the forced
-                # single-round plan (F182).
-                judges_list = judges_list[:1]
-                forced.append(f"judges={judges_list[0]} (one round)")
             if rewrites != [0] * rounds:
                 rewrites = [0] * rounds
                 forced.append("rewrites=0 (a major/minor revision may not rewrite the manuscript)")
@@ -389,11 +276,8 @@ def cmd_setup(args) -> None:
             if getattr(args, "audit", DEFAULT_AUDIT) not in (None, "", "off"):
                 forced.append("audit off (the guided review's audits do not run in this mode)")
             args.audit = "off"
-            # The post-revise chain runs in a concern-scoped revision too: its
-            # object is the revision's OWN delta plus the repaired human-concern
-            # findings, so it needs no general review. It remains the independent
-            # check of the revised manuscript and the bounded repair applies its
-            # plan without leaving the admitted concerns.
+            args.revision_audit = "on"
+            forced.append("revision audit on (mandatory concern-scoped post-write verification)")
             # The scoped review is formatting/writing only: a full discovery
             # probe would freeze X-9xx rows the reviser is asked to resolve,
             # although they are not traceable to a reviewer concern.
@@ -408,22 +292,14 @@ def cmd_setup(args) -> None:
             print(f"[setup] revision mode {revision_mode} (option {info['option']}): "
                   f"{info['label']}; rewrites stay "
                   f"{'allowed' if info['rewrites'] else 'forbidden'}")
-    _explicit_scope = getattr(args, "review_scope", None)
-    review_scope_raw = (_explicit_scope if _explicit_scope is not None
-                        else DEFAULTS["review_scope"])
+    review_scope_raw = getattr(args, "review_scope", None) or DEFAULTS["review_scope"]
     if not isinstance(review_scope_raw, (list, tuple)):
         review_scope_raw = [x.strip() for x in str(review_scope_raw).split(",") if x.strip()]
     review_scope = [str(x).strip().lower() for x in review_scope_raw if str(x).strip()]
     if not review_scope:
-        if _explicit_scope is not None:
-            # An explicit `--review-scope ","` (or whitespace) parsed to no
-            # entries; substituting the default silently accepted a typo.
-            die(f"--review-scope {getattr(args, 'review_scope', None)!r} names no entries; "
-                f"pass one or more of {'|'.join(REVIEW_SCOPE_VALUES)}", code=2)
         review_scope = ["full"]
-    if len(review_scope) < rounds:
-        review_scope = (review_scope
-                        + [review_scope[-1]] * (rounds - len(review_scope)))
+    while len(review_scope) < rounds:
+        review_scope.append(review_scope[-1])
     review_scope = review_scope[:rounds]
     if round_indices:
         review_scope = [ROUND_SCHEDULE[i - 1]["review_scope"] for i in round_indices]
@@ -441,7 +317,7 @@ def cmd_setup(args) -> None:
     # all are refused HERE, before a root is built:
     #   * a concern-scoped revision already replaces the guided review;
     #   * a split review is two guided-review sessions;
-    #   * --cold-start-review off means literally nothing produces findings;
+    #   * no probe means literally nothing produces findings;
     #   * a polish round reviews the surface only, and it is a guided review.
     if str(getattr(args, "guided_review", GUIDED_REVIEW_DEFAULT)).lower() == "off":
         if scoped_mode_restore is not None:
@@ -525,69 +401,37 @@ def cmd_setup(args) -> None:
                   "arm because --integrators was not given: "
                   + ", ".join(f"round {i} -> {vid} (mask 0x{mask:X})"
                               for i, vid, mask in _enabled_arms))
-    if not str(getattr(args, "source", "") or "").strip():
-        die("--source must name a non-empty directory: an empty value resolves to the current "
-            "working directory and would copy the whole tree (including .git) as the pristine "
-            "corpus", code=2)
-    source = Path(os.path.expanduser(str(args.source))).resolve()
+    source = Path(args.source).resolve()
     if not source.is_dir():
-        die(f"--source directory not found: {source}", code=2)
+        die(f"--source directory not found: {source}")
     _legacy = legacy_input_area_problems(source)
     if _legacy:
         die("--source uses a removed input-area spelling:\n  - " + "\n  - ".join(_legacy)
             + "\n       Rename the directory once, then run setup again; the pipeline does not "
-              "resolve legacy aliases.", code=2)
+              "resolve legacy aliases.")
     # Count only what the copy actually carries: `_ignore_symlinks` skips every
     # symlink (except a canonical evidence link), but `p.is_file()` followed the
     # link, so a source made only of symlinked documents passed this check and
     # produced a root with an EMPTY pristine corpus.
-    def _canonical_source_link(p: Path):
-        """The run root owning a top-level evidence link in --source, or None.
-
-        `is_canonical_evidence_link` proves containment against the root that
-        OWNS the copy. The NEW root does not exist yet (mkdir runs later), so
-        passing it could never succeed; the owner is derived from the link's
-        TARGET instead -- a link is accepted only when it points at an existing
-        run root's `<root>/non_revised/<area>` store, and the copy is
-        materialized into the new root's pristine tree.
-        """
-        try:
-            if not p.is_symlink() or not is_evidence_rel(p.name):
-                return None
-            target = p.resolve(strict=True)
-        except (OSError, RuntimeError):
-            return None
-        if not target.is_dir():
-            return None
-        owner = _enclosing_run_root(target)
-        if owner is not None and is_canonical_evidence_link(p, owner):
-            return owner
-        return None
-
     def _copyable(p: Path) -> bool:
         if not p.is_file():
             return False
         if not p.is_symlink():
             return True
         try:
-            return _canonical_source_link(p) is not None
+            return is_canonical_evidence_link(p, args.root)
         except (OSError, RuntimeError):
             return False
 
     files = [p for p in source.rglob("*") if _copyable(p)]
-    # A source may be nothing but the canonical evidence links: setup
-    # materializes those, so count them as content instead of refusing the
-    # only layout the refusal message recommends.
-    _canonical_links = [p for p in source.iterdir()
-                        if p.is_dir() and _canonical_source_link(p) is not None]
-    if not files and not _canonical_links:
+    if not files:
         _links = [str(p) for p in source.rglob("*") if p.is_symlink()]
         if _links:
             die(f"--source contains only symlink(s), which setup never copies: "
                 f"{', '.join(_links[:5])}{' ...' if len(_links) > 5 else ''}\n"
-                f"       Point --source at the real files, or at a link to an existing "
-                f"root's canonical <root>/non_revised/<area> evidence store.", code=2)
-        die(f"--source directory is empty: {source}", code=2)
+                f"       Point --source at the real files (or at the canonical "
+                f"<root>/non_revised/<area> evidence links).")
+        die(f"--source directory is empty: {source}")
     if JOURNAL_MODES[revision_mode]["feedback"]:
         # The evidence the whole mode rests on must exist BEFORE a root is
         # created: a journal mode with no feedback file would run the scoped
@@ -595,28 +439,25 @@ def cmd_setup(args) -> None:
         if revision_mode != JOURNAL_MODE_LLM:
             _resolved_feedback = []
             for item in journal_feedback:
-                q = Path(item).expanduser()
+                q = Path(item)
                 if not q.is_absolute():
-                    # The help says a relative --journal-feedback path is
-                    # resolved against --root. The old root_exists fallback
-                    # silently consumed a same-named cwd file on a fresh root
-                    # (F138).
-                    q = Path(args.root).resolve() / q
+                    root_rel = Path(args.root).resolve() / q
+                    q = root_rel if root_rel.exists() else (Path.cwd() / q)
                 if not q.is_file():
-                    die(f"--journal-feedback {item!r} does not exist (looked for {q}).", code=2)
+                    die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
                 _resolved_feedback.append(str(q.resolve()))
             # Store the RESOLVED paths: the later runtime lookup is root-then-cwd,
             # so a relative spelling could silently read a same-named cwd file.
             journal_feedback = _resolved_feedback
         llm_dir = source / LLM_FEEDBACK_DIR
-        llm_hits = [p for p in sorted(llm_dir.rglob("*")) if _copyable(p)] \
+        llm_hits = [p for p in sorted(llm_dir.rglob("*")) if p.is_file()] \
             if llm_dir.is_dir() else []
         if revision_mode == JOURNAL_MODE_LLM:
             if not llm_hits:
                 die(f"revision mode {JOURNAL_MODE_LLM!r} needs a NON-EMPTY "
                     f"{LLM_FEEDBACK_DIR}/ area in --source; it is missing or empty. Add the "
                     f"false-positive-filtered LLM review, or pass an explicit "
-                    f"--revision-mode continue.", code=2)
+                    f"--revision-mode continue.")
             print(f"[setup] LLM review feedback:   {len(llm_hits)} file(s) under "
                   f"{LLM_FEEDBACK_DIR}/ (false positives pre-filtered) drive the concern "
                   f"ledger; no journal decision letter is read.")
@@ -648,12 +489,7 @@ def cmd_setup(args) -> None:
         # NotADirectoryError mid-setup instead of the clean refusal every other
         # unusable root gets.
         die(f"--root exists and is a FILE, not a directory: {root} "
-            f"(choose a fresh --root or delete it)", code=2)
-    if is_within(root, source) or is_within(source, root):
-        # Checked BEFORE the interrupted-setup branch below: deleting an
-        # interrupted root that CONTAINS --source destroyed the operator's
-        # corpus and only then refused the command as nested (F213).
-        die("--root and --source must not be nested inside each other", code=2)
+            f"(choose a fresh --root or delete it)")
     if root.exists() and any(root.iterdir()):
         # A root this pipeline created and never finished (the marker is written
         # before the first copy and removed only once state.json exists) is
@@ -665,10 +501,9 @@ def cmd_setup(args) -> None:
                   f"state.json yet); starting over from the source")
             rmtree_force(root)
         else:
-            die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)",
-                code=2)
+            die(f"--root exists and is not empty: {root} (choose a fresh --root or delete it)")
     if is_within(root, source) or is_within(source, root):
-        die("--root and --source must not be nested inside each other", code=2)
+        die("--root and --source must not be nested inside each other")
     # A new root must not freeze an OLD ROOT's pipeline snapshot by accident
     # (2026-10-15) -- checked BEFORE anything is created, so a refused setup
     # leaves the filesystem exactly as it found it. This is structural, not a
@@ -700,19 +535,9 @@ def cmd_setup(args) -> None:
               f"{_hint}\nPass --pipeline-snapshot-ok only when freezing this exact snapshot is "
               f"what you intend.", code=2)
     _pipeline_state = dict(_ident)
-    # The freeze INSTANT, not the maintained file's mtime: copy2 preserves the
-    # source mtime, so reporting that as "frozen at" named the wrong event
-    # (F191).
-    _pipeline_state["frozen_at"] = utcnow()
     if _snap and _snap.get("origin_path"):
         _pipeline_state.update(snapshot_of=_snap.get("root"),
                                snapshot_origin=_snap.get("origin_path"))
-    script = Path(__file__).resolve()
-    missing_assets = _missing_bundle_assets(script.parent)
-    if missing_assets:
-        die(f"setup: the running tree is missing {', '.join(missing_assets)} "
-            f"beside {script.name}; refusing to freeze an incomplete bundle")
-
     try:
         root.mkdir(parents=True, exist_ok=True)
         marker.write_text(f"setup started {utcnow()}\n", encoding="utf-8")
@@ -755,51 +580,28 @@ def cmd_setup(args) -> None:
         # directory or file, so it is skipped like every other link (including
         # links nested inside an evidence area).
         at_source_root = Path(_dir).resolve() == _source_root
-        # VCS metadata, bytecode caches and build scratch are not corpus
-        # content. A source directory that is itself a checkout carried them
-        # into non_revised/ and every later digest (F228).
-        _scratch = {".git", "__pycache__", ".pytest_cache", ".mypy_cache",
-                    ".ruff_cache", ".venv", "venv", "node_modules", "build", "dist"}
         for name in names:
             path = Path(_dir) / name
-            if name in _scratch or name.endswith(".egg-info"):
-                out.append(name)
-                continue
             if os.path.islink(path):
                 canonical = (at_source_root and is_evidence_rel(name)
-                             and _canonical_source_link(path) is not None)
+                             and is_canonical_evidence_link(path, root))
                 if not canonical:
                     _skipped_links.append(os.path.join(_dir, name))
                     out.append(name)
         return out
 
-    try:
-        shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
-    except (OSError, shutil.Error) as e:
-        # An unreadable/disappearing source file raised a raw shutil.Error
-        # traceback out of setup and left the marker plus a partial
-        # non_revised/ behind (F150). The root was created by THIS invocation
-        # and carries no state.json, so remove it and report the source problem
-        # the way every other bad input is reported: a named usage error.
-        if not rmtree_force(root, ignore_errors=True):
-            print(f"[setup] WARNING: could not remove the partial root {root}", file=sys.stderr)
-        die(f"could not copy the source {source} into the root: {e}", code=2)
+    shutil.copytree(source, ctx.pristine, ignore=_ignore_symlinks)
     _mapped_feedback = []
-    # Only a mode that reads a journal letter freezes it. A no-feedback mode
-    # (continue/init) or llm (feedback area only) documents the flag as
-    # ignored, and an unreadable stale path must not crash after the root was
-    # built (F214).
-    if JOURNAL_MODES[revision_mode]["feedback"] and revision_mode != JOURNAL_MODE_LLM:
-        for _item in journal_feedback:
-            _q = Path(_item)
-            try:
-                _rel = _q.resolve().relative_to(_source_root)
-            except (OSError, ValueError):
-                # The letter is outside --source: freeze it into the root instead of
-                # storing an absolute path that can change/delete the input later.
-                _mapped_feedback.append(_freeze_journal_feedback(root, _q))
-            else:
-                _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
+    for _item in journal_feedback:
+        _q = Path(_item)
+        try:
+            _rel = _q.resolve().relative_to(_source_root)
+        except (OSError, ValueError):
+            # The letter is outside --source: freeze it into the root instead of
+            # storing an absolute path that can change/delete the input later.
+            _mapped_feedback.append(_freeze_journal_feedback(root, _q))
+        else:
+            _mapped_feedback.append((ctx.pristine / _rel).relative_to(root).as_posix())
     journal_feedback = _mapped_feedback
     if _skipped_links:
         print(f"[setup] WARNING: skipped {len(_skipped_links)} symlink(s) in --source "
@@ -815,10 +617,74 @@ def cmd_setup(args) -> None:
     if _protected:
         print(f"[setup] read-only evidence: {_protected} entr(y/ies) chmod-protected under "
               f"{ctx.pristine.name}/; stage sandboxes will symlink them instead of copying")
-    _asset_dirs = _freeze_runtime_bundle(script.parent, root)
+    # Copy the script that is RUNNING, not its basename resolved against the CWD:
+    # `setup` is normally launched as `python /path/to/paper_pipeline.py setup
+    # --root ...` from whatever directory the operator is in, and the basename
+    # then named a file that does not exist there. That failure came AFTER the
+    # root had been populated, and `setup` refuses to re-run on a non-empty root,
+    # so it left a half-built root to delete by hand.
+    script = Path(__file__).resolve()
+    shutil.copy(script, root / script.name)
+    # The loaders above are thin: their ordered implementation parts must travel
+    # with them, or the frozen bundle cannot start. Refuse to create a root that
+    # would freeze a loader without its implementation.
+    _missing_assets = [f"{name}/" for name in PIPELINE_ASSET_DIRS
+                       if not (script.parent / name).is_dir()]
+    _missing_assets += [
+        f"agent-common/agent_common/{name}"
+        for name in ("model_runtime.py", "llm_retry.py", "llm_policy.json",
+                     "model_catalog.json")
+        if not (script.parent / "agent-common" / "agent_common" / name).is_file()
+    ]
+    # The companion MODULES are just as required: the agent commands call
+    # `python paper_docx_format.py scan ...`, the redline backend resolves the
+    # adapter beside the driver, the `qwen`/`dots` presets execute their
+    # modules, and the render/track shims are probed beside the driver. These
+    # used to be copied only `if is_file()`, so a trimmed checkout produced a
+    # root that looked healthy (exit 0) and then failed every later stage on a
+    # missing tool.
+    _missing_modules = [name for name in PIPELINE_MODULE_FILES
+                        if name != script.name and not (script.parent / name).is_file()]
+    if _missing_assets or _missing_modules:
+        _missing = list(_missing_assets) + list(_missing_modules)
+        die(f"setup: the running tree is missing {', '.join(_missing)} beside "
+            f"{script.name}; refusing to freeze a bundle whose stages cannot run. Run setup "
+            f"from the maintained checkout (the tree that carries the loaders, their parts "
+            f"and the companion modules).")
+    _asset_dirs = copy_asset_dirs(script.parent, root)
     if _asset_dirs:
         print(f"[setup] pipeline assets:         copied {', '.join(_asset_dirs)}/ "
               f"(the loaders execute the parts; the skills pack is read beside the driver)")
+    # The OOXML formatting scanner is a companion module (see
+    # scan_format_in_sources); copy it next to the script so the root stays
+    # self-contained and `python <root>/paper_pipeline.py` keeps working.
+    _fmt_mod = script.with_name(DOCX_FORMAT_MODULE)
+    if _fmt_mod.is_file():
+        shutil.copy(_fmt_mod, root / DOCX_FORMAT_MODULE)
+    # The redline adapter travels with the root too: the tracking stage's
+    # python-redlines backend resolves it NEXT TO THE RUNNING SCRIPT, and a root
+    # without it silently skipped that engine (the weaker fallbacks then
+    # over-marked a small edit as whole-paragraph rewrites -- exactly what
+    # `redline_fidelity` now flags).
+    _adapter = script.with_name(REDLINE_ADAPTER_NAME)
+    if _adapter.is_file():
+        shutil.copy(_adapter, root / REDLINE_ADAPTER_NAME)
+    # The provider adapters are executed by their agent presets, which resolve
+    # their paths next to the running driver. A root that lacks one cannot run
+    # that preset; copy it at setup and let the module manifest gate a later
+    # drift.
+    for _adapter_name in ("paper_qwen_agent.py", "paper_dots_agent.py",
+                          "paper_model_agent.py"):
+        _adapter = script.with_name(_adapter_name)
+        if _adapter.is_file():
+            shutil.copy(_adapter, root / _adapter_name)
+    # The render/track shims are resolved beside the running driver
+    # (`visual_renderer_choices`, the MCP probes). A root without them silently
+    # loses the highest-fidelity renderer/comparer, so they travel too.
+    for _shim_name in ("docx2pdf.sh", "docxcompare.sh"):
+        _shim = script.with_name(_shim_name)
+        if _shim.is_file():
+            shutil.copy2(_shim, root / _shim_name)
     # The venue profiles travelled with `copy_asset_dirs` above: they are a
     # frozen runtime asset in the module/asset manifest (Rule 11), so setup fails
     # on a copy error instead of warning and shipping a root whose `--list` and
@@ -832,24 +698,12 @@ def cmd_setup(args) -> None:
         try:
             _dest = root / VENUE_PROFILES_DIRNAME / f"{venue_profile.id}{VENUE_PROFILE_SUFFIX}"
             _dest.parent.mkdir(parents=True, exist_ok=True)
-            # Install the bytes that were VALIDATED, never re-open `pf`: a
-            # symlink/concurrent writer could swap the file between the check
-            # and this copy and the root would run unvalidated bytes.
-            write_json_atomic(_dest, _pdata)
+            shutil.copyfile(Path(venue_profile_file), _dest)
             print(f"[setup] venue profile:           installed {venue_profile.id!r} from "
                   f"{venue_profile_file} into {VENUE_PROFILES_DIRNAME}/ (the new root is "
                   f"self-contained)")
         except OSError as e:
             die(f"could not install --venue-profile {venue_profile_file!r} into {root}: {e}")
-        # The installed file is part of the FROZEN bundle: record the manifest of
-        # the root as it now stands. The captured `_pipeline_state` described the
-        # maintained tree, so every later `status` reported the root's own
-        # installed profile as tampering. `ctx.state["pipeline"]` is a shallow
-        # copy of `_pipeline_state` and state is rebuilt later from the latter.
-        _pipeline_modules = module_manifest(root)
-        _pipeline_state["modules"] = _pipeline_modules
-        if ctx.state.get("pipeline") is not None:
-            ctx.state["pipeline"]["modules"] = _pipeline_modules
     # Normalize the pristine copy BEFORE the manifests/digests are recorded, so
     # the byte-identity checks, the round-1 base (a1) and every later pin all
     # refer to the SAME repaired text. This is the formatting analogue of the
@@ -893,12 +747,6 @@ def cmd_setup(args) -> None:
                # non-empty; "off" leaves the revised version final. The env
                # override PAPER_REVISION_AUDIT works on an existing root.
                "revision_audit": str(getattr(args, "revision_audit", "on") or "on").lower(),
-               # The concern ledger and the response-to-reviewers letter are
-               # LLM-written deliverables: each gets an independent audit and a
-               # one-pass repair. ON by default; `off` records the skip and the
-               # deliverable is then reported as unaudited.
-               "concern_audit": str(getattr(args, "concern_audit", "on") or "on").lower(),
-               "response_audit": str(getattr(args, "response_audit", "on") or "on").lower(),
                # The COLD-START REVIEW's recorded policy: "on" (default) plans one
                # extra independent session per full-scope round; "off" is the
                # documented off switch (`set-cold-start-review` flips it on an
@@ -963,19 +811,6 @@ def cmd_setup(args) -> None:
     _prefer = getattr(args, "prefer_rewrite_over_deletion", None)
     if _prefer is not None:
         ctx.cfg["prefer_rewrite_over_deletion"] = "on" if _prefer else "off"
-    # The middle deletion policy: both kinds stay enabled, only the documented
-    # removable units may be deleted. Only an explicit flag writes a key, so a
-    # setup that does not use the mode keeps the historical config bytes.
-    _removable = getattr(args, "soft_deletions", None)
-    if _removable is not None:
-        ctx.cfg["soft_deletions"] = "on" if _removable else "off"
-    # The failure policy. Off is the historical strict path, so a setup that
-    # does not name the pair writes NO key and keeps the byte-identical
-    # pipeline_config.json. `run --tolerate-fail/--no-tolerate-fail`
-    # overrides this record for one invocation without rewriting the root.
-    _tol = getattr(args, "tolerate_fail", None)
-    if _tol is not None:
-        ctx.cfg["tolerate_fail"] = "on" if _tol else "off"
     if round_indices:
         # Traceability: pipeline round k follows built-in schedule round
         # round_indices[k-1]. The recorded per-round lists below already carry
@@ -1057,12 +892,8 @@ def cmd_setup(args) -> None:
     # must refuse to touch it (the interrupted-setup branch above keys on this).
     try:
         marker.unlink()
-    except OSError as e:
-        # Swallowing this left a marker on a COMPLETE root with nothing telling
-        # the operator; the next setup's recovery branch keys on it (F183).
-        print(f"[setup] WARNING: could not remove the setup marker {marker}: {e}. "
-              f"The root is complete and usable; remove the marker manually so a later "
-              f"setup does not mistake it for an interrupted run.", file=sys.stderr)
+    except OSError:
+        pass
     # Round r's field is {original} + {pins from earlier rounds} + the round's
     # fresh arms (a1, M rewrites, N revisions and the integrated candidates the
     # round's integrator mask selects); a1 always deduplicates against the
@@ -1232,9 +1063,9 @@ def cmd_setup(args) -> None:
     print("[setup] OOXML formatting scan:   " + format_note(ctx.state["original_format"])
           + "  (code-side proxy; the agents' category-4 formatting sweep is authoritative)")
     _zot_note = {
-        "off": "no Zotero tooling (`zot` CLI, MCP service or skill); live fields stay on the "
+        "off": "no Zotero tooling (MCP service, skill or `zot` CLI); live fields stay on the "
                "skills' manual route",
-        "read": "read-only reference resolution (`zot` CLI, then MCP service, then skill); citation "
+        "read": "read-only reference resolution (MCP service, then skill, then `zot`); citation "
                 "fields are not edited",
         "edit": "citation edits in the revised copy are allowed; the Zotero library stays "
                 "read-only",
@@ -1242,7 +1073,7 @@ def cmd_setup(args) -> None:
                  "YOUR REMOTE ZOTERO ACCOUNT (propose-then-verify protocol via the `zot` CLI)",
     }[zotero]
     print(f"[setup] zotero policy:           {zotero}: {_zot_note}"
-          + (f" (route 1 `zot` CLI: {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
+          + (f" (`zot` fallback {'on PATH' if zot_cli_available() else 'NOT on PATH'})"
              if zotero != "off" else ""))
     print(f"[setup] corpus rule:             the difference-tracking auxiliaries "
           f"(\"*.tracking-<token>.<ext>\" and their \"*.logging-<token>.<ext>\" fallbacks, "
@@ -1259,17 +1090,6 @@ def cmd_setup(args) -> None:
         "off": "the detector still runs and is recorded, but never fails an attempt",
     }[artifact_policy]
     print(f"[setup] artifact policy:         {artifact_policy}: {_art_note}")
-    _tol_recorded = "on" if tolerate_fail_of(ctx) else "off"
-    if tolerate_fail_of(ctx):
-        _tol_note = ("a stage that exhausts its retry budget is printed as TOLERATED_FAIL and "
-                     "its BEST FAILED TRIAL (most required output files, then fewest FAIL "
-                     "messages) is used, so the pipeline continues on the most complete "
-                     "attempt; the result stays PROVISIONAL, never certified")
-    else:
-        _tol_note = ("a stage that exhausts its retry budget FAILS and leaves the round "
-                     "incomplete (`run` exits 3); pass --tolerate-fail to use its best failed "
-                     "trial instead")
-    print(f"[setup] tolerate-fail policy:   {_tol_recorded}: {_tol_note}")
     print(f"[setup] per-round winners:       {root}/round<r>_winner/  (digest-verified against "
           f"the content-addressed pins)")
     # WHICH CODE THIS ROOT WILL RUN (2026-10-16): `setup` froze the script that
@@ -1307,7 +1127,7 @@ def cmd_setup(args) -> None:
                   f"forbid the disabled change and the postcheck rejects a package that "
                   f"inserts/deletes a content unit")
     print(f"[setup] next: python {root / script.name} run --root {root}")
-    print(f"[setup] manual mode: add --manual (staging is respected; each round's revise "
+    print(f"[setup] manual mode: add --agent manual (staging is respected; each round's revise "
           f"prompt appears only after its review marker)")
 
 
@@ -1343,14 +1163,6 @@ def _venue_command_root(args, cmd: str) -> Path:
         die(f"{root} is not a pipeline root yet (no pipeline_config.json): "
             f"run `setup --source <dir> --root {root} --venue <venue>` first, or point "
             f"--root at an existing root. `{cmd}` edits an existing root's configuration.",
-            code=2)
-    if (root / SETUP_MARKER).is_file() and not (root / "state.json").is_file():
-        # A setup interrupted between writing pipeline_config.json and
-        # save_state() leaves exactly this shape. Loading the default empty Ctx
-        # and saving it would persist a registry with no source/original digest,
-        # and both `setup` and `run` then refuse the root (F217).
-        die(f"{root} holds an INTERRUPTED setup (see {SETUP_MARKER}, no state.json yet); "
-            f"re-run `setup` with the same arguments to complete it before `{cmd}`.",
             code=2)
     return root
 
@@ -1464,19 +1276,6 @@ def _validate_journal_name(name: str) -> str:
     return text
 
 
-def _validate_feedback_from(name: str) -> str:
-    """`--journal-feedback-from` is free text, but it must be one clean line.
-
-    p07 interpolates it verbatim into the response-letter prompt; the sibling
-    --journal field has exactly this one-line/length guard for that reason.
-    """
-    text = str(name or "").strip()
-    if any(ch in text for ch in "\r\n\t") or len(text) > 160:
-        die(f"--journal-feedback-from must be one line of at most 160 characters "
-            f"(got {text!r})", code=2)
-    return text
-
-
 def cmd_set_venue(args) -> None:
     """Select the venue profile a root enforces, and optionally its journal."""
     root = Path(args.root).resolve()
@@ -1487,13 +1286,7 @@ def cmd_set_venue(args) -> None:
     profile_file = str(getattr(args, "profile", None) or "").strip()
     article_arg = str(getattr(args, "article_type", None) or "").strip().lower()
     show = bool(getattr(args, "show", False))
-    journal_arg = getattr(args, "journal", None)
-    # `--show` is a display request only when the invocation carries NOTHING to
-    # set: with a mutating operand it must behave like its siblings
-    # (`set-journal --show NAME`, `set-article-type --show ID`), which apply the
-    # value. Returning from the show branch first silently discarded
-    # --journal/--article-type/--profile and exited 0 (F239).
-    if show and not venue_arg and journal_arg is None and not article_arg and not profile_file:
+    if show and not venue_arg:
         ctx = Ctx(_venue_command_root(args, "set-venue"),
                   strict_venue=bool(getattr(args, "strict_venue", False)))
         captured = io.StringIO()
@@ -1563,6 +1356,7 @@ def cmd_set_venue(args) -> None:
             f"       Re-run `set-venue {profile.id} --force` if the change is intended (the "
             f"decision report records the venue of every round, and a new venue makes the "
             f"recorded judgments a mix of two rule sets).")
+    journal_arg = getattr(args, "journal", None)
     # ---- the article type ------------------------------------------------
     # An article type the operator chose is kept when the new venue has it; a
     # type that only came from the old profile's default moves with the venue,
@@ -1611,55 +1405,18 @@ def cmd_set_venue(args) -> None:
         else:
             journal, journal_source = "", "unset"
     caption_source = str(ctx.cfg.get("caption_limit_source") or "").strip().lower()
-    try:
-        caption_limit = int(ctx.cfg.get("caption_limit")
-                            if caption_source == "operator"
-                            and ctx.cfg.get("caption_limit") is not None
-                            else profile.caption_default)
-    except (TypeError, ValueError):
-        die(f"the recorded caption_limit {ctx.cfg.get('caption_limit')!r} is not numeric; "
-            f"fix the config value (or clear it) before changing the venue.", code=2)
-    if journal and getattr(args, "strict_venue", False) \
-            and not profile.journal_matches(journal):
-        # `setup --strict-venue` and `set-journal --strict-venue` both refuse
-        # this mismatch BEFORE the write; this route only warned, so a
-        # --strict-venue root could end up with a journal its rule set does not
-        # describe.
-        die("--strict-venue: " + (
-            f"{journal!r} is not one of the journals venue profile {profile.id!r} "
-            f"describes ({', '.join(profile.known_journals())}); the venue's rules still "
-            f"apply. Use `set-venue <id>` for another rule set."), code=2)
+    caption_limit = int(ctx.cfg.get("caption_limit")
+                        if caption_source == "operator" and ctx.cfg.get("caption_limit") is not None
+                        else profile.caption_default)
     with ctx.lock("set-venue"):
-        _profile_dest = None
-        _profile_prior = None
-        _profile_existed = False
         if installed is not None:
             dest_dir = ctx.root / VENUE_PROFILES_DIRNAME
             dest_dir.mkdir(parents=True, exist_ok=True)
-            _profile_dest = dest_dir / f"{profile.id}{VENUE_PROFILE_SUFFIX}"
-            _profile_existed = _profile_dest.exists()
-            if _profile_existed:
-                try:
-                    _profile_prior = _profile_dest.read_bytes()
-                except OSError as e:
-                    # Without the prior bytes the rollback below cannot restore
-                    # the file it overwrites, so refuse before installing.
-                    die(f"cannot read the existing profile {_profile_dest}: {e}; "
-                        f"refusing to overwrite bytes that cannot be restored")
-            write_json_atomic(_profile_dest, profile.to_dict())
-            print(f"[set-venue] installed profile -> {_profile_dest}")
-            profile = VenueProfile(profile.to_dict(),
-                                   origin=f"root-local profile: {_profile_dest}",
-                                   path=_profile_dest)
-            # The installed file is part of the root's FROZEN bundle: record the
-            # new digest, or every later `status` reports a healthy root as
-            # tampered with after setup.
-            _pipeline = ctx.state.get("pipeline")
-            if isinstance(_pipeline, dict):
-                _modules = dict(_pipeline.get("modules") or {})
-                _modules[VENUE_PROFILES_DIRNAME] = asset_dir_digest(
-                    ctx.root, VENUE_PROFILES_DIRNAME)
-                _pipeline["modules"] = _modules
+            dest = dest_dir / f"{profile.id}{VENUE_PROFILE_SUFFIX}"
+            write_json_atomic(dest, profile.to_dict())
+            print(f"[set-venue] installed profile -> {dest}")
+            profile = VenueProfile(profile.to_dict(), origin=f"root-local profile: {dest}",
+                                   path=dest)
         snapshot = profile.to_dict()
         snapshot["origin"] = profile.describe_origin()
         snapshot["recorded"] = utcnow()
@@ -1672,29 +1429,10 @@ def cmd_set_venue(args) -> None:
         ctx.cfg["caption_limit_source"] = ("operator" if caption_source == "operator"
                                            else "profile-default")
         ctx.cfg["venue_profile"] = snapshot
-        try:
-            _save_root_config(ctx, "set-venue",
-                              detail=f"venue={profile.id} journal={journal or '(unset)'}")
-        except BaseException:
-            # A failed config/state save must not leave a profile installed but
-            # unselected: put back the entry setup recorded (or remove the new
-            # one). If the config file already names the new venue, the profile
-            # must stay -- removing it would leave the config pointing at a
-            # missing profile.
-            if _profile_dest is not None:
-                try:
-                    _on_disk = read_json(ctx.cfg_path) or {}
-                except Exception:                                 # noqa: BLE001
-                    _on_disk = {}
-                if str(_on_disk.get("venue") or "") != profile.id:
-                    try:
-                        if not _profile_existed:
-                            _profile_dest.unlink()
-                        elif _profile_prior is not None:
-                            _profile_dest.write_bytes(_profile_prior)
-                    except OSError:
-                        pass
-            raise
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-venue", detail=f"venue={profile.id} journal={journal or '(unset)'}")
+        ctx.save_state()
     print(f"[set-venue] venue:   {profile.id} (\"{profile.label}\", {profile.describe_origin()})")
     print(f"[set-venue] article: {profile.article_type} (`{profile.article_type_id}`, "
           f"{'operator-set' if article_type_source == 'operator' else 'the profile default'})")
@@ -1817,7 +1555,10 @@ def cmd_set_article_type(args) -> None:
     with ctx.lock("set-article-type"):
         ctx.cfg["article_type"] = wanted
         ctx.cfg["article_type_source"] = "operator"
-        _save_root_config(ctx, "set-article-type", detail=wanted)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-article-type", detail=wanted)
+        ctx.save_state()
     chosen = profile.with_article_type(wanted)
     limits = chosen.length_limits()
     print(f"[set-article-type] article type: {chosen.article_type} (`{wanted}`) for venue "
@@ -1865,8 +1606,9 @@ def cmd_set_journal(args) -> None:
                     f"still apply. Use `set-venue <id>` for another rule set.")
         if getattr(args, "strict_venue", False):
             # `setup --strict-venue` refuses exactly this mismatch BEFORE it
-            # writes anything, with the same usage/refusal code.
-            die("--strict-venue: " + mismatch, code=2)
+            # writes anything. Refusing after the write left the mismatched
+            # journal in the config even though the command exited non-zero.
+            die("--strict-venue: " + mismatch)
     if ctx.state.get("runs") and not getattr(args, "force", False):
         die(f"this root already has {len(ctx.state['runs'])} run record(s): every prompt names "
             f"the journal it was written for.\n"
@@ -1874,7 +1616,10 @@ def cmd_set_journal(args) -> None:
     with ctx.lock("set-journal"):
         ctx.cfg["journal"] = journal
         ctx.cfg["journal_source"] = "operator"
-        _save_root_config(ctx, "set-journal", detail=journal)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-journal", detail=journal)
+        ctx.save_state()
     print(f"[set-journal] journal: {journal} (venue {venue_id_of(ctx)})")
     if mismatch:
         print(f"[set-journal] warning: {mismatch}")
@@ -2000,7 +1745,7 @@ def add_venue_prompt(venue_id: str, dest: Path, journal: str = "",
     return with_context_budget(CONTRADICTION_RULE + text)
 
 
-def _merge_tree(src: Path, dst: Path, notes: list = None) -> int:
+def _merge_tree(src: Path, dst: Path) -> int:
     """Copy every file under `src` into `dst` (creating paths); count writes.
 
     Every symlink -- a source entry the staged agent planted, a symlinked source
@@ -2010,27 +1755,15 @@ def _merge_tree(src: Path, dst: Path, notes: list = None) -> int:
     the link's target, and `copy2` followed a destination link (overwriting its
     external target).
     """
-    src, dst = Path(src), Path(dst)
+    src = Path(src)
     if src.is_symlink():
         # The loop below refuses links INSIDE src, but `Path.rglob` on a
         # symlinked src enumerates the TARGET's files as ordinary regular
         # files, so every one of them was published.
         raise OSError(f"refusing to publish from symlinked directory {src}")
-    # A symlinked DESTINATION was never checked: `target.parent.mkdir` and
-    # `os.replace` both follow it and write outside the venue store (F005).
-    if dst.is_symlink():
-        raise OSError(f"refusing to publish through symlinked directory {dst}")
-    _refuse_symlinked_parent(dst)
     written = 0
     for p in sorted(src.rglob("*")):
-        if p.is_symlink():
-            # Do not drop a staged link silently: its disappearance is a named
-            # gap, not a successful publication (F031).
-            if notes is not None:
-                notes.append(f"{p.relative_to(src).as_posix()}: skipped a symlinked "
-                             f"staged entry (not published)")
-            continue
-        if not p.is_file():
+        if p.is_symlink() or not p.is_file():
             continue
         rel = p.relative_to(src)
         target = dst / rel
@@ -2060,21 +1793,6 @@ def _merge_tree(src: Path, dst: Path, notes: list = None) -> int:
     return written
 
 
-def _readme_has_venue_row(line: str, vid: str) -> bool:
-    """True when one README table line is the venue's OWN row.
-
-    The venue's row is the one whose FIRST cell is the backticked id. Matching
-    any table line that merely CONTAINS `` `vid` `` accepted a schema row, so a
-    missing venue row was never added/replaced (and a schema line could be
-    overwritten) -- F94 -- and the post-publish substring check could never
-    catch it -- F162.
-    """
-    if not line.startswith("|"):
-        return False
-    cells = line.split("|")
-    return len(cells) > 1 and cells[1].strip() == f"`{vid}`"
-
-
 def _merge_readme_row(staged: Path, dest: Path, vid: str,
                       profile: dict = None) -> str:
     """Publish one venue's row from the staged README into the shared one.
@@ -2093,7 +1811,7 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
         text = read_text_bounded(staged)
         if text is not None:
             staged_lines = text.splitlines()
-    rows = [ln for ln in staged_lines if _readme_has_venue_row(ln, vid)]
+    rows = [ln for ln in staged_lines if ln.startswith("|") and f"`{vid}`" in ln]
     synthesized = False
     if not rows:
         label = str((profile or {}).get("label") or vid)
@@ -2105,19 +1823,12 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     if not dest.is_file():
         write_text_atomic(dest, row + "\n")
         return "created"
-    if dest.is_symlink():
-        # The later atomic write replaces the link, but the READ still followed
-        # it: an external file's contents were copied into the published venue
-        # README (F187). Refuse instead of reading through a link.
-        return ("refused (the destination README is a symlink; it was neither read "
-                "nor replaced)")
-    text = read_text_bounded(dest)
-    if text is None:
-        return ("unreadable (not a regular file within the size budget); the profile "
-                "was published but its README row was not merged")
-    lines = text.splitlines()
+    try:
+        lines = dest.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as e:
+        return f"unreadable ({e}); the profile was published but its README row was not merged"
     for i, ln in enumerate(lines):
-        if _readme_has_venue_row(ln, vid):
+        if ln.startswith("|") and f"`{vid}`" in ln:
             if ln == row:
                 return "unchanged"
             lines[i] = row
@@ -2150,32 +1861,6 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     return "synthesized" if synthesized else "appended"
 
 
-def _add_venue_staged_roots(sb: Path, notes: list = None) -> list:
-    """The add-venue staging roots, refusing a symlinked `store/` (F007).
-
-    `is_file()`/`is_dir()` FOLLOW an ancestor symlink, so a planted
-    `store -> /outside` made the publisher read the profile/README and copy the
-    official tree from the host into the shared venue store; only the final
-    component was checked. Refuse the staged `store/` itself (and a non-directory
-    entry of that name) and keep the sandbox root, which is not reached through
-    an agent-planted link.
-    """
-    sb = Path(sb)
-    roots = []
-    for cand in (sb / "store", sb):
-        if cand != sb:
-            if cand.is_symlink():
-                if notes is not None:
-                    notes.append(f"{cand.name}: refused a symlinked staging directory")
-                continue
-            if cand.exists() and not cand.is_dir():
-                if notes is not None:
-                    notes.append(f"{cand.name}: refused a staging entry that is not a directory")
-                continue
-        roots.append(cand)
-    return roots
-
-
 def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     """Publish a completed `add-venue` sandbox into the shared store.
 
@@ -2184,16 +1869,9 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     profile, the venue's README row, and the `.official`/`.manuscripts` corpora
     into `dest`, then the caller validates and derives the template pack.
     """
+    roots = [sb / "store"]
     out = {"profile": None, "readme": "unchanged", "official_files": 0,
            "manuscript_files": 0, "sandbox": str(sb), "notes": []}
-    roots = _add_venue_staged_roots(sb, out["notes"])
-    # The profile/README writes below have no parent-link guard of their own;
-    # `_merge_tree` refuses one for the corpora. Apply the same containment
-    # rule once here so a symlinked store component cannot redirect the
-    # profile or README outside the venue store (F206).
-    if dest.is_symlink():
-        raise OSError(f"refusing to publish through symlinked directory {dest}")
-    _refuse_symlinked_parent(dest)
     profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in roots
                     if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
     if profile is not None and profile.is_symlink():
@@ -2231,15 +1909,14 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
         # operator gets a note and the rest of the staging still publishes.
         out["notes"].append(f"{official.name}: refused a symlinked staged directory")
     elif official is not None:
-        out["official_files"] = _merge_tree(
-            official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}", out["notes"])
+        out["official_files"] = _merge_tree(official, dest / f"{vid}{VENUE_OFFICIAL_SUFFIX}")
     manuscripts = next((r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}" for r in roots
                         if (r / f"{vid}{VENUE_EXEMPLAR_SUFFIX}").is_dir()), None)
     if manuscripts is not None and manuscripts.is_symlink():
         out["notes"].append(f"{manuscripts.name}: refused a symlinked staged directory")
     elif manuscripts is not None:
-        out["manuscript_files"] = _merge_tree(
-            manuscripts, dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}", out["notes"])
+        out["manuscript_files"] = _merge_tree(manuscripts,
+                                              dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}")
     for rel, why in (("PUBLISH.md", "the agent explained a publish blocker"),
                      ("_pipeline_done.json", "the agent's completion marker")):
         if (sb / rel).is_file():
@@ -2250,7 +1927,7 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
 def latest_add_venue_sandbox(dest: Path, vid: str):
     """The newest `<dest>/.add-venue/<vid>-*` sandbox, or None."""
     base = Path(dest) / ".add-venue"
-    if not base.is_dir() or base.is_symlink():
+    if not base.is_dir():
         return None
     # Match the EXACT `<vid>-<stamp>` segment, not a name prefix: for
     # vid="nature", `nature-biotechnology-2026...` also startswith "nature-"
@@ -2265,8 +1942,7 @@ def latest_add_venue_sandbox(dest: Path, vid: str):
         m = pat.match(p.name)
         return (m.group(1), m.group(2) or "", p.name)
 
-    cands = sorted((p for p in base.iterdir()
-                    if p.is_dir() and not p.is_symlink() and pat.match(p.name)),
+    cands = sorted((p for p in base.iterdir() if p.is_dir() and pat.match(p.name)),
                    key=_stamp_key)
     return cands[-1] if cands else None
 
@@ -2276,13 +1952,7 @@ def template_stage_record(ctx: Ctx) -> dict:
     st = (ctx.state or {}).get("template_stage") or {}
     if not isinstance(st, dict) or not st.get("ok") or not st.get("dir"):
         return {}
-    # `template_stage.dir` is STATE DATA, not a trusted path fragment: an
-    # absolute path or a `..` escape made `ctx.root / dir` discard the root and
-    # let round 1 copy an outside tree as the manuscript base (F153). Every
-    # other recorded path (`winner_dir`, ...) is already containment-checked;
-    # do the same here and treat a damaged value as "no template stage".
-    target = contained_under_or_none(ctx.root, st["dir"])
-    return st if target is not None and target.is_dir() else {}
+    return st if (ctx.root / str(st["dir"])).is_dir() else {}
 
 
 def working_original_dir(ctx: Ctx) -> Path:
@@ -2343,6 +2013,7 @@ def _stage_template_rewrite_sandbox(ctx: Ctx, src: Path, templates: dict,
         rmtree_force(sb)
     sb.mkdir(parents=True, exist_ok=True)
     stage_venue_template(ctx, sb)
+    write_json_atomic(sb / "CONFORM_CONTEXT.json", conform_context(ctx, src))
     srcdir = sb / "source"
     srcdir.mkdir(exist_ok=True)
     _stage_source_package(srcdir, src)
@@ -2382,12 +2053,9 @@ def _record_template_stage(ctx: Ctx, sb: Path, agent: str) -> dict:
     return ctx.state["template_stage"]
 
 
-def _ensure_template_stage_for_run(ctx: Ctx, args) -> bool:
+def _ensure_template_stage_for_run(ctx: Ctx, args, *, agent_command=None,
+                                   agent_label=None) -> None:
     """TRANSFER/INIT MODES: conform the submission to the journal's rules FIRST.
-
-    Returns True when the stage exists/was run, and False when it does not
-    apply to this root (no template/no .docx/--no-template-stage), so a
-    conform-only `run` can report "not applicable" instead of "pending".
 
     With an official Word template the stage is the template-first session
     (`conform --agent`): copy the template, replace its placeholders. Without
@@ -2396,46 +2064,38 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> bool:
     postcheck gates the whole run, and a passing package becomes round 1's
     working original (the a1 base, the field's `original` view and every
     `vs_original` comparison read it). `--no-template-stage` opts out. `init`
-    runs this stage without any journal feedback; `transfer` also feeds the
-    decision letter into the rounds afterwards -- and without a template the
-    transfer stage is skipped (its job IS the target journal's template).
+    and transfer both run it even when no applicable Word template ships,
+    using target-journal guidelines and academic convention in the source's
+    native format. Transfer then feeds the decision letter into the rounds.
     """
     if template_stage_record(ctx):
+        require_conform_context(ctx, ctx.root / TEMPLATE_REWRITE_DIRNAME, ctx.pristine)
+        ensure_conform_quality(ctx.root / TEMPLATE_REWRITE_DIRNAME, args, verify_only=True,
+                               command=agent_command)
         print("[run] template-first stage: already recorded (state.json)")
         # BACKFILL: a root whose stage was recorded before the stage-time hook
         # existed (or one where the process died between recording and tracking)
         # still gets the copies -- the call is idempotent and keeps a fresh
         # entry, so it costs one digest pass, never an agent or a comparison.
         maybe_track_template_stage(ctx, ctx.root / TEMPLATE_REWRITE_DIRNAME)
-        return True
+        return
     if bool(getattr(args, "no_template_stage", False)):
         print("[run] template-first stage: skipped by --no-template-stage")
-        return False
+        return
     mode = journal_mode_of(ctx)
-    templates = venue_word_templates(ctx)
-    if not templates and mode != JOURNAL_MODE_INIT:
-        print("[run] template-first stage: the venue ships no Word template -- skipping")
-        return False
-    if not any(p.suffix.lower() == ".docx" for p in template_package_files(ctx.pristine)):
-        print("[run] template-first stage: the corpus carries no .docx -- skipping "
-              "(nothing to author in Word format)")
-        return False
+    templates = conform_templates_for_source(ctx, ctx.pristine)
     if not templates:
-        print("[run] template-first stage: the venue ships no Word template -- conforming to "
+        print("[run] template-first stage: no applicable Word template -- conforming to "
               "the journal's own author guidelines, then to academic convention")
-    _legacy_agent = str(getattr(args, "agent", None) or "")
-    if _legacy_agent:
-        agent = _legacy_agent
-    elif getattr(args, "manual", False):
-        agent = "manual"
-    else:
-        agent = "the model/harness pair"
+    agent = agent_label or str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
     if agent == "manual" and sb.is_dir() and any(sb.iterdir()) and (sb / PROMPT_FILE).is_file():
         # Re-entering the stage by hand CHECKS the session the operator filled
         # (`--agent manual` told them to do exactly that). Rebuilding it with
         # force=True deleted the hand-filled out/ and never recorded the stage,
         # so `run` looped forever and the operator's work was lost.
+        require_conform_context(ctx, sb, ctx.pristine)
+        ensure_conform_quality(sb, args, command=agent_command)
         report = template_rewrite_postcheck(sb, ctx.pristine, templates,
                                             policy=format_policy_of(ctx))
         report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
@@ -2451,13 +2111,14 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> bool:
                 f"{sb / 'out'} using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
                 f"`conform --root {ctx.root} --agent manual`). Its postcheck still reports: "
                 + "; ".join(report["errors"])[:400])
+        ensure_conform_quality(sb, args, verify_only=True, command=agent_command)
         rec_stage = _record_template_stage(ctx, sb, "manual")
         print(f"[run] template-first stage: PASSED -- coverage "
               f"{report['coverage']['covered']}/{report['coverage']['checked']} "
               f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
               f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
         maybe_track_template_stage(ctx, sb)
-        return True
+        return
     sb = _stage_template_rewrite_sandbox(ctx, ctx.pristine, templates, force=True)
     action = ("copy the journal's templates, replace their placeholders with this submission's "
               "content" if templates else
@@ -2467,23 +2128,18 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> bool:
         die(f"{mode} mode conforms the submission before any other stage: fill {sb / 'out'} "
             f"using {sb / PROMPT_FILE}, then re-run `run` (or check it with "
             f"`conform --root {ctx.root} --agent manual`)")
-    if _legacy_agent:
-        cmd = resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
-    else:
-        _t_h = agent_choice(getattr(args, "agent_harness", None)
-                            or os.environ.get("PAPER_AGENT_HARNESS", ""))
-        _t_m = getattr(args, "agent_model", None) or os.environ.get("PAPER_AGENT_MODEL") or ""
-        _t_h, _t_m = _agent_pair_from_options(_t_h or None, _t_m or None)
-        agent = agent_selection_label(_t_h, _t_m)
-        cmd = resolve_agent_model_cmd(
-            _t_h, _t_m, getattr(args, "agent_cmd", None),
-            api_key_env="PAPER_AGENT_MODEL_API_KEY")
+    cmd = agent_command or resolve_agent_cmd(agent, getattr(args, "agent_cmd", None))
     rec = {"id": TEMPLATE_REWRITE_DIRNAME, "kind": "template-rewrite", "status": "running",
            "sandbox": str(sb), "round": 0}
     timeout = _timeout_seconds(args, DEFAULTS.get("timeout", 14400))
     res = _execute_attempt_in(sb, rec, cmd, timeout)
     print(f"[run] template-first stage: agent {agent} rc={res.get('rc')} in "
           f"{res.get('dur', 0):.0f}s (log: {res.get('log')})")
+    if res.get("error") or res.get("rc") != 0:
+        die("conform writer/audit failed: " + str(res.get("error") or res.get("rc")))
+    quality_problem = write_quality_problem(sb, "template-rewrite", rec)
+    if quality_problem:
+        die("conform acceptance blocked: " + quality_problem)
     report = template_rewrite_postcheck(sb, ctx.pristine, templates,
                                         policy=format_policy_of(ctx))
     report.update({"venue": venue_id_of(ctx), "source": str(ctx.pristine), "sandbox": str(sb),
@@ -2492,13 +2148,13 @@ def _ensure_template_stage_for_run(ctx: Ctx, args) -> bool:
     if not report.get("ok"):
         die("the template-first stage did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
+    ensure_conform_quality(sb, args, verify_only=True, command=agent_command)
     rec_stage = _record_template_stage(ctx, sb, agent)
     print(f"[run] template-first stage: PASSED -- coverage "
           f"{report['coverage']['covered']}/{report['coverage']['checked']} "
           f"({report['coverage']['ratio']:.0%}), round 1 now starts from "
           f"{rec_stage['dir']} (digest {str(rec_stage['digest'])[:12]})")
     maybe_track_template_stage(ctx, sb)
-    return True
 
 
 def default_template_package_source(ctx: Ctx):
@@ -2531,13 +2187,16 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
     code-side (template guide prose gone, source content covered, template
     styles still present) and the report lands in the root's reports/.
     """
+    templates = conform_templates_for_source(ctx, src)
     agent = str(getattr(args, "agent", None) or "").strip()
     sb = ctx.root / TEMPLATE_REWRITE_DIRNAME
     if sb.is_dir() and any(sb.iterdir()) and not bool(getattr(args, "force", False)) \
-            and agent == "manual" and (sb / PROMPT_FILE).is_file():
+            and (sb / "out").is_dir() and (sb / PROMPT_FILE).is_file():
         # Re-running `--agent manual` on an existing session CHECKS it: the
         # operator (or an agent run by hand) has filled out/, and this invocation
         # reports the code-side verdict instead of wiping the work.
+        require_conform_context(ctx, sb, src)
+        ensure_conform_quality(sb, args)
         report = template_rewrite_postcheck(sb, src, templates,
                                             policy=format_policy_of(ctx))
         report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
@@ -2552,6 +2211,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         if not report["ok"]:
             die("the template-first rewrite did not pass its postcheck: "
                 + "; ".join(report["errors"])[:400])
+        ensure_conform_quality(sb, args, verify_only=True)
         print("[conform] the package in out/ passed the code-side postcheck")
         # The stage is finished the moment its postcheck passes: the tracked
         # copies of the conformed package are written beside out/ now, not at
@@ -2599,6 +2259,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
         rmtree_force(sb)
     sb.mkdir(parents=True, exist_ok=True)
     stage_venue_template(ctx, sb)
+    write_json_atomic(sb / "CONFORM_CONTEXT.json", conform_context(ctx, src))
     srcdir = sb / "source"
     srcdir.mkdir(exist_ok=True)
     _stage_source_package(srcdir, src)
@@ -2634,6 +2295,11 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
           f"(log: {res.get('log')})")
     if res.get("error"):
         print(f"[conform] WARNING: {res['error']}")
+    if res.get("error") or res.get("rc") != 0:
+        die("conform writer/audit failed: " + str(res.get("error") or res.get("rc")))
+    quality_problem = write_quality_problem(sb, "template-rewrite", rec)
+    if quality_problem:
+        die("conform acceptance blocked: " + quality_problem)
     report = template_rewrite_postcheck(sb, src, templates,
                                         policy=format_policy_of(ctx))
     report.update({"venue": venue_id_of(ctx), "source": str(src), "sandbox": str(sb),
@@ -2661,6 +2327,7 @@ def _template_rewrite_session(ctx: Ctx, args, src: Path, templates: dict) -> Non
     if not report["ok"]:
         die("the template-first rewrite did not pass its postcheck: "
             + "; ".join(report["errors"])[:400])
+    ensure_conform_quality(sb, args, verify_only=True)
     print("[conform] the package in out/ passed the code-side postcheck; it is NOT yet "
           "judged: run the guided-review/revise stages (or a full `run`) when you want it in the round.")
     maybe_track_template_stage(ctx, sb)
@@ -2767,41 +2434,6 @@ def cmd_build_venue_templates(args) -> None:
         print(f"[build-venue-templates] skipped {s['file']}: {s['why']}")
     print(f"[build-venue-templates] files: {', '.join(report['files'])}; "
           f"every input and output is sha256-pinned in {VENUE_PACK_MANIFEST}")
-    _build_root = getattr(args, "root", None)
-    if _build_root and report.get("pack"):
-        # The pack is written inside the venue store; when that is the root's
-        # frozen venue_profiles/ bundle, re-record its digest (F103).
-        _refresh_venue_module_digest(_build_root, Path(report["pack"]).parent)
-
-
-def _refresh_venue_module_digest(root, dest) -> bool:
-    """Re-record `venue_profiles` in the root's frozen-module manifest.
-
-    `add-venue --root` publishes into `<root>/venue_profiles/` -- the frozen
-    bundle `setup` recorded a digest for. Leaving the old digest made the next
-    `status` report the root as tampered with (and offered `sync-code`, which
-    would overwrite the just-published profile). `set-venue` re-records the
-    digest at its install site; this is the equivalent for add-venue and
-    build-venue-templates (F103).
-    """
-    root = Path(root).resolve()
-    if Path(dest).resolve() != (root / VENUE_PROFILES_DIRNAME).resolve():
-        return False
-    state_path = root / "state.json"
-    if not os.path.lexists(state_path):
-        return False
-    st, _problem = load_state_file(state_path)
-    if not isinstance(st, dict):
-        return False
-    pipeline = st.get("pipeline")
-    if not isinstance(pipeline, dict):
-        return False
-    modules = dict(pipeline.get("modules") or {})
-    modules[VENUE_PROFILES_DIRNAME] = asset_dir_digest(root, VENUE_PROFILES_DIRNAME)
-    pipeline["modules"] = modules
-    st["updated"] = utcnow()
-    write_json_atomic(state_path, st)
-    return True
 
 
 def cmd_add_venue(args) -> None:
@@ -2810,19 +2442,8 @@ def cmd_add_venue(args) -> None:
     if not VENUE_ID_RE.match(vid or ""):
         die(f"add-venue needs a slug venue id (letters, digits, '.', '_', '+', '-'): "
             f"got {vid!r}", code=2)
-    dest_arg = Path(getattr(args, "profiles_dir", None)
-                    or venue_profiles_write_dir(getattr(args, "root", None))).expanduser()
-    # A symlinked --profiles-dir used to be followed by `resolve()`/`mkdir` and
-    # every profile/README write landed in the link's target while the command
-    # reported the named store (F206). Refuse before resolving.
-    if dest_arg.is_symlink():
-        die(f"add-venue: refusing symlinked --profiles-dir {dest_arg}: writes would land "
-            f"outside the named venue store", code=1)
-    try:
-        _refuse_symlinked_parent(dest_arg)
-    except OSError as e:
-        die(f"add-venue: {e}", code=1)
-    dest = dest_arg.resolve()
+    dest = Path(getattr(args, "profiles_dir", None)
+                or venue_profiles_write_dir(getattr(args, "root", None))).resolve()
     dest.mkdir(parents=True, exist_ok=True)
     print(f"[add-venue] venue: {vid}")
     print(f"[add-venue] store: {dest}")
@@ -2867,69 +2488,56 @@ def cmd_add_venue(args) -> None:
               f"(log: {res.get('log')})")
         if res.get("error"):
             print(f"[add-venue] WARNING: {res['error']}")
-    # A failed/incomplete session stages a HALF-WRITTEN profile and exemplars.
-    # The completion marker and PUBLISH.md used to be printed as notes only, so
-    # a `status: failed` session was published and the command exited 0 (F24).
-    # Refuse before anything reaches the shared store.
-    marker_path = sb / "_pipeline_done.json"
-    if os.path.lexists(marker_path):
-        marker = read_json(marker_path, revive=False)
-        status = (str(marker.get("status") or "").strip().lower()
-                  if isinstance(marker, dict) else "")
-        if status != "complete":
-            why = (str(marker.get("error") or "").strip()
-                   if isinstance(marker, dict) else "")
-            die(f"add-venue: the staging sandbox's _pipeline_done.json records status "
-                f"{status or 'unreadable'!r}"
-                + (f" ({why})" if why else "")
-                + f"; an incomplete or failed session is not published. Nothing was "
-                  f"published to {dest}.", code=1)
-    publish_md = sb / "PUBLISH.md"
-    if os.path.lexists(publish_md):
-        die(f"add-venue: the staging sandbox carries PUBLISH.md, the agent's own record of a "
-            f"publish blocker; refusing to publish its partial artifacts to {dest}.", code=1)
+        if res.get("error") or res.get("rc") != 0:
+            die("add-venue writer/audit failed: " + str(res.get("error") or res.get("rc")))
     # The agent works in a sandbox that can only write inside itself; the
     # orchestrator publishes the staged store layout into the shared store.
     # VALIDATE BEFORE PUBLISH: a bad agent-written profile must never replace
     # the store's copy (the shipped default is read at import, so publishing an
     # invalid one could brick every later command, including the repair tools).
-    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}"
-                           for r in _add_venue_staged_roots(sb)
-                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()
-                           and not (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_symlink()), None)
+    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
+                           if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()), None)
     if staged_profile is not None:
-        # Agent-written: bound the read and refuse a symlink/FIFO/oversize file
-        # before validation, as every other agent artifact read does (F210).
-        _staged_data = read_json(staged_profile, revive=False)
-        if _staged_data is None:
-            die(f"add-venue: the staged profile {staged_profile.name} is not a readable "
-                f"JSON regular file within the size budget; nothing was published to "
-                f"{dest}", code=1)
         try:
-            VenueProfile(_staged_data, origin="add-venue", path=staged_profile)
+            VenueProfile(json.loads(staged_profile.read_text(encoding="utf-8")),
+                         origin="add-venue", path=staged_profile)
         except (OSError, ValueError, VenueProfileError) as e:
             die(f"add-venue: the staged profile {staged_profile.name} does not validate "
                 f"({e}); nothing was published to {dest}", code=1)
+    quality_problem = write_quality_problem(sb, "add-venue")
+    if quality_problem:
+        agent = str(getattr(args, "agent", None) or DEFAULTS.get("agent", "codex"))
+        if agent == "manual":
+            die("add-venue publication requires --agent/--agent-cmd for its independent audit")
+        quality_rec = {"id": f"add-venue_{vid}", "kind": "add-venue", "round": 0}
+        try:
+            audit_write_output(sb, quality_rec,
+                               resolve_agent_cmd(agent, getattr(args, "agent_cmd", None)),
+                               _timeout_seconds(args, 3600))
+        except (OSError, ValueError, TypeError) as exc:
+            die("add-venue publication blocked: " + str(exc))
+    # Bounded repair may have changed the profile: revalidate final bytes
+    # before replacing any file in the shared store.
+    final_profile = sb / "store" / f"{vid}{VENUE_PROFILE_SUFFIX}"
+    if not final_profile.is_file():
+        die("add-venue: audited staged store has no profile; nothing was published")
+    try:
+        VenueProfile(json.loads(final_profile.read_text(encoding="utf-8")),
+                     origin="add-venue audited", path=final_profile)
+    except (OSError, ValueError, VenueProfileError) as exc:
+        die("add-venue: repaired profile is invalid; nothing was published: " + str(exc))
     pub = publish_add_venue_staging(sb, dest, vid)
-    if staged_profile is not None and pub["profile"] is None:
-        # The validator accepted a profile the publisher did not find: never
-        # report success with profile=MISSING (F25).
-        die(f"add-venue: the staged profile {staged_profile} validated but was not "
-            f"published; refusing to report success", code=1)
     print(f"[add-venue] staged artifacts published: profile={pub['profile'] or 'MISSING'}, "
           f"README={pub['readme']}, official files={pub['official_files']}, "
           f"exemplar files={pub['manuscript_files']}")
     for note in pub.get("notes") or []:
         print(f"[add-venue] staged note: {note}")
-    _add_venue_root = getattr(args, "root", None)
-    if _add_venue_root:
-        _refresh_venue_module_digest(_add_venue_root, dest)
     if vid in BUILTIN_VENUE_PROFILES:
         try:
-            _published = read_json(dest / f"{vid}{VENUE_PROFILE_SUFFIX}", revive=False)
+            _published = json.loads((dest / f"{vid}{VENUE_PROFILE_SUFFIX}")
+                                    .read_text(encoding="utf-8"))
             _builtin = BUILTIN_VENUE_PROFILES[vid]
-            if (_published is not None
-                    and json.dumps(_published, sort_keys=True)
+            if (json.dumps(_published, sort_keys=True)
                     != json.dumps(_builtin, sort_keys=True)):
                 print(f"[add-venue] NOTE: {vid!r} also has a BUILT-IN fallback and the shipped "
                       f"file now differs from it. A root with NO venue_profiles/{vid}.json "
@@ -2943,25 +2551,13 @@ def cmd_add_venue(args) -> None:
         problems.append(f"{profile_path.name} was not written")
     else:
         try:
-            _published = read_json(profile_path, revive=False)
-            if _published is None:
-                problems.append(f"{profile_path.name} is not a readable JSON regular file "
-                                f"within the size budget")
-            else:
-                VenueProfile(_published, origin="add-venue", path=profile_path)
+            VenueProfile(json.loads(profile_path.read_text(encoding="utf-8")),
+                         origin="add-venue", path=profile_path)
         except (OSError, ValueError, VenueProfileError) as e:
             problems.append(f"{profile_path.name} does not validate: {e}")
     readme = dest / "README.md"
-    if readme.is_file():
-        _readme_text = read_text_bounded(readme)
-        if _readme_text is None:
-            problems.append(f"{readme.name} could not be read as a regular file for the "
-                            f"post-publish row check")
-        elif not any(_readme_has_venue_row(ln, vid)
-                     for ln in _readme_text.splitlines()):
-            # A substring test accepted any mention of the id, so a README with
-            # no row for the venue was reported as fine (F162).
-            problems.append(f"{readme.name} has no row whose first cell is `{vid}`")
+    if readme.is_file() and vid not in readme.read_text(encoding="utf-8", errors="replace"):
+        problems.append(f"{readme.name} has no row mentioning {vid!r}")
     # The store IS the venue_profiles dir here: the exemplar corpus sits next to
     # the profile, not under another venue_profiles/ level.
     ex_dir = dest / f"{vid}{VENUE_EXEMPLAR_SUFFIX}"
@@ -2991,10 +2587,6 @@ def cmd_add_venue(args) -> None:
     if report.get("mandatory_sections"):
         print(f"[add-venue] MANDATORY sections (official template): "
               f"{', '.join(report['mandatory_sections'])}")
-    if _add_venue_root:
-        # The template pack lands inside <root>/venue_profiles/ too, so record
-        # the final digest AFTER it is built as well (F103).
-        _refresh_venue_module_digest(_add_venue_root, dest)
     print(f"[add-venue] the official template is AUTHORITATIVE; the recent-practice norm is "
           f"ADVISORY, and the venue profile's own guidelines win over both")
     raise SystemExit(1 if problems else 0)
@@ -3031,7 +2623,10 @@ def cmd_set_tiebreak_defect_floor(args) -> None:
             f"       Re-run `set-tiebreak-defect-floor {floor} --force` if the change is intended.")
     with ctx.lock("set-tiebreak-defect-floor"):
         ctx.cfg["tiebreak_defect_floor"] = floor
-        _save_root_config(ctx, "set-tiebreak-defect-floor", detail=str(floor))
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-tiebreak-defect-floor", detail=str(floor))
+        ctx.save_state()
     print(f"[set-tiebreak-defect-floor] floor: {floor} (the severity_tier_category walk stops "
           f"when the cleanest ranked version reaches {floor} defect(s), or when every cell is "
           f"used)")
@@ -3085,7 +2680,10 @@ def cmd_set_cold_start_review(args) -> None:
             f"(rounds whose review has not been materialized yet will use it).")
     with ctx.lock("set-cold-start-review"):
         ctx.cfg["cold_start_review"] = mode_arg
-        _save_root_config(ctx, "set-cold-start-review", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-cold-start-review", detail=mode_arg)
+        ctx.save_state()
     detail = ("one cold-context independent discovery session per full-scope round, findings "
               "X-9xx, every declared verifier re-run at postcheck time" if mode_arg == "on"
               else "no cold-start session is planned")
@@ -3122,7 +2720,10 @@ def cmd_set_submit_code(args) -> None:
     begin_run_log("set-submit-code", ctx.root, sys.argv)
     with ctx.lock("set-submit-code"):
         ctx.cfg["submit_code"] = mode_arg
-        _save_root_config(ctx, "set-submit-code", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-submit-code", detail=mode_arg)
+        ctx.save_state()
     detail = ("`code/` ships in the submission package and a response letter may cite it"
               if mode_arg == "on" else
               "`code/` is stripped from the submission package and a response letter may not "
@@ -3182,7 +2783,10 @@ def cmd_set_author_to_complete(args) -> None:
     begin_run_log("set-author-to-complete", ctx.root, sys.argv)
     with ctx.lock("set-author-to-complete"):
         ctx.cfg["author_to_complete"] = mode_arg
-        _save_root_config(ctx, "set-author-to-complete", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-author-to-complete", detail=mode_arg)
+        ctx.save_state()
     detail = {
         "document": ("the stages mark a missing mandatory item with the literal "
                      "\"[AUTHOR TO COMPLETE: ...]\" token and list it for the author (the "
@@ -3220,24 +2824,13 @@ def cmd_set_placeholder_file(args) -> None:
     patterns = [str(x).strip() for x in (getattr(args, "patterns", None) or [])
                 if str(x).strip()]
     current = [str(x) for x in ((ctx.cfg or {}).get("placeholder_files") or [])]
-    _mutating = bool(getattr(args, "clear", False)) or bool(patterns)
-    if _mutating and ctx.state.get("runs") and not getattr(args, "force", False):
-        # Declarations change which corpus files are EVIDENCE for every later
-        # re-derivation (decide, a resumed run, readiness/evidence scans). Every
-        # other plan-shaping setter guards a root with run records; this one
-        # silently reinterpreted already-decided rounds.
-        die(f"this root already has {len(ctx.state['runs'])} run record(s): the placeholder "
-            f"declarations change which files count as evidence for every later "
-            f"re-derivation.\n"
-            f"       Re-run with --force if the change is intended.")
     if bool(getattr(args, "clear", False)):
-        if patterns:
-            die("--clear takes no pattern operand: it removes every declaration. Run without "
-                "--clear to add one, or clear first and add in a second invocation.", code=2)
-        begin_run_log("set-placeholder-file", ctx.root, sys.argv)
         with ctx.lock("set-placeholder-file"):
             ctx.cfg["placeholder_files"] = []
-            _save_root_config(ctx, "set-placeholder-file", detail="cleared")
+            ctx.state["config"] = ctx.cfg
+            write_json_atomic(ctx.cfg_path, ctx.cfg)
+            ctx.log("set-placeholder-file", detail="cleared")
+            ctx.save_state()
         print("[set-placeholder-file] cleared (no file is treated as a placeholder)")
         return
     # The declarations name PACKAGE-relative paths; on an existing root the
@@ -3267,7 +2860,10 @@ def cmd_set_placeholder_file(args) -> None:
     begin_run_log("set-placeholder-file", ctx.root, sys.argv)
     with ctx.lock("set-placeholder-file"):
         ctx.cfg["placeholder_files"] = merged
-        _save_root_config(ctx, "set-placeholder-file", detail=", ".join(merged))
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-placeholder-file", detail=", ".join(merged))
+        ctx.save_state()
     report = placeholder_files_report(pkg_root, extra_globs=merged,
                                       area_names=submission_not_carried_areas(ctx))
     print(f"[set-placeholder-file] declared {len(merged)} pattern(s); "
@@ -3309,7 +2905,10 @@ def cmd_set_dedup_mode(args) -> None:
             f"       Re-run `set-dedup-mode {mode_arg} --force` if the change is intended.")
     with ctx.lock("set-dedup-mode"):
         ctx.cfg["dedup_mode"] = mode_arg
-        _save_root_config(ctx, "set-dedup-mode", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-dedup-mode", detail=mode_arg)
+        ctx.save_state()
     detail = ("every sheet's rows are separate mentions" if mode_arg == "off"
               else "rows across sheets merge on the structured location key")
     print(f"[set-dedup-mode] mode: {mode_arg} ({detail})")
@@ -3368,7 +2967,10 @@ def cmd_set_champion_select(args) -> None:
     begin_run_log("set-champion-select", ctx.root, sys.argv)
     with ctx.lock("set-champion-select"):
         ctx.cfg["champion_select"] = mode_arg
-        _save_root_config(ctx, "set-champion-select", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-champion-select", detail=mode_arg)
+        ctx.save_state()
     print(f"[set-champion-select] mode: {mode_arg}"
           + ("" if mode_arg == "judge" else " (PROVISIONAL: no judge panel)"))
 
@@ -3403,20 +3005,6 @@ def cmd_adopt_sweep(args) -> None:
     sweeps = (Path(str(args.sweeps)).expanduser() if getattr(args, "sweeps", None) else
               Path(__file__).resolve().parent / "paper-skills" / "paper-review"
               / "references" / "sweeps.md")
-    _snap = frozen_snapshot_root()
-    if _snap and is_within(sweeps, Path(_snap["root"])):
-        # The default target is the paper-skills pack frozen BESIDE this running
-        # driver. Rewriting it leaves the root's recorded module manifest stale,
-        # so the very next `run`/`decide` refuses the root, and `sync-code`
-        # would copy the maintained pack back over the adoption. The adoption
-        # belongs in the maintained checkout, then `sync-code` into the root.
-        die(f"adopt-sweep would rewrite the FROZEN paper-skills of the root it is "
-            f"running from ({_snap['root']}), which would stop that root matching its "
-            f"own recorded module manifest.\n"
-            f"       Run adopt-sweep from the MAINTAINED checkout (the tree holding the "
-            f"paper_pipeline.py you maintain), then sync the root:\n"
-            f"       python3 {_snap.get('origin_path') or '<maintained>/paper_pipeline.py'} "
-            f"sync-code --root {_snap['root']}", code=2)
     if not sweeps.is_file():
         die(f"the target sweeps.md {sweeps} does not exist (pass --sweeps PATH)", code=2)
     try:
@@ -3552,41 +3140,21 @@ def cmd_set_revision_mode(args) -> None:
             f"       Re-run `set-revision-mode {mode_arg} --force` if the change is intended.")
     named = [str(x) for x in (getattr(args, "journal_feedback", None) or []) if str(x).strip()]
     info = JOURNAL_MODES[mode_arg]
-    # The same refusal `setup` applies: a feedback-consuming mode replaces the
-    # guided review with the concerns ledger, and the guided review is the
-    # session that reconciles every concern. The setter used to have no such
-    # check, so a root created with `--no-guided-review` could be switched to
-    # transfer/resubmit/llm and leave the letter unanswered (F84).
-    if info["feedback"]:
-        if str((ctx.cfg or {}).get("guided_review")
-               or GUIDED_REVIEW_DEFAULT).lower() == "off":
-            die(f"revision mode {mode_arg!r} reads an editors'/reviewers' letter, but this "
-                f"root was created with --no-guided-review: the guided review is the "
-                f"session that reconciles every concern, so switching would leave the "
-                f"letter unanswered. Re-create the root with the guided review ON, or "
-                f"choose a mode that reads no feedback.", code=2)
-    if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
-        # Resolve/validate ONLY for a mode that reads a journal letter. A
-        # no-feedback mode (init/continue) documents the flag as ignored, and
-        # llm reads only llm_review_feedback/ (setup skips the same validation),
-        # so a stale path must not be fatal there (F215).
-        _named_resolved = []
-        for item in named:
-            q = Path(item).expanduser()
-            if not q.is_absolute():
-                # Deterministic root-relative resolution, matching the help
-                # text; never fall back to cwd (F138).
-                q = ctx.root / q
-            if not q.is_file():
-                die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
-            if mode_arg != JOURNAL_MODE_LLM:
-                # Freeze an external letter into the root and store it
-                # root-relative; the root must not read a mutable path outside
-                # itself (rule 11).
-                _named_resolved.append(_freeze_journal_feedback(ctx.root, q))
-            else:
-                _named_resolved.append(str(q))
-        named = _named_resolved
+    _named_resolved = []
+    for item in named:
+        q = Path(item)
+        if not q.is_absolute():
+            root_rel = ctx.root / q
+            q = root_rel if root_rel.exists() else (Path.cwd() / q)
+        if not q.is_file():
+            die(f"--journal-feedback {item!r} does not exist (looked for {q}).")
+        if info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
+            # Freeze an external letter into the root and store it root-relative;
+            # the root must not read a mutable path outside itself (rule 11).
+            _named_resolved.append(_freeze_journal_feedback(ctx.root, q))
+        else:
+            _named_resolved.append(str(q))
+    named = _named_resolved
     if named and not info["feedback"]:
         print(f"[set-revision-mode] note: mode {mode_arg!r} reads no journal feedback; "
               f"--journal-feedback/--journal-feedback-from are ignored")
@@ -3596,21 +3164,11 @@ def cmd_set_revision_mode(args) -> None:
     with ctx.lock("set-revision-mode"):
         _prev_mode = journal_mode_of(ctx)
         ctx.cfg["revision_mode"] = mode_arg
-        # The feedback keys belong ONLY to the modes that read a human letter
-        # (setup writes them under the same test). A mode that does not read
-        # one must clear the keys a previous mode recorded, or the config
-        # contradicts the mode and a later switch back silently reuses a stale
-        # letter path the operator did not name (F238).
-        _reads_human_letter = bool(info["feedback"]) and mode_arg != JOURNAL_MODE_LLM
-        if _reads_human_letter:
-            if named:
-                ctx.cfg["journal_feedback"] = named
-            if getattr(args, "journal_feedback_from", None):
-                ctx.cfg["journal_feedback_from"] = _validate_feedback_from(
-                    args.journal_feedback_from)
-        else:
-            ctx.cfg.pop("journal_feedback", None)
-            ctx.cfg.pop("journal_feedback_from", None)
+        if named and info["feedback"] and mode_arg != JOURNAL_MODE_LLM:
+            ctx.cfg["journal_feedback"] = named
+        if getattr(args, "journal_feedback_from", None) and info["feedback"] \
+                and mode_arg != JOURNAL_MODE_LLM:
+            ctx.cfg["journal_feedback_from"] = str(args.journal_feedback_from).strip()
         forced = []
         if info["scoped"]:
             if _prev_mode not in (JOURNAL_MODE_MAJOR, JOURNAL_MODE_MINOR):
@@ -3626,7 +3184,6 @@ def cmd_set_revision_mode(args) -> None:
                     "cold_start_review": (str(ctx.cfg.get("cold_start_review")).lower()
                                           if "cold_start_review" in ctx.cfg else None),
                     "rounds": int(ctx.cfg.get("rounds") or DEFAULTS["rounds"]),
-                    "judges": list(ctx.cfg.get("judges") or DEFAULTS["judges"]),
                     "rewrites": list(ctx.cfg.get("rewrites") or DEFAULTS["rewrites"]),
                     "revises": list(ctx.cfg.get("revises") or DEFAULTS["revises"]),
                     "integrators": list(ctx.cfg.get("integrators") or DEFAULTS["integrators"]),
@@ -3644,14 +3201,6 @@ def cmd_set_revision_mode(args) -> None:
             if rounds != 1:
                 ctx.cfg["rounds"] = 1
                 forced.append("rounds=1")
-            _judges = list(ctx.cfg.get("judges") or DEFAULTS["judges"])
-            if len(_judges) != 1:
-                ctx.cfg["judges"] = _judges[:1]
-                forced.append(f"judges={_judges[:1]} (one round)")
-            _scope = list(ctx.cfg.get("review_scope") or DEFAULTS["review_scope"])
-            if len(_scope) != 1:
-                ctx.cfg["review_scope"] = _scope[:1]
-                forced.append(f"review_scope={_scope[:1]} (one round)")
             if list(ctx.cfg.get("rewrites") or []) != [0]:
                 ctx.cfg["rewrites"] = [0]
                 forced.append("rewrites=0")
@@ -3668,8 +3217,8 @@ def cmd_set_revision_mode(args) -> None:
                 forced.append("champion_select=revise (a scoped revision has no integration arm)")
             ctx.cfg["audit"] = "off"
             forced.append("audit=off")
-            # Keep the operator's revision-audit policy: the scoped variant
-            # audits the revision's own delta against the repaired concerns.
+            ctx.cfg["revision_audit"] = "on"
+            forced.append("revision_audit=on (mandatory concern-scoped post-write audit)")
             if str(ctx.cfg.get("cold_start_review", COLD_START_REVIEW_DEFAULT)).lower() != "off":
                 ctx.cfg["cold_start_review"] = "off"
                 forced.append("cold_start_review=off (scoped edits are driven by the concerns)")
@@ -3680,8 +3229,7 @@ def cmd_set_revision_mode(args) -> None:
             # `audit=off` while `journal_is_scoped` was already false -- neither
             # the documented default three-round workflow nor a scoped revision.
             saved = ctx.cfg.pop("scoped_mode_restore", None) or {}
-            for _key in ("rounds", "judges", "rewrites", "revises", "review_scope",
-                         "integrators"):
+            for _key in ("rounds", "rewrites", "revises", "review_scope", "integrators"):
                 _value = saved.get(_key, DEFAULTS[_key])
                 ctx.cfg[_key] = list(_value) if isinstance(_value, list) else _value
                 forced.append(f"{_key}={ctx.cfg[_key]} (restored)")
@@ -3707,7 +3255,10 @@ def cmd_set_revision_mode(args) -> None:
             else:
                 ctx.cfg["cold_start_review"] = str(_saved_cold).lower()
                 forced.append(f"cold_start_review={ctx.cfg['cold_start_review']} (restored)")
-        _save_root_config(ctx, "set-revision-mode", detail=mode_arg)
+        ctx.state["config"] = ctx.cfg
+        write_json_atomic(ctx.cfg_path, ctx.cfg)
+        ctx.log("set-revision-mode", detail=mode_arg)
+        ctx.save_state()
     print(f"[set-revision-mode] mode: {mode_arg} (option {info['option']}) -- {info['label']}")
     for f in forced:
         print(f"[set-revision-mode]   forced by the mode: {f}")
@@ -3723,25 +3274,6 @@ def cmd_set_revision_mode(args) -> None:
             print("[set-revision-mode]   `run` will refuse until the feedback is in the corpus "
                   "(human_review_feedback/ or llm_review_feedback/) or named with "
                   "--journal-feedback")
-
-
-def only_names_explicit_stage(spec, stage: str) -> bool:
-    """Did the selection NAME `stage` explicitly (class, ROUND:stage, or session)?
-
-    `all`/an empty selection names nothing explicitly; a round in full
-    (`--only 1`) does not name a stage either.
-    """
-    if spec is None or getattr(spec, "all_stages", False):
-        return False
-    stages = set(getattr(spec, "stages", ()) or ())
-    for _v in (getattr(spec, "pairs", {}) or {}).values():
-        stages |= set(_v or ())
-    if stage in stages:
-        return True
-    for _tokens in (getattr(spec, "sessions", {}) or {}).values():
-        if any(spec._token_stage(tok) == stage for tok in (_tokens or ())):
-            return True
-    return False
 
 
 def only_is_template_stage_only(spec) -> bool:
@@ -3791,13 +3323,13 @@ def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
         if missing:
             die(f"{flag}: no round of this pipeline runs session(s) {', '.join(missing)}; "
                 f"round 1 plans {', '.join(planned[1])} (the revise arms are numbered from a2, "
-                f"so `reviser1` is a2)", code=2)
+                f"so `reviser1` is a2)")
     for r in sorted(k for k in only.sessions if k is not None):
         for tok in only.sessions[r]:
             if tok not in planned[r]:
                 die(f"{flag}: round {r} plans no session {tok!r}; it runs "
                     f"{', '.join(planned[r])} (the revise arms are numbered from a2, so "
-                    f"`reviser1` is a2, `reviser2` a3, ...)", code=2)
+                    f"`reviser1` is a2, `reviser2` a3, ...)")
     keys = {k for k in only.judge_selectors if k is not None}
     if only.judge_selectors.get(None):
         # a roundless selector applies to every round that has the version, so it
@@ -3811,7 +3343,7 @@ def validate_only_selectors(ctx: Ctx, only, flag: str = "--only") -> None:
             parse_judges_enabled(spec, R, lambda rr: judgeable_ids(ctx, rr),
                                  lambda rr: round_judges(ctx, rr))
         except ValueError as e:
-            die(f"{flag}: {e}", code=2)
+            die(f"{flag}: {e}")
 
 
 def no_progress_measure(row: dict):
@@ -3828,17 +3360,35 @@ def no_progress_measure(row: dict):
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     census = row.get("defect_prefix_census")
     if census is None:
-        # A missing ordered census is MISSING EVIDENCE, never zero: substituting
-        # `defect_prefix_total` (or 0) made an unmeasured row the cleanest
-        # possible key and silently disabled `--stop-after-no-progress` (F009).
-        # Use the SAME sentinel `champion_sort_key()` uses.
-        census = (10 ** 9,)
+        census = (int(row.get("defect_prefix_total") or 0),)
     return (
         tuple(int(x) for x in census),
         -(med if med is not None else -99.0),
         -(mean if mean is not None else -99.0),
         iqr if iqr is not None else 99.0,
     )
+
+
+def _legacy_agent_pair(name: str) -> tuple:
+    """(harness, model) reported for a legacy --agent name.
+
+    The legacy COMMAND is still resolved by resolve_agent_cmd(); this pair is
+    only what the run record and the console say the shortcut means. `None`
+    means the operator's CLI config owns that side (legacy codex/claude).
+    """
+    if name == "qwen":
+        h = agent_choice(os.environ.get("PAPER_QWEN_HARNESS") or "codex")
+        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
+             "claude": "claude-code", "claude-code": "claude-code",
+             "chat": None}.get(h)
+        return h, "qwen38-27b"
+    if name == "dots":
+        h = agent_choice(os.environ.get("PAPER_DOTS_HARNESS") or "codex")
+        h = {"codex": "gpt-codex", "gpt-codex": "gpt-codex", "dsh": "dsh",
+             "claude": "claude-code", "claude-code": "claude-code",
+             "chat": None}.get(h)
+        return h, "dots3-note-preview"
+    return LEGACY_AGENT_PAIRS.get(name, (None, None))
 
 
 def _agent_pair_from_options(harness: str, model: str,
@@ -3862,29 +3412,8 @@ def _agent_pair_from_options(harness: str, model: str,
     return harness, model
 
 
-def _apply_reasoning_effort(args) -> None:
-    """Export --reasoning-effort for every generated provider route.
-
-    The shared runtime reads PAPER_AGENT_REASONING_EFFORT when it writes a DSH
-    patch, a Codex ``-c`` override or the Claude Code environment, so the
-    option is applied once here; child adapters inherit it.  The legacy
-    ``--agent dsh`` shortcut is refused: it boots the shipped profile, which
-    owns its own ``reasoningEffort``, so the flag could not be honoured.
-    """
-    value = getattr(args, "reasoning_effort", None)
-    if not value:
-        return
-    os.environ[_model_runtime.AGENT_REASONING_EFFORT_ENV] = str(value).strip().lower()
-
-
-def cmd_run(args) -> bool:
-    """`run` entry point: take the root lock, then drive the rounds.
-
-    Returns True when every configured round is complete at the end, so a
-    `run-decide` caller can skip the decide phase after a manual pause instead
-    of writing a decision for an unfinished root.
-    """
-    _apply_reasoning_effort(args)
+def cmd_run(args) -> None:
+    """`run` entry point: take the root lock, then drive the rounds."""
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
     ctx.load()
@@ -3901,69 +3430,6 @@ def cmd_run(args) -> bool:
         print(f"[run] {_snap}")
     with ctx.lock("run"):
         _cmd_run_locked(ctx, args)
-    return all(ctx.round_rec(r).get("status") == "done"
-               for r in range(1, ctx.rounds_count() + 1))
-
-
-def _invocation_failure_state(ctx: Ctx, rounds=None) -> tuple:
-    """(tolerated_ids, hard_ids) for this invocation's runs.
-
-    A tolerated run is `done` (its best failed trial was promoted), so it is
-    listed separately; a run still `failed` is a hard FAIL (no usable trial, or
-    the policy is off). `rounds` restricts the scan to those round plans; None
-    scans every run record (the journal finalization's response run is not in a
-    round plan).
-    """
-    ids = []
-    if rounds is None:
-        ids = [r["id"] for r in ctx.runs()]
-    else:
-        for r in rounds:
-            ids += [e["id"] for e in round_run_plan(ctx, r)]
-            # `round_run_plan` deliberately excludes the judge wave and the
-            # journal response run, but a judge that exhausted its budget with
-            # no usable trial is a HARD failure of this invocation: leaving it
-            # out made `--tolerate-fail` exit 0 ("no hard FAIL remains") over a
-            # panel that never judged the round (F101).
-            ids += [rec["id"] for rec in ctx.runs(kind="judge", round_no=r)]
-            _response = ctx.run(rid_response(r))
-            if _response is not None:
-                ids.append(_response["id"])
-    tolerated, hard = [], []
-    for rid in dict.fromkeys(ids):
-        rec = ctx.run(rid) or {}
-        if rec.get("status") == "done" and rec.get("tolerated_fail"):
-            tolerated.append(rid)
-        elif rec.get("status") == "failed":
-            # A run that never started, or is pending/stale, is incomplete,
-            # not a FAIL: the collection mode still lets such an invocation
-            # exit 0, while a failed run with no usable trial stays strict.
-            hard.append(rid)
-    return tolerated, hard
-
-
-def _invocation_may_exit_zero(ctx: Ctx, rounds=None) -> bool:
-    """Should an incomplete invocation exit 0 (collection mode)?
-
-    A hard FAIL (a run whose retries were exhausted with no usable trial) always
-    keeps the invocation strict. A tolerated stage (best failed trial used), or
-    -- for an incomplete selection with no failure at all -- the enabled
-    collection mode, lets it exit 0; the result stays PROVISIONAL.
-    """
-    tolerated, hard = _invocation_failure_state(ctx, rounds)
-    if hard:
-        return False
-    return bool(tolerated) or tolerate_fail_of(ctx)
-
-
-def _tolerated_invocation_note(ctx: Ctx, rounds=None) -> str:
-    tolerated, _hard = _invocation_failure_state(ctx, rounds)
-    if tolerated:
-        return (f"{TOLERATED_FAIL_STATUS}: {', '.join(tolerated)} exhausted its retries; "
-                f"the best failed trial was used, so the invocation continues but the "
-                f"result is PROVISIONAL, never certified")
-    return ("no hard FAIL remains; this incomplete invocation is a collection-mode warning "
-            "(exit 0), not a completed run")
 
 
 def _cmd_run_locked(ctx: Ctx, args) -> None:
@@ -3972,40 +3438,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # error (exit 2), not be masked by "agent executable not found" (exit 1).
     if args.timeout is not None and args.timeout < 0:
         die("--timeout must be a non-negative number of seconds", code=2)
-    # The per-session model-turn cap. It is a RUN property (like --timeout), not
-    # a root property: the same root can be re-run with a different bound, and
-    # the value this invocation used is recorded on every attempt record.
-    _max_turns = getattr(args, "max_turns", DEFAULTS["max_turns"])
-    if _max_turns < 0:
-        die("--max-turns must be a non-negative number of turns", code=2)
-    # Retry/parallelism/poll values are validated, never silently clamped: the
-    # old max(0, ...)/max(1, ...)/max(2, ...) normalisation printed the RAW value
-    # (jobs=0) while the driver used the clamped one, so the run banner and
-    # state.json's run_policy disagreed with what actually ran.
-    _jobs = int(getattr(args, "jobs", DEFAULTS["jobs"]))
-    if _jobs < 1:
-        die(f"--jobs must be >= 1, got {_jobs}", code=2)
-    _retries = int(getattr(args, "retries", DEFAULTS["retries"]))
-    if _retries < 0:
-        die(f"--retries must be >= 0, got {_retries}", code=2)
-    _backoff = int(getattr(args, "retry_backoff", DEFAULTS["retry_backoff"]))
-    if _backoff < 0:
-        die(f"--retry-backoff must be >= 0, got {_backoff}", code=2)
-    _backoff_max = int(getattr(args, "retry_backoff_max", DEFAULTS["retry_backoff_max"]))
-    if _backoff_max < 0:
-        die(f"--retry-backoff-max must be >= 0, got {_backoff_max}", code=2)
-    _poll = int(getattr(args, "poll", DEFAULTS["poll"]))
-    if _poll < 1:
-        die(f"--poll must be >= 1 second, got {_poll}", code=2)
-    os.environ["PAPER_PIPELINE_MAX_TURNS"] = str(int(_max_turns))
-    print(f"[run] turn cap: {int(_max_turns)} model turns per agent session "
-          f"(PAPER_PIPELINE_MAX_TURNS; 0 = unlimited)")
-    # A manual run has no orchestrator serving the sandbox's pre-flight client
-    # (`_serve_selfcheck` runs only around a launched attempt), so the client
-    # would wait for an answer that never comes. Stage the self-contained driver
-    # bundle instead, exactly as the prompt's first command expects.
-    if getattr(args, "manual", False) and not getattr(args, "agent_cmd", None):
-        os.environ["PAPER_PIPELINE_SELFCHECK_COPY"] = "1"
     # The benchmark-only content-edit policy: a per-INVOCATION override of the
     # policy `setup` recorded. None means "use the root's config", so a plain
     # `run` cannot perturb a root it did not need to describe.
@@ -4022,22 +3454,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     ctx._prefer_rewrite_override = (
         getattr(args, "prefer_rewrite_over_deletion")
         if getattr(args, "_prefer_rewrite_over_deletion_explicit", False) else None)
-    ctx._soft_deletions_override = (
-        getattr(args, "soft_deletions")
-        if getattr(args, "_soft_deletions_explicit", False) else None)
-    # The failure policy is a run property like the content-edit policy: an
-    # explicit pair overrides the root's record for THIS invocation, and an
-    # absent pair keeps it. The module-level flag lets the console helpers that
-    # have no `ctx` (the labels around a failed attempt) use the same mode.
-    ctx._tolerate_fail_override = getattr(args, "tolerate_fail", None)
-    set_tolerate_fail_active(tolerate_fail_of(ctx))
-    _tol_note = ("on -- a stage that exhausts its retries is printed as TOLERATED_FAIL and its "
-                 "BEST FAILED TRIAL is used (most required output files, then fewest FAIL "
-                 "messages); the pipeline continues on it, the decision stays PROVISIONAL and "
-                 "is never certified, and this invocation exits 0"
-                 if tolerate_fail_of(ctx) else
-                 "off -- an exhausted stage FAILS and leaves the round incomplete (exit 3)")
-    print(f"[run] failure policy: {_tol_note}")
     _edit_note = content_edit_policy_note(ctx)
     if _edit_note:
         print(f"[run] content-edit policy: {_edit_note}")
@@ -4060,51 +3476,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             f"fresh pipeline root with `setup`.")
     print(f"[run] pristine original: {detail}")
 
-    _only_cold_start = parse_only_spec(getattr(args, "only", None))
-    _template_stage_only = only_is_template_stage_only(_only_cold_start)
-    if _template_stage_only:
-        if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
-            die("--only conform is the "
-                f"template-first stage of the transfer and init revision modes: this root's "
-                f"revision mode is {journal_mode_of(ctx)!r}", code=2)
-        only = _only_cold_start
-    else:
-        only = _only_cold_start
-        if only is not None and only.is_everything():
-            only = None                 # `--only all`: exactly a plain `run`
-        if only is not None and only_names_explicit_stage(only, "conform") \
-                and journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
-            # A MIXED selection (`--only conform,review`) used to pass the
-            # conform-only guard, print conform as selected, and then skip it
-            # without a word. Refuse the unexecutable item instead.
-            die(f"--only {getattr(args, 'only', None)!r} names conform, the template-first "
-                f"stage, which runs only in the transfer and init revision modes: this root's "
-                f"revision mode is {journal_mode_of(ctx)!r}", code=2)
-        if only is not None:
-            if journal_has_feedback(ctx):
-                # The journal chain's stages are selectable exactly like the round
-                # model's (feedback, concerns, review, audit, revise, integrate,
-                # response). The safety rule is preserved at the SINK, not by
-                # refusing the selection: the response letter and the
-                # journal_submission/ package are assembled only by a plain `run`
-                # once every stage of the chain is done.
-                print(f"[run] --only {getattr(args, 'only', None)!r} in revision mode "
-                      f"{journal_mode_of(ctx)!r}: the journal stages are selectable; the response "
-                      f"letter and journal_submission/ are assembled only by a plain `run` once "
-                      f"every stage of the chain is done.")
-            resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
-            only.validate(ctx.rounds_count())
-            validate_only_selectors(ctx, only)
-            print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
-                  f"drives only the selected round(s), stage type(s) and session(s); a round whose "
-                  f"other stages are still pending stays incomplete (resume with `run`, `--only …`, "
-                  f"or `retry --run <ID>`)")
-
-    # Prerequisite CHECKS come before any expensive session. The template-first
-    # stage can launch an editing agent, so a broken pin, changed input or an
-    # invalid/unknown --only selection must be refused first: `run --only 2:judge`
-    # on a one-round root used to start the template agent and only then reject
-    # the selection, and a broken pin was detected after the agent had run.
     perrs = pinned_integrity(ctx)
     if perrs:
         die("pinned champion content changed after it was registered:\n  - "
@@ -4124,44 +3495,40 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] {len(stale)} run(s) marked stale by the content check: {', '.join(stale)}")
         ctx.save_state()
     backfill_round_raw_scores(ctx)
-
-    # Only now may the template-first stage run (and start its agent).
-    if _template_stage_only:
-        _applicable = _ensure_template_stage_for_run(ctx, args)
-        if not _applicable and not template_stage_record(ctx):
-            # No template/no .docx/--no-template-stage: the stage was skipped
-            # BY CONFIGURATION, not left pending, so exit 0 with the rounds
-            # still to run instead of claiming a pending stage (exit 3).
-            print("[run] the template-first stage does not apply to this root; the round(s) are "
-                  "still pending -- run a plain `run` (or another --only selection) to continue "
-                  "the chain")
-            summarize(ctx)
-            return
-        die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
-            f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
-            f"to continue the chain", code=3)
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
-        _ensure_template_stage_for_run(ctx, args)
-    # --- producer selection: the model/harness pair (the --agent shortcut is gone) ----
+    # --- producer selection: legacy --agent OR the new model/harness pair ----
+    _legacy_agent = getattr(args, "agent", None)
     _cli_harness = getattr(args, "agent_harness", None)
     _cli_model = getattr(args, "agent_model", None)
     _cli_model_name = getattr(args, "agent_model_name", None)
     _cli_api_key = getattr(args, "agent_model_api_key", None)
     _cli_prep = getattr(args, "agent_model_prep_json", None)
-    _new_harness = (agent_choice(_cli_harness) if _cli_harness
-                    else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
-    _raw_model = _cli_model or os.environ.get("PAPER_AGENT_MODEL")
+    if _legacy_agent and (_cli_harness or _cli_model or _cli_model_name
+                          or _cli_api_key or _cli_prep):
+        die("--agent is the legacy shortcut and cannot be combined with "
+            "--agent-harness/--agent-model/--agent-model-api-key/"
+            "--agent-model-name/--agent-model-prep-json; use one form or the other")
+    # A legacy --agent keeps its exact old command and ignores the new
+    # environment defaults, so an exported PAPER_AGENT_* cannot break an old
+    # script. The CLI flags are the only conflict (handled above).
+    _new_harness = None if _legacy_agent else (
+        agent_choice(_cli_harness) if _cli_harness
+        else agent_choice(os.environ.get("PAPER_AGENT_HARNESS", "")))
+    _raw_model = (None if _legacy_agent else
+                  (_cli_model or os.environ.get("PAPER_AGENT_MODEL")))
     try:
         _new_model = agent_model_choice(_raw_model) if _raw_model else ""
     except ValueError as _model_exc:
         die(f"--agent-model: {_model_exc}", code=2)
-    _new_model_name = _cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")
-    _new_api_key = _cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")
+    _new_model_name = (None if _legacy_agent else
+                       (_cli_model_name or os.environ.get("PAPER_AGENT_MODEL_NAME")))
+    _new_api_key = (None if _legacy_agent else
+                    (_cli_api_key or os.environ.get("PAPER_AGENT_MODEL_API_KEY")))
     if (_cli_model_name or _cli_api_key or _cli_prep) and not _new_model:
         die("--agent-model-api-key / --agent-model-name / --agent-model-prep-json "
             "require an --agent-model endpoint URL")
     _new_prep = {}
-    _new_prep_raw = _cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")
+    _new_prep_raw = (None if _legacy_agent else
+                     (_cli_prep or os.environ.get("PAPER_AGENT_MODEL_PREP_JSON")))
     if _new_model and not agent_model_is_endpoint(_new_model):
         if _cli_model_name or _cli_api_key or _cli_prep:
             die("--agent-model-api-key / --agent-model-name / "
@@ -4182,14 +3549,19 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 die(f"--agent-model-prep-json is not valid JSON: {exc}")
             if not isinstance(_new_prep, dict):
                 die("--agent-model-prep-json must be a JSON object")
-    agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
-    # An explicit --agent-cmd wins over --manual: a command the operator spelled
-    # must never be silently replaced by manual waiting (same rule as the judge).
-    manual = bool(getattr(args, "manual", False)) and not args.agent_cmd
-    if manual:
+    if _legacy_agent == "manual":
+        manual = True
+        agent_harness, agent_model = _legacy_agent_pair("manual")
         agent_label = "manual"
         cmd = None
+    elif _legacy_agent:
+        manual = False
+        agent_harness, agent_model = _legacy_agent_pair(_legacy_agent)
+        agent_label = _legacy_agent
+        cmd = resolve_agent_cmd(_legacy_agent, args.agent_cmd)
     else:
+        manual = False
+        agent_harness, agent_model = _agent_pair_from_options(_new_harness, _new_model)
         agent_label = agent_selection_label(agent_harness, agent_model)
         cmd = resolve_agent_model_cmd(
             agent_harness, agent_model, args.agent_cmd,
@@ -4197,8 +3569,41 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
             prep_json=(json.dumps(_new_prep) if _new_prep
                        and agent_model_is_endpoint(agent_model) else None))
-    # `only` was parsed and fully validated BEFORE the template-first stage (see
-    # above); nothing in the producer-selection block changes the selection.
+    _only_cold_start = parse_only_spec(getattr(args, "only", None))
+    if only_is_template_stage_only(_only_cold_start):
+        if journal_mode_of(ctx) not in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
+            die("--only conform is the "
+                f"template-first stage of the transfer and init revision modes: this root's "
+                f"revision mode is {journal_mode_of(ctx)!r}")
+        _ensure_template_stage_for_run(ctx, args, agent_command=cmd, agent_label=agent_label)
+        die(f"the template-first stage is {'done' if template_stage_record(ctx) else 'pending'}; "
+            f"the round(s) are still pending -- run a plain `run` (or another --only selection) "
+            f"to continue the chain", code=3)
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_INIT):
+        _ensure_template_stage_for_run(ctx, args, agent_command=cmd, agent_label=agent_label)
+
+    only = parse_only_spec(getattr(args, "only", None))
+    if only is not None and only.is_everything():
+        only = None                     # `--only all`: exactly a plain `run`
+    if only is not None:
+        if journal_has_feedback(ctx):
+            # The journal chain's stages are selectable exactly like the round
+            # model's (feedback, concerns, review, audit, revise, integrate,
+            # response). The safety rule is preserved at the SINK, not by
+            # refusing the selection: the response letter and the
+            # journal_submission/ package are assembled only by a plain `run`
+            # once every stage of the chain is done.
+            print(f"[run] --only {getattr(args, 'only', None)!r} in revision mode "
+                  f"{journal_mode_of(ctx)!r}: the journal stages are selectable; the response "
+                  f"letter and journal_submission/ are assembled only by a plain `run` once "
+                  f"every stage of the chain is done.")
+        resolve_judge_run_ids(ctx, only)    # `--only judge_t497f106d_j1`
+        only.validate(ctx.rounds_count())
+        validate_only_selectors(ctx, only)
+        print(f"[run] --only {getattr(args, 'only', None)!r}: {only.describe()}; this invocation "
+              f"drives only the selected round(s), stage type(s) and session(s); a round whose "
+              f"other stages are still pending stays incomplete (resume with `run`, `--only …`, "
+              f"or `retry --run <ID>`)")
     # A no-judge mode must be possible in EVERY pending round this invocation may
     # decide. Validate the target arms BEFORE the first expensive session, so an
     # existing root whose later round's mask is clear cannot fail after rounds of
@@ -4220,47 +3625,56 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # NOTHING judge-specific was given and the production stages are manual: an
     # explicit --judge-agent-cmd must never be silently replaced by manual
     # waiting (it would also leave the judge wave with no timeout).
-    # A concern-scoped major/minor run has NO judge panel: setup records
-    # `champion_select: judge` from the historical default, but the round is
-    # closed without one. Demanding a judge backend here aborted the whole run
-    # on a nonexistent executable that would never be used.
-    _csel_run = "revise" if journal_is_scoped(ctx) else champion_select_of(ctx)
+    _csel_run = champion_select_of(ctx)
     judge_harness = judge_model = judge_label = None
     _judge_name = None
     _judge_prep = {}
-    if _csel_run != "judge":
+    _no_panel = (_csel_run != "judge" or journal_is_scoped(ctx)
+                 or (only is not None and not any(
+                     only.covers_round(r) and only.stage_selected(r, "judge")
+                     for r in range(1, ctx.rounds_count() + 1))))
+    if _no_panel:
         # No judge session exists in this invocation: do not require a judge
         # backend executable, and do not pretend a manual panel is waiting.
         judge_cmd, judge_manual = None, True
         judge_label = "skipped"
-        print(f"[run] judge panel: SKIPPED -- --champion-select {_csel_run} auto-promotes "
-              f"the revised submission (PROVISIONAL; no panel scores are produced)")
+        print("[run] judge panel: SKIPPED -- " +
+              ("concern-scoped revision mode has no panel" if journal_is_scoped(ctx) else
+               f"--champion-select {_csel_run} auto-promotes the revised submission "
+               "(PROVISIONAL; no panel scores are produced)"))
     else:
+        _legacy_judge = getattr(args, "judge_agent", None)
         _judge_cli_h = getattr(args, "judge_agent_harness", None)
         _judge_cli_m = getattr(args, "judge_agent_model", None)
         _judge_cli_name = getattr(args, "judge_agent_model_name", None)
         _judge_cli_key = getattr(args, "judge_agent_model_api_key", None)
         _judge_cli_prep = getattr(args, "judge_agent_model_prep_json", None)
-        _judge_h = (
+        if _legacy_judge and (_judge_cli_h or _judge_cli_m or _judge_cli_name
+                              or _judge_cli_key or _judge_cli_prep):
+            die("--judge-agent is the legacy shortcut and cannot be combined with "
+                "--judge-agent-harness/--judge-agent-model/"
+                "--judge-agent-model-api-key/--judge-agent-model-name/"
+                "--judge-agent-model-prep-json; use one form or the other")
+        _judge_h = (None if _legacy_judge else (
             agent_choice(_judge_cli_h) if _judge_cli_h
-            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", "")))
-        _raw_jm = _judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")
-        try:
-            # The same validation the producer path applies: a userinfo/query
-            # credential or a malformed endpoint URL must be refused here, not
-            # carried into the adapter argv and the recorded judge command.
-            _judge_m = agent_model_choice(_raw_jm) if _raw_jm else ""
-        except ValueError as _jm_exc:
-            die(f"--judge-agent-model: {_jm_exc}", code=2)
-        _judge_name = _judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")
-        _judge_key = _judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")
+            else agent_choice(os.environ.get("PAPER_JUDGE_AGENT_HARNESS", ""))))
+        _raw_jm = (None if _legacy_judge else
+                   (_judge_cli_m or os.environ.get("PAPER_JUDGE_AGENT_MODEL")))
+        if agent_model_is_endpoint(_raw_jm):
+            _judge_m = str(_raw_jm).strip()
+        else:
+            _judge_m = agent_choice(_raw_jm) if _raw_jm else ""
+        _judge_name = (None if _legacy_judge else
+                       (_judge_cli_name or os.environ.get("PAPER_JUDGE_AGENT_MODEL_NAME")))
+        _judge_key = (None if _legacy_judge else
+                      (_judge_cli_key or os.environ.get("PAPER_JUDGE_AGENT_MODEL_API_KEY")))
         if (_judge_cli_name or _judge_cli_key or _judge_cli_prep) and not _judge_m:
             die("--judge-agent-model-api-key / --judge-agent-model-name / "
                 "--judge-agent-model-prep-json require a --judge-agent-model endpoint URL")
         _judge_prep = {}
-        _judge_prep_raw = _judge_cli_prep or os.environ.get(
-            "PAPER_JUDGE_AGENT_MODEL_PREP_JSON"
-        )
+        _judge_prep_raw = (None if _legacy_judge else
+                           (_judge_cli_prep
+                            or os.environ.get("PAPER_JUDGE_AGENT_MODEL_PREP_JSON")))
         if _judge_m and not agent_model_is_endpoint(_judge_m):
             if _judge_cli_name or _judge_cli_key or _judge_cli_prep:
                 die("--judge-agent-model-api-key / --judge-agent-model-name / "
@@ -4281,12 +3695,21 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 if not isinstance(_judge_prep, dict):
                     die("--judge-agent-model-prep-json must be a JSON object")
         judge_manual = False
-        if getattr(args, "judge_manual", False) and not args.judge_agent_cmd:
-            # An explicit --judge-agent-cmd wins over --judge-manual: it must
+        if _legacy_judge == "manual" and not args.judge_agent_cmd:
+            # An explicit --judge-agent-cmd wins over --judge-agent manual: it must
             # never be silently replaced by manual waiting.
             judge_manual = True
             judge_cmd = None
             judge_label = "manual"
+        elif _legacy_judge:
+            judge_harness, judge_model = _legacy_agent_pair(_legacy_judge)
+            judge_label = _legacy_judge
+            if args.judge_agent_cmd:
+                judge_cmd = resolve_agent_cmd(_legacy_judge, args.judge_agent_cmd)
+            else:
+                # An explicit --judge-agent must win over --agent-cmd and over
+                # PAPER_AGENT_CMD; otherwise the flag silently has no effect on the panel.
+                judge_cmd = resolve_agent_cmd(_legacy_judge, None, use_env=False)
         elif _judge_h or _judge_m:
             judge_harness, judge_model = _agent_pair_from_options(_judge_h, _judge_m)
             judge_label = agent_selection_label(judge_harness, judge_model)
@@ -4302,12 +3725,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             if agent_model_is_endpoint(agent_model):
                 _judge_name = _new_model_name
                 _judge_prep = _new_prep
-            judge_cmd = resolve_agent_model_cmd(
-                agent_harness, agent_model, args.judge_agent_cmd,
-                api_key_env="PAPER_AGENT_MODEL_API_KEY",
-                model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
-                prep_json=(json.dumps(_new_prep) if _new_prep
-                           and agent_model_is_endpoint(agent_model) else None))
+            if _legacy_agent:
+                judge_cmd = resolve_agent_cmd(_legacy_agent, args.judge_agent_cmd)
+            else:
+                judge_cmd = resolve_agent_model_cmd(
+                    agent_harness, agent_model, args.judge_agent_cmd,
+                    api_key_env="PAPER_AGENT_MODEL_API_KEY",
+                    model_name=_new_model_name if agent_model_is_endpoint(agent_model) else None,
+                    prep_json=(json.dumps(_new_prep) if _new_prep
+                               and agent_model_is_endpoint(agent_model) else None))
         else:
             judge_cmd = list(cmd) if cmd else None
             judge_manual = manual
@@ -4325,7 +3751,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # explicit --conflict-agent[-cmd] or PAPER_CONFLICT_AGENT_CMD turns the LLM
     # pass on, and the mechanical pass always runs.
     _conflict_choice = getattr(args, "conflict_agent", None)
-    if getattr(args, "no_conflict_agent", False):
+    if _no_panel or getattr(args, "no_conflict_agent", False):
         conflict_cmd = None
         conflict_audit_on = False
     elif getattr(args, "conflict_agent_cmd", None):
@@ -4350,7 +3776,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # The LLM defect audit (diagnostic; see write_round_defect_audit): ON by
     # default when the judge backend is a real agent, off for manual/custom
     # backends unless --defect-audit[-cmd] / PAPER_DEFECT_AUDIT_CMD asks for it.
-    if champion_select_of(ctx) != "judge":
+    if _no_panel:
         defect_cmd, defect_src = None, "skipped (no judge panel to audit)"
     else:
         defect_cmd, defect_src = resolve_defect_audit_cmd(
@@ -4419,16 +3845,10 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         print(f"[run] agent command: {' '.join(redact_argv(cmd))}")
     if judge_manual or judge_cmd != cmd:
         print("[run] judge sessions: " + ("manual" if judge_manual else " ".join(redact_argv(judge_cmd))))
-    retries = _retries
-    retry_backoff = _backoff
-    retry_backoff_max = _backoff_max
-    # A custom --agent-cmd/PAPER_AGENT_CMD bypasses model selection entirely:
-    # recording the endpoint/model/prep as if they were active made the
-    # invocation trace false for those runs (F194). Mark them ignored.
-    _custom_agent_cmd = bool(_agent_cmd_override(getattr(args, "agent_cmd", None),
-                                                 use_env=True))
-    _custom_judge_cmd = bool(_agent_cmd_override(getattr(args, "judge_agent_cmd", None),
-                                                use_env=True))
+    retries = max(0, int(args.retries))
+    retry_backoff = max(0, int(getattr(args, "retry_backoff", DEFAULTS["retry_backoff"])))
+    retry_backoff_max = max(0, int(getattr(args, "retry_backoff_max",
+                                           DEFAULTS["retry_backoff_max"])))
     ctx.state["run_policy"] = {
         "agent": agent_label,
         "agent_harness": agent_harness,
@@ -4437,44 +3857,29 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
         "agent_endpoint": (_record_agent_model
                            if agent_model_is_endpoint(agent_model) else None),
         "agent_model_prep_keys": sorted(_new_prep) if _new_prep else [],
-        # Values stay recorded (the pair still labels the run), but an ignored
-        # flag says a custom --agent-cmd bypassed them (F194).
-        "agent_model_ignored": ("--agent-cmd" if _custom_agent_cmd else None),
-        "agent_legacy": None,
+        "agent_legacy": _legacy_agent,
         "judge_agent": judge_label,
         "judge_agent_harness": judge_harness,
         "judge_agent_model": _record_judge_model,
         "judge_agent_model_name": (None if not agent_model_is_endpoint(judge_model)
                                    else _judge_name),
         "judge_agent_model_prep_keys": sorted(_judge_prep) if _judge_prep else [],
-        "judge_agent_model_ignored": ("--judge-agent-cmd" if _custom_judge_cmd else None),
-        "jobs": _jobs, "timeout": timeout,
+        "jobs": args.jobs, "timeout": timeout,
         "judge_timeout": judge_timeout, "retries": retries,
         "attempts_per_run": retries + 1,
         "retry_backoff": retry_backoff,
         "retry_backoff_max": retry_backoff_max,
-        "tolerate_fail": "on" if tolerate_fail_of(ctx) else "off",
         "set": utcnow()}
     ctx.save_state()
     retry_note = (f"attempts/run={retries + 1} (retries={retries}, exponential backoff "
                   f"{retry_backoff}s..{retry_backoff_max}s)"
                   if retries else "no automatic retry (--retries 0)")
-    # The label names the PRESET the run was configured with; a custom
-    # --agent-cmd/PAPER_AGENT_CMD replaces the executable that actually runs.
-    # Printing only the preset made the banner claim `agent=dsh/deepseek-flash`
-    # while the stages ran an entirely different command (recorded truthfully
-    # in run_policy.agent_model_ignored, but invisible in the log).
-    _agent_override = _agent_cmd_override(getattr(args, "agent_cmd", None), use_env=True)
-    _agent_shown = agent_label
-    if _agent_override:
-        _shown_cmd = " ".join(Path(str(x)).name for x in _agent_override[:2])[:90]
-        _agent_shown = f"{agent_label} [preset label; runs {_shown_cmd}]"
-    print(f"[run] jobs={_jobs} timeout={timeout or 'none'}s "
+    print(f"[run] jobs={args.jobs} timeout={timeout or 'none'}s "
           f"judge-timeout={judge_timeout or 'none'}s {retry_note} "
           f"rounds={ctx.rounds_count()} judges/version={judges_config_note(ctx)} "
           f"integrators={integrators_config_note(ctx)} "
           f"champion-select={champion_select_of(ctx)} "
-          f"agent={_agent_shown}")
+          f"agent={agent_label}")
     # The optional `docx` CLI is offered to every agent in every stage (see
     # DOCX_CLI_RULE). It is never required, but the operator should be able to
     # see from the run log whether the agents can actually reach it.
@@ -4488,11 +3893,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
     # remote library -- says so loudly.
     _zot_mode = zotero_mode_of(ctx)
     if _zot_mode == "off":
-        _zot_note = ("off -- no Zotero tooling (`zot` CLI, MCP service or skill); live fields "
+        _zot_note = ("off -- no Zotero tooling (MCP service, skill or `zot` CLI); live fields "
                      "stay on the skills' manual route")
     else:
-        _zot_on_path = ("the `zot` CLI (route 1) is on PATH" if zot_cli_available()
-                        else "the `zot` CLI (route 1) is NOT on PATH")
+        _zot_on_path = ("the `zot` CLI fallback is on PATH" if zot_cli_available()
+                        else "the `zot` CLI fallback is NOT on PATH")
         if _zot_mode == "apply":
             _zot_note = ("apply -- citation edits AND single-field library updates are allowed "
                          "(propose-then-verify via the `zot` CLI, --last-modified auto); this "
@@ -4501,15 +3906,12 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             _zot_note = ("edit -- citation edits in the revised copy are allowed; the Zotero "
                          f"library stays read-only ({_zot_on_path})")
         else:
-            _zot_note = ("read -- read-only reference resolution (`zot` CLI, then MCP service, "
-                         f"then skill); no citation edits ({_zot_on_path})")
+            _zot_note = ("read -- read-only reference resolution (MCP service, then skill, then "
+                         f"`zot`); no citation edits ({_zot_on_path})")
     print(f"[run] zotero reference tooling:  {_zot_note}")
     # The docx->pdf converter the prompts ask for FIRST (see the visual rule):
-    # `docx2pdf.sh`, falling back to the docx-converter MCP tool and then to
-    # the other renderers.
-    if shutil.which("docx2pdf.sh"):
-        first_choice = ("docx2pdf.sh -- agents run it before any other converter")
-    elif mcp_server_configured(DOCX_MCP_SERVER):
+    # the docx-converter MCP tool, falling back to the other renderers.
+    if mcp_server_configured(DOCX_MCP_SERVER):
         argv = [str(a) for a in (cmd or [])]
         if manual:
             note = "; manual mode: YOUR session approves the call, so no override is needed"
@@ -4529,8 +3931,11 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                         f"carries no MCP approval override (only the codex one adds them; a CLI's "
                         f"own configuration decides which MCP servers it reaches), so the call "
                         f"may be denied")
-        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- the fallback when "
-                        f"docx2pdf.sh is not on PATH{note}")
+        first_choice = (f"the {DOCX_MCP_SERVER} MCP tool (`{DOCX_MCP_TOOL}`) -- agents call it "
+                        f"before any other converter{note}")
+    elif shutil.which("docx2pdf.sh"):
+        first_choice = ("docx2pdf.sh (the docx-converter MCP tool is not configured in "
+                        f"{codex_config_path()})")
     else:
         first_choice = ("NONE of the Word-fidelity converters is available -- the prompts tell the "
                         "agents to record the limitation instead of claiming a visual check")
@@ -4565,7 +3970,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 summarize(ctx)
                 if paused:
                     print("[run] manual mode: prompts printed above; nothing was executed by the "
-                          "orchestrator. Re-run `run --manual` after your agents finish.")
+                          "orchestrator. Re-run `run --agent manual` after your agents finish.")
                     return
                 ctx.round_rec(1)["status"] = "pending"
                 ctx.save_state()
@@ -4573,9 +3978,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 print(f"[run] the {journal_mode_of(ctx)} revision is incomplete; progress is "
                       f"saved. Resume with `run --root {ctx.root}` or reset one run with "
                       f"`retry --run <ID>`.")
-                if _invocation_may_exit_zero(ctx, [1]):
-                    print(f"[run] {_tolerated_invocation_note(ctx, [1])}.")
-                    return
                 sys.exit(3)
         if only is not None:
             print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
@@ -4593,9 +3995,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] the {journal_mode_of(ctx)} revision itself is complete, but the "
                   f"response/submission stage did not finish; re-run `run` (or "
                   f"`retry --run {rid_response(1)}`) to finish it.")
-            if _invocation_may_exit_zero(ctx):
-                print(f"[run] {_tolerated_invocation_note(ctx)}.")
-                return
             sys.exit(3)
         summarize(ctx)
         return
@@ -4634,7 +4033,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             summarize(ctx)
             if paused:
                 print("[run] manual mode: prompts printed above; nothing was executed by the "
-                      "orchestrator. Re-run `run --manual` after your agents finish.")
+                      "orchestrator. Re-run `run --agent manual` after your agents finish.")
                 return
             # Honest state: the round is waiting again, not "active".
             ctx.round_rec(r)["status"] = "pending"
@@ -4643,10 +4042,6 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] round {r} is incomplete; progress is saved. Resume with "
                   f"`run --root {ctx.root}` (a fresh invocation grants every failed run a "
                   f"fresh retry budget) or reset a single run with `retry --run <ID>`.")
-            if _invocation_may_exit_zero(ctx, [r]):
-                print(f"[run] {_tolerated_invocation_note(ctx, [r])}. "
-                      f"Nothing after it was driven.")
-                break
             sys.exit(3)
         # C28: the pre-registered no-progress stop. A round whose champion is its
         # own base (A1) demonstrably improved nothing, and under this measurement
@@ -4700,7 +4095,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             break
 
     if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) and only is None:
-        R = ctx.rounds_count()
+        R = journal_finalization_round(ctx)
         if all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
             ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,
                                            retries=retries, manual=manual, nowait=args.no_wait,
@@ -4711,10 +4106,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 summarize(ctx)
                 print(f"[run] the rounds are complete, but the journal finalization did not "
                       f"finish; re-run `run` (or `retry --run {rid_response(R)}`) to finish it.")
-                if _invocation_may_exit_zero(ctx):
-                    print(f"[run] {_tolerated_invocation_note(ctx)}.")
-                else:
-                    sys.exit(3)
+                sys.exit(3)
         else:
             print(f"[run] journal mode {journal_mode_of(ctx)!r}: the response letter and the "
                   f"submission package are assembled once EVERY round is complete; finish the "
@@ -4749,11 +4141,7 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
             print(f"[run] --only {getattr(args, 'only', None)!r} selected no session of the "
                   f"round(s) that still need work ({', '.join(str(r) for r in covered_pending)}): "
                   f"nothing was started in this invocation.")
-            if _invocation_may_exit_zero(ctx, covered_pending):
-                print(f"[run] {TOLERATED_FAIL_STATUS}: the empty selection is an "
-                      f"incomplete invocation, not a hard FAIL (exit 0).")
-            else:
-                sys.exit(3)
+            sys.exit(3)
         print(f"[run] --only {getattr(args, 'only', None)!r}: round(s) "
               f"{', '.join(str(r) for r in selected) or '(none)'} of {R} are already complete -- "
               f"nothing to do in this invocation")
@@ -4762,19 +4150,9 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
               f"{R} champion is the final answer once every configured round is complete. "
               f"Next: python {Path(sys.argv[0]).name} run --root {ctx.root} "
               f"(or `decide` when all rounds are done)")
-    elif all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
+    else:
         print(f"[run] round {R} champion is the final answer. "
               f"Next: python {Path(sys.argv[0]).name} decide --root {ctx.root}")
-    else:
-        pending = [r for r in range(1, R + 1) if ctx.round_rec(r).get("status") != "done"]
-        if tolerate_fail_of(ctx):
-            print(f"[run] {TOLERATED_FAIL_STATUS}: round(s) {', '.join(str(r) for r in pending)} "
-                  f"are still incomplete; this invocation is a collection-mode warning "
-                  f"(exit 0), but no champion is the final answer yet. Resume with `run` "
-                  f"(or `retry --run <ID>`).")
-        else:
-            print(f"[run] round(s) {', '.join(str(r) for r in pending)} are still incomplete; "
-                  f"resume with `run` (or `retry --run <ID>`) before `decide`.")
 
 
 def summarize(ctx: Ctx) -> None:
@@ -4788,39 +4166,3 @@ def summarize(ctx: Ctx) -> None:
               for r in range(1, ctx.rounds_count() + 1)]
     if rlines:
         print("[summary] " + " | ".join(rlines))
-
-
-def cmd_run_decide(args) -> None:
-    """`run`, then `decide`, in series, honouring decide's flags.
-
-    `run` holds the root lock for its whole phase and releases it when it
-    returns; `decide` then takes the lock for its own writes (reports,
-    decision.json, final_clean_version/). The digest cache stays OFF for that
-    phase: it rewrites files it hashed, and a same-size rewrite inside one
-    timestamp tick would otherwise reuse the stale digest (main() left the cache
-    off because `run-decide` is not a read-only command). A hard error inside
-    `run` (a `die()`) propagates and the decide phase is skipped -- deciding a
-    root that could not even be started would only repeat the same error.
-    """
-    _complete = cmd_run(args)
-    _only = parse_only_spec(getattr(args, "only", None))
-    if _only is not None and not _only.is_everything():
-        # `--only` is a SESSION-SELECTION contract: the selected items run and
-        # nothing else is started in that invocation. Deciding afterwards would
-        # start a stage the selection did not name (and report its exit code).
-        # `--only all` is exactly a plain run (cmd_run normalizes it away), so
-        # it keeps the decide phase.
-        print("[run-decide] --only selection: the decide phase is not started; run "
-              "`decide` once the selected work is complete")
-        return
-    if not _complete:
-        # A manual run PAUSES after printing its prompts; the run phase returned
-        # without an error, but no round is complete. Deciding now wrote a
-        # decision.json/readme for bytes no panel ever judged.
-        print("[run-decide] the run is not complete (manual pause or pending rounds): the decide "
-              "phase is not started. Resume with `run` and decide once every round is done.")
-        return
-    note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
-    if note:
-        print(f"[run-decide] note: {note}")
-    cmd_decide(args)

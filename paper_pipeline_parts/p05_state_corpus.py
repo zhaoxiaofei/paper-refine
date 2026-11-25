@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/25 of the pipeline -- executed by the
+# Part 05/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -47,47 +47,8 @@ def rid_concerns(r: int) -> str:
 
 
 def rid_response(r: int) -> str:
-    """The FINAL response-to-reviewers run (modes 2-4; option 1 writes no letter)."""
+    """The response-to-reviewers run (modes 2-4; option 1 writes no letter)."""
     return f"r{r}_response"
-
-
-def rid_response_draft(r: int) -> str:
-    """The point-by-point response PLAN, written BEFORE the manuscript revision.
-
-    It fixes the authors' intended answer and the reviewer's verbatim quotation
-    first; the reviser implements it, and `r<r>_response` later reconciles the
-    same letter with the final package (actual changes/status).
-    """
-    return f"r{r}_response_draft"
-
-
-def rid_concern_audit(r: int) -> str:
-    """The independent audit of the generated concern ledger.
-
-    It disposes every concern (confirmed / defective / dropped) against the
-    human feedback and writes only `concern_audit/`; it generates no concern.
-    """
-    return f"r{r}_concern_audit"
-
-
-def rid_concern_repair(r: int) -> str:
-    """The repair of the generated concern ledger (one pass).
-
-    It consumes `r<r>_concern_audit`, re-validates every row, corrects/removes
-    only confirmed defects, regenerates the JF finding list, and writes the
-    repaired ledger the revision and response sessions consume.
-    """
-    return f"r{r}_concern_repair"
-
-
-def rid_response_audit(r: int) -> str:
-    """The independent audit of the response-to-reviewers deliverable."""
-    return f"r{r}_response_audit"
-
-
-def rid_response_repair(r: int) -> str:
-    """The one-pass repair of the response letter + response map."""
-    return f"r{r}_response_repair"
 
 
 def rid_audit(r: int) -> str:
@@ -303,11 +264,8 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # corpus input. Omitting it let `retry` reach that RuntimeError as an
         # unhandled traceback instead of deferring the run as stale.
         deps = [rid_a1(r)]
-        if ctx is not None and journal_has_feedback(ctx) and not journal_is_scoped(ctx):
-            # The materializer stages `concerns/` from the feedback run for ANY
-            # unscoped journal mode (`llm` included), so the dependency must
-            # follow the same predicate: a retry used to bypass unmet_deps and
-            # raise inside materialize_rewrite instead of deferring.
+        if ctx is not None and journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER,
+                                                        JOURNAL_MODE_RESUBMIT):
             deps.append(rid_feedback(r))
         return deps
     if kind == "guided_review":
@@ -341,10 +299,6 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         # general review; the materializer records which run that is, so the
         # retry/rebuild path never blocks on a run this root does not have.
         deps = [rid_a1(r), rec.get("upstream_run_id") or rid_guided_review(r)]
-        if ctx is not None and journal_has_feedback(ctx) and journal_needs_response(ctx):
-            # The reviser (scoped or resubmit) implements the point-by-point
-            # response plan written before it.
-            deps.append(rid_response_draft(r))
         # `register()` initializes inputs_manifest to None; `.get(k, {})` does
         # not cover an existing None, and the AttributeError used to break
         # retry/rebuild for a registered-but-unmaterialized revise run.
@@ -353,11 +307,6 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return deps
     if kind in ("feedback", "concerns"):
         return [rid_a1(r)]
-    if kind == "concern_audit":
-        return [rid_concerns(r)]
-    if kind == "concern_repair":
-        # The repair applies the audit's plan to the generated ledger.
-        return [rid_concerns(r), rid_concern_audit(r)]
     if kind == "response":
         # The response letter consumes BOTH the concern ledger and the final
         # package: the ledger run is upstream_run_id, the scoped revision run is
@@ -367,19 +316,7 @@ def upstream_deps(rec: dict, ctx=None) -> list:
             deps.append(rec["upstream_run_id"])
         if rec.get("package_run_id"):
             deps.append(rec["package_run_id"])
-        if rec.get("draft_run_id"):
-            deps.append(rec["draft_run_id"])
         return deps
-    if kind == "response_draft":
-        # The plan consumes the concern ledger of THIS mode: the repaired one
-        # in major/minor, the FEEDBACK one in resubmit.
-        if ctx is None:
-            return [rid_concerns(r)]
-        return [_concern_source_rid(ctx, r)]
-    if kind == "response_audit":
-        return [rid_response(r)]
-    if kind == "response_repair":
-        return [rid_response(r), rid_response_audit(r)]
     if kind == "integrate":
         # every pool member is a donor, so EVERY pool run must be done first
         pool = list(rec.get("pool_ids") or [])
@@ -388,15 +325,7 @@ def upstream_deps(rec: dict, ctx=None) -> list:
         return [rid_for_fresh(r, v) for v in pool if is_fresh_vid(v)]
     if kind == "judge":
         ids = [rec.get("target_id")] + list(rec.get("field_ids") or [])
-        if ctx is not None:
-            # `materialize_judges` requires EVERY round arm to be done (it
-            # deduplicates content-identical arms only AFTER building the
-            # field), so a deduplicated arm is absent from field_ids while
-            # still required. Listing only target+field_ids let `unmet_deps`
-            # pass and the rebuild die in the materializer's RuntimeError
-            # instead of deferring the run.
-            ids += list(round_produced_ids(ctx, r))
-        return [rid_for_fresh(r, v) for v in dict.fromkeys(ids) if is_fresh_vid(v)]
+        return [rid_for_fresh(r, v) for v in ids if is_fresh_vid(v)]
     return []
 
 
@@ -464,7 +393,7 @@ def superseded_dir_of(ctx: Ctx) -> Path:
 # 56 MiB of it was redundant copies of evidence packs that already live on disk:
 #   * runs.<judge>.judge_evidence  -> reports/judge_evidence_<run>.json
 #   * runs.<id>.evidence_after     -> runs/<id>/CODE_SCANS_after.json
-#   * runs.<id>.format_fix         -> runs/<id>/FORMAT_FIX_<id>.json
+#   * runs.<id>.format_fix         -> runs/<id>/FORMAT_FIX.json
 # `judge_evidence` alone was 41.6 MiB across 45 judge sessions, 33 MiB of that
 # the M4 number ledger of the judge's blinded target, replicated once per
 # session. Three layers keep the registry small and its failures diagnosable:
@@ -498,58 +427,14 @@ def load_state_file(path: Path) -> tuple:
     writable, so this reader refuses anything but a regular, single-link file:
     a FIFO/device at the path used to block every command forever (size 0,
     then a blocking open) and a symlink redirected the read outside the root.
-    ONE companion link is allowed: the canonical `state.json.prev` sibling with
-    the same inode, which is what a save that dies between its link and its
-    atomic replace leaves behind (F133).
     """
     try:
         st = path.lstat()
     except OSError as e:                                          # noqa: BLE001
         return None, f"could not be read ({type(e).__name__}: {e})"
-    link_ok = True
-    if st.st_nlink != 1:
-        link_ok = False
-        if st.st_nlink == 2 and stat.S_ISREG(st.st_mode):
-            # The rolling save links the live registry to its `state.json.prev`
-            # backup for the instant between the link and the atomic replace
-            # (save_state). A crash/ENOSPC in that window must not turn a valid
-            # registry into one every later command refuses: accept exactly that
-            # one companion link, and only when it is this path's canonical
-            # `.prev` sibling carrying the SAME inode (F133).
-            prevp = state_prev_path(path)
-            try:
-                pst = prevp.lstat()
-                link_ok = (not stat.S_ISLNK(pst.st_mode) and stat.S_ISREG(pst.st_mode)
-                           and pst.st_ino == st.st_ino and pst.st_dev == st.st_dev)
-            except OSError:
-                link_ok = False
-            if not link_ok:
-                # A death between `os.link(state.json, tmp_prev)` and
-                # `os.replace(tmp_prev, .prev)` leaves the companion at
-                # save_state()'s unique temporary name. It is still exactly one
-                # pipeline-generated sibling in the same directory carrying this
-                # file's inode.
-                tmp_re = re.compile(r"^\." + re.escape(prevp.name)
-                                    + r"\.\d+\.[0-9a-f]+\.(?:tmp|repair)$")
-                try:
-                    for sib in path.parent.iterdir():
-                        if sib.name == path.name or not tmp_re.match(sib.name):
-                            continue
-                        try:
-                            sst = sib.lstat()
-                        except OSError:
-                            continue
-                        if (stat.S_ISREG(sst.st_mode) and sst.st_ino == st.st_ino
-                                and sst.st_dev == st.st_dev):
-                            link_ok = True
-                            break
-                except OSError:
-                    link_ok = False
-    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode) or not link_ok:
-        return None, ("is not a regular file (a symlink, FIFO, device or hard-linked "
-                      "registry path is refused; state.json must be single-linked -- or "
-                      "linked only to its state.json.prev backup -- and written by this "
-                      "pipeline)")
+    if stat.S_ISLNK(st.st_mode) or not stat.S_ISREG(st.st_mode):
+        return None, ("is not a regular file (a symlink, FIFO or device at the registry "
+                      "path is refused; state.json must be written by this pipeline)")
     size = st.st_size
     if size > MAX_STATE_BYTES:
         def _mib(n):
@@ -592,10 +477,7 @@ def load_state_file(path: Path) -> tuple:
         # (inf became a string, a real string gained a NUL); read_json() is the
         # matching reader and every other pipeline-written JSON already uses it.
         return _json_revive(json.loads(text)), ""
-    except (ValueError, RecursionError) as e:                     # noqa: BLE001
-        # A deeply nested but valid JSON document raises RecursionError, not
-        # ValueError; it must take the documented problem-string path instead of
-        # crashing every command with a bare traceback (F066).
+    except ValueError as e:                                       # noqa: BLE001
         return None, f"is not valid JSON ({e})"
 
 
@@ -631,7 +513,7 @@ def _format_fix_summary(rep: dict, path_rel: str) -> dict:
     return out
 
 
-def compact_state(st: dict, root: Path = None) -> int:
+def compact_state(st: dict) -> int:
     """Replace the registry's redundant BULK with summaries; return bytes freed.
 
     Only write-only fields whose full payload is already on disk are touched, and
@@ -645,35 +527,13 @@ def compact_state(st: dict, root: Path = None) -> int:
         if not isinstance(rec, dict):
             continue
         sb = str(rec.get("sandbox") or f"runs/{rid}")
-        # `normalize_formatting_in_dir` names its artifact after the record's own
-        # label (`FORMAT_FIX_<label>.json`, p04_utils), so the compaction's
-        # `full` pointer must use that name -- the old bare `FORMAT_FIX.json`
-        # was written by nobody and left the dropped payload with no home.
-        ff_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(rec.get("id") or rid)) or "format"
         for field, path_rel, summarize in (
                 ("judge_evidence", f"reports/judge_evidence_{rid}.json", _evidence_summary),
                 ("evidence_after", f"{sb}/CODE_SCANS_after.json", _evidence_summary),
-                ("format_fix", f"{sb}/FORMAT_FIX_{ff_name}.json", _format_fix_summary)):
+                ("format_fix", f"{sb}/FORMAT_FIX.json", _format_fix_summary)):
             payload = rec.get(field)
             if not isinstance(payload, dict) or payload.get("compacted"):
                 continue
-            if root is not None:
-                # The summary REPLACES the only in-registry copy with a pointer.
-                # A crash between assigning the payload and writing its artifact
-                # (or a restored state.json whose reports/ was lost) would
-                # otherwise destroy the evidence: compact only when the full
-                # artifact really exists and is non-empty (F063).
-                try:
-                    # `path_rel` embeds the record's own sandbox string: an
-                    # absolute/`..` value made the probe stat (and the pointer
-                    # name) a file outside --root (F147). Compact only a
-                    # contained artifact.
-                    artifact = contained_under_or_none(root, path_rel)
-                    if artifact is None or not artifact.is_file() \
-                            or artifact.stat().st_size <= 0:
-                        continue
-                except OSError:
-                    continue
             freed += len(json.dumps(payload, default=str))
             rec[field] = summarize(payload, path_rel)
     return freed
@@ -689,11 +549,6 @@ def biggest_run_fields(st: dict, limit: int = 5) -> list:
             if isinstance(value, (dict, list)) and len(value) > 8:
                 out.append((len(json.dumps(value, default=str)), rid, field))
     return sorted(out, reverse=True)[:limit]
-
-
-# Run-record statuses the driver understands (plus the setup-owned "running"
-# intermediate used by template-rewrite/add-venue records).
-RUN_STATUSES = ("pending", "done", "failed", "stale", "running")
 
 
 class Ctx:
@@ -728,16 +583,6 @@ class Ctx:
                       "pinned": [], "log": []}
 
     # ---- lifecycle ----
-    def _root_is_populated(self) -> bool:
-        """A run/pin directory with content means this is not a fresh root."""
-        for d in (self.runs_dir, self.pins_dir):
-            try:
-                if d.is_dir() and any(d.iterdir()):
-                    return True
-            except OSError:
-                continue
-        return False
-
     def load(self, need_cfg: bool = True) -> None:
         if not self.root.is_dir():
             die(f"pipeline root not found: {self.root}  (run `setup` first)")
@@ -794,10 +639,7 @@ class Ctx:
                     f"       {self.cfg_path}\n"
                     f"       A round with no judge can never be certified; edit the config "
                     f"or re-run `setup` with --judges N (N >= 1).")
-        if os.path.lexists(self.state_path):
-            # `Path.exists()` is FALSE for a dangling symlink, so the deliberate
-            # symlink/FIFO refusal in load_state_file was never reached and the
-            # empty default registry survived (F007).
+        if self.state_path.exists():
             st, problem = load_state_file(self.state_path)
             if st is None:
                 prev = state_prev_path(self.state_path)
@@ -844,18 +686,6 @@ class Ctx:
                     not isinstance(st.get("pinned"), list):
                 die(f"state.json is damaged: 'rounds' must be an object and 'pinned' a list.\n"
                     f"       {self.state_path}")
-            # `log` and `run_logs` are containers every command APPENDS to. A
-            # hand-edited/truncated null survived `setdefault` and made
-            # `ctx.log()` / `save_state()` die with a bare AttributeError
-            # instead of the actionable message this loader promises.
-            if not isinstance(st.setdefault("log", []), list):
-                die(f"state.json is damaged: 'log' must be a list (got "
-                    f"{type(st.get('log')).__name__}).\n       {self.state_path}\n"
-                    f"       Restore state.json from a backup.")
-            if "run_logs" in st and not isinstance(st["run_logs"], list):
-                die(f"state.json is damaged: 'run_logs' must be a list (got "
-                    f"{type(st.get('run_logs')).__name__}).\n       {self.state_path}\n"
-                    f"       Restore state.json from a backup.")
             for rk, rr in st["rounds"].items():
                 if not isinstance(rr, dict):
                     die(f"state.json is damaged: round record {rk!r} is not an object.\n"
@@ -872,10 +702,6 @@ class Ctx:
                         f"{pin['id']!r} (it must be ONE path component under "
                         f"{self.pins_dir}).\n       {self.state_path}\n"
                         f"       Restore state.json from a backup.")
-                if "round" in pin and (not isinstance(pin.get("round"), int)
-                                       or isinstance(pin.get("round"), bool)):
-                    die(f"state.json is damaged: pinned entry {i} has a non-integer "
-                        f"'round' ({pin.get('round')!r}).\n       {self.state_path}")
             # A root created before the 2026-10 renames records `review`/`probe`
             # (and, after the intermediate rename, `targeted_review`). The current
             # vocabulary has no handler for those kinds, so say so once, here,
@@ -909,42 +735,10 @@ class Ctx:
                         f"on disk under {self.runs_dir}); the pipeline never adopts a partial "
                         f"registry automatically.")
                 try:
-                    _round_no = int(rec["round"])
+                    int(rec["round"])
                 except (TypeError, ValueError):
                     die(f"state.json is damaged: run record {rid!r} has a non-numeric 'round' "
                         f"({rec['round']!r}).\n       {self.state_path}")
-                # Validate AND normalise: a legacy/hand-edited JSON string "1"
-                # passed the check above, but `Ctx.runs(round_no=…)` compares
-                # `r.get("round") == int(round_no)`, so that record was invisible
-                # to every round-scoped query and its judge session was never
-                # revalidated (F109). Only the string spelling is coerced; a
-                # non-integral numeric stays non-integral (never silently
-                # truncated into another round).
-                if isinstance(rec["round"], str):
-                    rec["round"] = _round_no
-                if rec.get("status") not in RUN_STATUSES:
-                    die(f"state.json is damaged: run record {rid!r} has unknown status "
-                        f"{rec.get('status')!r} (expected one of "
-                        f"{', '.join(RUN_STATUSES)}).\n       {self.state_path}")
-                if rec.get("kind") == "judge":
-                    _lm = rec.get("label_map")
-                    if "label_map" in rec and not (
-                            isinstance(_lm, dict)
-                            and all(isinstance(k, str) and isinstance(v, str)
-                                    for k, v in _lm.items())):
-                        die(f"state.json is damaged: judge record {rid!r} has a malformed "
-                            f"'label_map' (must be an object of string labels).\n"
-                            f"       {self.state_path}")
-                    _ji = rec.get("judge_index")
-                    if "judge_index" in rec and (
-                            not isinstance(_ji, int) or isinstance(_ji, bool)):
-                        die(f"state.json is damaged: judge record {rid!r} has a "
-                            f"non-integer 'judge_index' ({_ji!r}).\n"
-                            f"       {self.state_path}")
-                    _tid = rec.get("target_id")
-                    if "target_id" in rec and not isinstance(_tid, str):
-                        die(f"state.json is damaged: judge record {rid!r} has a "
-                            f"non-string 'target_id'.\n       {self.state_path}")
                 # The run id is a PATH COMPONENT in failed_sandbox_dir,
                 # stash_logs and prune: `../x` moved or deleted outside the root
                 # (F24). Checked after the shape checks so the message still
@@ -975,11 +769,6 @@ class Ctx:
             note = pipeline_identity_note(self)
             if note:
                 print(note)
-        elif self._root_is_populated():
-            die(f"state.json is missing from a populated root: {self.state_path}\n"
-                f"       The run/pin registry is gone; this is not a fresh root. "
-                f"Restore state.json (or state.json.prev) from a backup, or start a "
-                f"fresh --root: existing sandboxes are never auto-adopted.")
         # The venue and the journal are configuration, not content: a root whose
         # venue id resolves to nothing, whose recorded profile snapshot
         # disagrees with the config, or whose journal does not belong to the
@@ -1023,7 +812,7 @@ class Ctx:
         # COMPACT before writing: the fields `compact_state` drops are copies of
         # files that live on disk anyway, and keeping them here is what turned
         # the 2026-09-24 registry into 78 MiB (and then into a refused root).
-        freed = compact_state(self.state, self.root)
+        freed = compact_state(self.state)
         if freed:
             self.state.setdefault("log", []).append(
                 {"ts": utcnow(), "event": "state-compacted", "run_id": None,
@@ -1046,11 +835,6 @@ class Ctx:
                     # Hardlinks unavailable (drvfs) or a concurrent save: fall
                     # back to a copy, never to a missing backup.
                     shutil.copy2(self.state_path, tmp_prev)
-                # The registry carries `judge_salt`; keep the backup private
-                # too. A hardlink shares the live inode, so this also tightens
-                # an existing 0644 registry before the new bytes are written.
-                with contextlib.suppress(OSError):
-                    os.chmod(tmp_prev, 0o600)
                 os.replace(tmp_prev, prev)
         except OSError:
             pass                        # best effort; the new state is written below
@@ -1059,34 +843,7 @@ class Ctx:
                 tmp_prev.unlink()
             except OSError:
                 pass
-        try:
-            write_json_atomic(self.state_path, self.state, mode=0o600)
-        except BaseException:
-            # A failed/crashed write must not leave the LIVE registry hard-linked
-            # to `.prev`: load_state_file() refuses a multiply-linked path, so an
-            # ENOSPC/EIO here turned a readable registry into one every later
-            # command rejected. Re-point `.prev` at a fresh copy of the same
-            # bytes, which makes state.json single-linked again, then propagate
-            # the original failure (F133).
-            try:
-                st = self.state_path.lstat()
-                pst = prev.lstat()
-                if (not stat.S_ISLNK(st.st_mode) and stat.S_ISREG(st.st_mode)
-                        and stat.S_ISREG(pst.st_mode)
-                        and st.st_ino == pst.st_ino and st.st_dev == pst.st_dev):
-                    tmp_repair = prev.with_name(
-                        f".{prev.name}.{os.getpid()}.{os.urandom(6).hex()}.repair")
-                    try:
-                        shutil.copy2(self.state_path, tmp_repair)
-                        os.replace(tmp_repair, prev)
-                    finally:
-                        try:
-                            tmp_repair.unlink()
-                        except OSError:
-                            pass
-            except OSError:
-                pass
-            raise
+        write_json_atomic(self.state_path, self.state)
         try:
             size = self.state_path.stat().st_size
         except OSError:
@@ -1174,17 +931,6 @@ class Ctx:
             _pid_n = int(pid) if pid is not None else None
         except (TypeError, ValueError):
             _pid_n = None
-        if _pid_n is None:
-            # No owner identity after the grace wait: the creator may still be
-            # between O_EXCL-create and its JSON write. Never declare that lock
-            # stale on age zero -- only a lock old enough that no initializing
-            # writer can still own it is reclaimable.
-            try:
-                _age = time.time() - lock_path.stat().st_mtime
-            except OSError:
-                return False
-            if _age < 30:
-                return False
         if _pid_n is not None and pid_alive(_pid_n):
             die(f"another pipeline process is already working on this root "
                 f"(pid {pid}, {holder.get('what')!r} since {holder.get('since')}).\n"
@@ -1319,24 +1065,6 @@ class Ctx:
             die(f"state.json is damaged: run record {rec.get('id')!r} points OUTSIDE the root "
                 f"({raw} -> {full}).\n       {self.state_path}\n"
                 f"       A sandbox must stay below {root}; refusing to use it.")
-        # `sandbox: "."` made the whole pipeline root, and `non_revised` the
-        # pristine source, a move/rmtree target (F023). Bare-id sandboxes
-        # (`r1_x`, the shape older roots and many fixtures use) stay legal, so
-        # reject the ROOT itself and the pipeline's protected trees rather than
-        # requiring a strict runs/ child.
-        protected = [self.runs_dir.resolve(), self.pristine.resolve(),
-                     self.pins_dir.resolve()]
-        try:
-            if full == root or full in protected:
-                raise ValueError("the root or a protected tree is not a run sandbox")
-            full.relative_to(root)
-            for tree in (self.pristine.resolve(), self.pins_dir.resolve()):
-                if full.is_relative_to(tree):
-                    raise ValueError("the pristine/pin tree is not a run sandbox")
-        except ValueError:
-            die(f"state.json is damaged: run record {rec.get('id')!r} names {raw!r} as its "
-                f"sandbox, which is the root or a protected read-only tree; refusing to "
-                f"use (or move/remove) it.")
         return full
 
     def round_rec(self, r: int) -> dict:
@@ -1362,8 +1090,7 @@ class Ctx:
         rec = self.state["runs"].get(rid)
         if rec is None:
             rec = {"id": rid, "kind": kind, "round": int(round_no), "sandbox": sandbox_rel,
-                   "status": "pending", "attempts": 0, "stage_attempts": 0,
-                   "created": utcnow(), "started": None,
+                   "status": "pending", "attempts": 0, "created": utcnow(), "started": None,
                    "finished": None, "last_error": None, "last_duration": None,
                    "postcheck": None, "inputs_manifest": None, "upstream_run_id": None,
                    "source_id": None, "self_id": None, "other_id": None, "target_id": None,
@@ -1514,21 +1241,6 @@ def input_mismatches(ctx: Ctx, rec: dict) -> list:
 # once" falls out of content hashing instead of label bookkeeping.
 # =====================================================================
 
-def _symlinked_source_root_refused(src: Path, owner_root: Path = None) -> bool:
-    """True for a source ROOT that copy_into()/build_corpus_dir() will refuse.
-
-    A package DIRECTORY that is a symlink is not package content: build_corpus_dir()
-    -> copy_into() already refuses it (only the canonical
-    `<root>/non_revised/<area>` evidence store may be a link). The digest and
-    judge-view walkers used to descend through the link anyway, so the recorded
-    corpus identity and the blinded view named outside files the pin could never
-    contain and pin_champion then died on "internal inconsistency" (F134).
-    """
-    if not src.is_symlink():
-        return False
-    return not (owner_root is not None and is_canonical_evidence_link(src, owner_root))
-
-
 def corpus_sources(ctx: Ctx, r: int, vid: str) -> list:
     """Ordered [(source_dir, prefix_in_corpus, excluded_top_level_names)].
 
@@ -1547,9 +1259,8 @@ def corpus_sources(ctx: Ctx, r: int, vid: str) -> list:
         if vid == A1_ID:
             return [(sb / "base", "", ())]
         srcs = []
-        code_dir = sb / CODE_DIR
-        if code_dir.is_dir() and not _symlinked_source_root_refused(code_dir, ctx.root):
-            srcs.append((code_dir, "code/", ()))
+        if (sb / CODE_DIR).is_dir():
+            srcs.append((sb / CODE_DIR, "code/", ()))
         srcs.append((sb / output_dir_for_vid(vid), "", CORPUS_EXCLUDE_TOP))
         return srcs
     pin = find_pin(ctx, vid)
@@ -1591,17 +1302,16 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     `<root>/non_revised/<area>` link (F27). Callers that hold the run root
     (`corpus_manifest`, `code_side_evidence`) pass it.
     """
-    entries, gaps = [], []
+    entries = []
     for src, prefix, excluded in sources:
-        if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
+        if not src.is_dir():
             continue
         # follow_dir_links: a sandbox package may carry an evidence area
         # (raw_data/, human_review_feedback/) as a symlink to the
         # root's canonical copy (see ensure_pristine_input). The digest a run
         # records must see the SAME files the pin materializes, or pin_champion
         # dies on its own "internal inconsistency" check.
-        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root,
-                                  gaps=gaps):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
             if not p.is_file() or _is_aux_doc(p.name):
                 continue
             if is_bookkeeping_name(p.name):
@@ -1616,14 +1326,7 @@ def manifest_for_sources(sources: list, owner_root: Path = None) -> dict:
     # as changed via the sentinel instead of raising PermissionError (F22).
     digs = sha256_files([p for _k, p in entries], on_error="<unreadable>")
     files = {k: d for (k, _p), d in zip(entries, digs)}
-    # Unreadable directories are part of the IDENTITY: a partial corpus must not
-    # share a digest with one that never contained the subtree (F059). The key
-    # is added ONLY when there is a gap, so an undamaged manifest keeps exactly
-    # the shape every recorded digest/`dir_matches` comparison already uses.
-    out = {"files": files, "count": len(files)}
-    if gaps:
-        out["unreadable_dirs"] = sorted(set(gaps))
-    return out
+    return {"files": files, "count": len(files)}
 
 
 def corpus_manifest(ctx: Ctx, r: int, vid: str) -> dict:
@@ -1658,12 +1361,10 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
     overrides = corpus_source_overrides(sources)
     paths = []
     names = []
-    gaps = []
     for i, (src, prefix, excluded) in enumerate(sources):
-        if not src.is_dir() or _symlinked_source_root_refused(src, owner_root):
+        if not src.is_dir():
             continue
-        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root,
-                                  gaps=gaps):
+        for p in _iter_tree_files(src, follow_dir_links=True, owner_root=owner_root):
             if not p.is_file() or _is_aux_doc(p.name) or is_bookkeeping_name(p.name):
                 continue
             rel = p.relative_to(src).as_posix()
@@ -1678,7 +1379,7 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
                 continue                      # a later source provides this path
             paths.append(p)
             names.append(prefix + rel)
-    if not paths and not gaps:
+    if not paths:
         # No files at all: the corpus is MISSING (a pruned or unmaterialized
         # sandbox), not empty. Returning "" lets the callers fall back to the
         # recorded integrity digest instead of treating every missing corpus as
@@ -1697,8 +1398,6 @@ def corpus_content_set_fingerprint(sources: list, owner_root: Path = None) -> st
             # the same corpus still reproduces the same fingerprint; it is a
             # path-qualified marker, never a content-independent digest.
             digs.append("unreadable:" + name)
-    # An unreadable DIRECTORY changes the identity too (F059).
-    digs.extend("unreadable-dir:" + g for g in sorted(set(gaps)))
     return hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()
 
 
@@ -1785,7 +1484,7 @@ def _normalize_version_refs(data: bytes, tokens) -> bytes:
         _urls.append(m.group(0))
         return b"\x00VIEWURL%d\x00" % (len(_urls) - 1)
 
-    data = re.sub(rb"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>)]+", _stash_url, data)
+    data = re.sub(rb"https?://[^\s\"'<>)]+", _stash_url, data)
     data = re.sub(rb"([-_])" + tok + rb"(?=\.[A-Za-z][A-Za-z0-9]{0,9}\b)",
                   rb"", data)
     cmd = re.compile(
@@ -1831,15 +1530,8 @@ def revision_token_for_dir(dirp: Path) -> dict:
             unreadable.append(f"{p.relative_to(dirp).as_posix()}: {e.strerror or e}")
             continue
     if not digs:
-        notes = ["no payload file could be read"]
-        if unreadable:
-            # Distinguish an EMPTY package from a fully unreadable one: the old
-            # return discarded the per-file detail, so both hashed the same (F059).
-            notes.append(f"{len(unreadable)} payload file(s) could not be read: "
-                         + "; ".join(unreadable[:5])
-                         + (f" (+{len(unreadable) - 5} more)" if len(unreadable) > 5 else ""))
         return {"token": "", "files": 0, "tokens_seen": [], "consistent": False,
-                "unreadable": list(unreadable), "notes": notes}
+                "notes": ["no payload file could be read"]}
     token = hashlib.sha256("\n".join(sorted(digs)).encode("utf-8")).hexdigest()[:7]
     # The READ-ONLY raw-data directory keeps the ORIGINAL file names: any version
     # token a name inside it carries belongs to the run that produced the source
@@ -1992,8 +1684,7 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for rel, p in corpus_dir_view_files(src, owner_root=ctx.root,
-                                            exclude_top=excluded):
+        for rel, p in corpus_dir_view_files(src, owner_root=ctx.root):
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             key = prefix + rel
@@ -2004,17 +1695,15 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     return out
 
 
-def corpus_dir_view_files(dirp: Path, owner_root: Path = None,
-                          exclude_top=CORPUS_EXCLUDE_TOP) -> list:
+def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
     """[(relative path, path)] for one directory under the judge-view rules.
 
     Slightly narrower than the corpus `build_corpus_dir()` materializes, because
     the judge is the one party that may not even READ what the corpus carries:
     difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE), the pipeline's
-    own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the SOURCE's own
-    process-scratch exclusion set (`exclude_top`, `CORPUS_EXCLUDE_TOP` --
-    `work/` -- by default) and every derived output whose editable source is in
-    the package (see `_is_view_excluded_file()`: a
+    own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the process
+    scratch (`CORPUS_EXCLUDE_TOP`, i.e. `work/`) and every derived output whose
+    editable source is in the package (see `_is_view_excluded_file()`: a
     `.log`/`.fls` records the build machine's paths and dates in its CONTENT, a
     version an agent went over loses the whole by-product set so its PRESENCE
     would say which package was worked on, and a `.bbl`/`.pdf` that can be
@@ -2022,29 +1711,13 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None,
     source) never reach a judge view -- so a judge cannot score or infer anything
     from an auxiliary file, a changelog, a ledger, a build log or a rendering.
 
-    `exclude_top` is threaded from the SOURCE (`corpus_sources`): a source with
-    no scratch set (the original, the a1 base, a pin) must not lose a file the
-    digest and the pin carry, or the judged corpus is a strict subset of the
-    scored one (F108).
-
     `owner_root` is the run root that owns the copy. Passing it makes an
     evidence-area link follow only when it is THIS root's canonical
     `<root>/non_revised/<area>` link; without it an outside tree shaped like
     `.../non_revised/raw_data` was followed into the judge view (F27).
     """
     out = []
-    if _symlinked_source_root_refused(dirp, owner_root):
-        return out
-    gaps = []
-    entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root,
-                               gaps=gaps)
-    if gaps:
-        # Fail closed for judge materialization: a partial view must never be
-        # built and scored as if the unreadable subtree did not exist (F059).
-        raise RuntimeError(
-            f"cannot materialize a judge view of {dirp}: {len(set(gaps))} "
-            f"unreadable director{'y' if len(set(gaps)) == 1 else 'ies'} "
-            f"({', '.join(sorted(set(gaps))[:4])})")
+    entries = _iter_tree_files(dirp, follow_dir_links=True, owner_root=owner_root)
     siblings = {}
     for p in entries:
         siblings.setdefault(p.parent, []).append(p.name)
@@ -2054,7 +1727,7 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None,
         if is_bookkeeping_name(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
-        if excluded_corpus_component(rel, exclude_top):
+        if excluded_corpus_component(rel, CORPUS_EXCLUDE_TOP):
             continue
         if is_disabled_evidence_rel(rel):
             # An inert `<evidence>.disabled/` area is neither submission content
@@ -2084,27 +1757,11 @@ def judge_view_digest(judge_view: Path) -> list:
     relative path is part of the identity.
     """
     out = []
-    if judge_view.is_symlink():
-        # A symlinked view root is not a materialized view; a sentinel keeps it
-        # from comparing EQUAL to an empty real view.
-        return [(".", "<symlink-view>")]
     if not judge_view.is_dir():
         return out
     for p in sorted(judge_view.rglob("*")):
-        # A derived view is disposable: a planted file symlink or a chmod-000
-        # entry must make the view compare UNEQUAL (so ensure_judge_view rebuilds
-        # it), never raise out of run/decide/retry (F140). The sentinel is
-        # impossible as a real hex digest, so a damaged entry can never match.
-        if p.is_symlink():
-            out.append((p.relative_to(judge_view).as_posix(), "<symlink>"))
-            continue
-        if p.is_dir():
-            continue                      # a real directory is view structure
-        if not p.is_file():
-            out.append((p.relative_to(judge_view).as_posix(), "<non-regular>"))
-            continue
-        out.append((p.relative_to(judge_view).as_posix(),
-                    sha256_files([p], on_error="<unreadable>")[0]))
+        if p.is_file():
+            out.append((p.relative_to(judge_view).as_posix(), sha256_file(p)))
     return sorted(out)
 
 
@@ -2151,12 +1808,6 @@ VIEW_PDF_EXTS = (".pdf",)
 # anonymity gap, never a silent clean file (F-002).
 VIEW_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".bmp", ".gif",
                    ".webp", ".emf", ".wmf", ".heic", ".avif")
-# RTF is a recognised editable manuscript source (VIEW_DERIVED_SOURCE_EXTS), so
-# its `{\info ...}` author/company/title block must be neutralized too; a legacy
-# binary `.doc` cannot be sanitized here and is a RECORDED anonymity gap instead
-# of being copied silently (F135).
-VIEW_RTF_EXTS = (".rtf",)
-VIEW_LEGACY_DOC_EXTS = (".doc",)
 VIEW_LATEX_TARGET_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg")
 # LaTeX source files are addressed WITHOUT their extension by \input,
 # \include, \bibliography, \addbibresource and \subfile. Their stems must be
@@ -2290,9 +1941,7 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
         _urls.append(m.group(0))
         return "\ue000%d\ue001" % (len(_urls) - 1)
 
-    # Any URI scheme, not only http(s): an ftp/file URL's filename was rewritten
-    # to an anonymous placeholder in the judge view.
-    text = re.sub(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s\"'<>]+", _stash_url, text)
+    text = re.sub(r"https?://[^\s\"'<>]+", _stash_url, text)
 
     def add(mapping, old, new):
         amb = ambiguous.setdefault(id(mapping), set())
@@ -2668,31 +2317,14 @@ def _rewrite_view_references(text: str, old_rel: str, new_rel: str, file_map: di
 
 
 def _blank_xml_elements(data: bytes, tags, value: bytes = b"") -> bytes:
-    # A namespace is bound to a PREFIX, and any prefix (or the default
-    # namespace) is legal: `<d:creator xmlns:d="http://purl.org/dc/elements/
-    # 1.1/">` and `<p:Company xmlns:p="...extended-properties">` are the same
-    # properties as `<dc:creator>`/`<Company>`. Matching the literal spelling
-    # leaked author/company from a legal part with no note (F76), so the LOCAL
-    # name is the contract and any (or no) prefix is accepted.
     for tag in tags:
-        local = tag.rsplit(b":", 1)[-1]
-        _pfx = rb"(?:[A-Za-z_][A-Za-z0-9_.-]*:)?"
-        # XML permits whitespace before `>` in a closing tag (`</dc:creator >`);
-        # an exact close left the author value in a blinded judge view.
-        pat = re.compile(rb"(<" + _pfx + re.escape(local) + rb"\b[^>]*>)(.*?)(</"
-                         + _pfx + re.escape(local) + rb"\s*>)", re.S | re.I)
+        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S | re.I)
         data = pat.sub(lambda m: m.group(1) + value + m.group(3), data)
     return data
 
 
-# XML permits an EMPTY element written with a start and an end tag
-# (`<Override ...></Override>`) as well as the self-closing spelling. Matching
-# only `<.../>` left the pointer at a part the sanitizer removed, so the judge
-# view was an invalid OPC package (F47).
-_RELS_ENTRY_RE = re.compile(
-    rb"<Relationship\b(?:[^>]*/>|[^>]*>.*?</Relationship\s*>)", re.S)
-_CONTENT_TYPE_OVERRIDE_RE = re.compile(
-    rb"<Override\b(?:[^>]*/>|[^>]*>.*?</Override\s*>)", re.S)
+_RELS_ENTRY_RE = re.compile(rb"<Relationship\b[^>]*/>")
+_CONTENT_TYPE_OVERRIDE_RE = re.compile(rb"<Override\b[^>]*/>")
 
 
 def _rels_part_base_dir(name: str) -> str:
@@ -2737,102 +2369,43 @@ _WORD_NS_DECL_RE = re.compile(
     + re.escape(_WORD_NS) + rb"(?P=q)")
 
 
-_ANY_DEFAULT_DECL_RE = re.compile(
-    rb"xmlns\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
-_XML_TAG_RE = re.compile(rb"<[^>]*>", re.S)
-
-
-def _prefix_decl_re(prefix: bytes):
-    return re.compile(rb"xmlns:" + re.escape(prefix)
-                      + rb"\s*=\s*(?P<q>[\"'])(?P<uri>[^\"']*)(?P=q)")
-
-
-def _qualify_default_word_ns(payload: bytes) -> bytes:
-    """Prefix every element that resolves to the Word DEFAULT namespace.
-
-    Every unprefixed element in a Word-default scope is WordprocessingML, so it
-    must be qualified for the byte transforms to see it. The default namespace
-    is SCOPED: a nested `<m:oMath xmlns="urn:math">` switches it for that
-    subtree only, so a global substitution would corrupt the part -- and the old
-    "another default declaration: not resolvable" bail-out leaked `delText` and
-    `author=` into the judge view (F20). Track the default per element instead.
-    """
-    out, pos, stack, w_scope = [], 0, [], False
-    for m in _XML_TAG_RE.finditer(payload):
-        tag = m.group(0)
-        new = tag
-        if tag.startswith(b"</"):
-            if stack:
-                cur, _w = stack.pop()
-                w_scope = stack[-1][1] if stack else False
-                if cur == _WORD_NS and re.match(rb"</[A-Za-z_][\w.-]*(?=[\s>])", tag):
-                    new = b"</w:" + tag[2:]
-        elif not tag.startswith((b"<?", b"<!")):
-            dm = _ANY_DEFAULT_DECL_RE.search(tag)
-            cur = dm.group("uri") if dm else (stack[-1][0] if stack else None)
-            own_w = bool(re.search(rb"xmlns:w\s*=", tag))
-            if cur == _WORD_NS and re.match(rb"<[A-Za-z_][\w.-]*(?=[\s/>])", tag):
-                new = b"<w:" + tag[1:]
-                if not (w_scope or own_w):
-                    nm = re.match(rb"<w:[A-Za-z_][\w.-]*", new)
-                    new = (new[:nm.end()] + b' xmlns:w="' + _WORD_NS + b'"'
-                           + new[nm.end():])
-                    own_w = True
-            if not re.search(rb"/\s*>$", tag):
-                stack.append((cur, w_scope or own_w))
-                w_scope = w_scope or own_w
-        if new != tag:
-            out.append(payload[pos:m.start()])
-            out.append(new)
-            pos = m.end()
-    if not out:
-        return payload
-    out.append(payload[pos:])
-    # Unqualified attributes (`author="..."` in a default-namespace part) are
-    # the same provenance fields; qualify them so the sanitizer rewrites them.
-    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", b"".join(out))
-
-
 def _normalize_word_prefix(payload: bytes) -> bytes:
-    """Bind the Word namespace to `w` however the part legally declares it.
+    """Rename a legal non-`w` Word namespace declaration to `w`.
 
     OOXML binds the Word namespace to a PREFIX, and `a:del`/`a:t` is exactly as
     valid as `w:del`/`w:t`. The sanitizer is byte-regex based, so normalizing
     the prefix before the transforms makes namespace identity, not spelling,
     the contract (F21).
 
-    XML allows either quote style/whitespace and the Word namespace may be the
-    DEFAULT namespace (`<document xmlns="...">`). A part may also bind the same
-    namespace to SEVERAL prefixes (`xmlns:w` and `xmlns:wp`); normalizing only
-    the first declaration left `wp:del`/`wp:delText` and `wp:author` in the
-    judge view (F20).
+    XML allows either quote style and whitespace around `=`, and the Word
+    namespace may be the DEFAULT namespace (`<document xmlns="...">`). A
+    declaration the old double-quote-only pattern could not see left `a:del`,
+    `a:author` and `delText` in the judge view (R02).
     """
-    decls = list(_WORD_NS_DECL_RE.finditer(payload))
-    if not decls:
+    m = _WORD_NS_DECL_RE.search(payload)
+    if not m:
         return payload
-    out = payload
-    # Rewrite every prefixed Word declaration to `xmlns:w` (in reverse so the
-    # earlier offsets stay valid), then rename that prefix's usages to `w:`.
-    renames = []
-    for m in reversed(decls):
-        prefix = m.group("prefix")
-        if prefix is None or prefix == b"w":
-            continue
-        # A prefix rebound to another namespace elsewhere cannot be renamed
-        # globally without corrupting that scope; leave it alone.
-        if any(d.group("uri") != _WORD_NS
-               for d in _prefix_decl_re(prefix).finditer(payload)):
-            continue
-        ts = out.rfind(b"<", 0, m.start())
-        te = out.find(b">", m.end())
-        tag = out[ts:te + 1] if ts >= 0 and te >= 0 else b""
-        repl = (b"" if re.search(rb"xmlns:w\s*=", tag)
-                else b"xmlns:w=" + m.group("q") + _WORD_NS + m.group("q"))
-        out = out[:m.start()] + repl + out[m.end():]
-        renames.append(prefix)
-    for prefix in renames:
-        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", out)
-    return _qualify_default_word_ns(out)
+    prefix = m.group("prefix")
+    if prefix == b"w":
+        return payload
+    if prefix is not None:
+        out = re.sub(rb"(?<=[<\s/])" + re.escape(prefix) + rb":", b"w:", payload)
+        return _WORD_NS_DECL_RE.sub(
+            lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
+            out, count=1)
+    # Default namespace: every unprefixed element in the part is WordprocessingML.
+    # Declare `w:` explicitly and qualify the element names (and the tracked
+    # attributes the sanitizer rewrites), or the byte transforms see nothing.
+    if re.search(rb"xmlns\s*=", _WORD_NS_DECL_RE.sub(b"", payload, count=1)):
+        return payload            # another default declaration: not resolvable here
+    out = _WORD_NS_DECL_RE.sub(
+        lambda mm: b"xmlns:w=" + mm.group("q") + _WORD_NS + mm.group("q"),
+        payload, count=1)
+    out = re.sub(rb"<(?P<close>/?)(?P<name>[A-Za-z_][\w.-]*)(?=[\s/>])",
+                 lambda mm: b"<" + mm.group("close") + b"w:" + mm.group("name"), out)
+    # Unqualified attributes (`author="..."` in a default-namespace part) are
+    # the same provenance fields; qualify them so the sanitizer rewrites them.
+    return re.sub(rb"(\s)(author|initials|date)=", rb"\1w:\2=", out)
 
 
 def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> bytes:
@@ -2847,10 +2420,10 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
 
     def _rel(m):
         el = m.group(0)
-        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
-        if not t:
+        tm = re.search(rb'Target="([^"]*)"', el)
+        if not tm:
             return el
-        target = url_unquote(t.group(2).decode("utf-8", "replace"))
+        target = tm.group(1).decode("utf-8", "replace")
         if re.match(r"(?i)^(?:[a-z][a-z0-9+.-]*:|#|\\\\|/)", target):
             return el
         new = file_map.get(target)
@@ -2860,8 +2433,7 @@ def _rewrite_rels_package_targets(payload: bytes, name: str, file_map: dict) -> 
                 new = posixpath.relpath(file_map[resolved], base_dir or ".")
         if new is None:
             return el
-        encoded = url_quote(new, safe="/._-~")
-        return el[:t.start(2)] + encoded.encode("utf-8") + el[t.end(2):]
+        return re.sub(rb'Target="[^"]*"', b'Target="' + new.encode("utf-8") + b'"', el)
 
     return _RELS_ENTRY_RE.sub(_rel, payload)
 
@@ -2882,9 +2454,8 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
         return payload
     if low == "[content_types].xml":
         def _override(m):
-            pm = re.search(rb'PartName\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', m.group(0))
-            raw = (pm.group(1) if pm.group(1) is not None else pm.group(2)) if pm else b""
-            part = raw.decode("utf-8", "replace").lstrip("/")
+            pm = re.search(rb'PartName="([^"]*)"', m.group(0))
+            part = pm.group(1).decode("utf-8", "replace").lstrip("/") if pm else ""
             if part and part.lower() in dropped:
                 notes.append(f"dropped the [Content_Types].xml Override for {part}")
                 return b""
@@ -2896,13 +2467,13 @@ def _prune_dropped_part_references(payload: bytes, name: str, dropped: set,
 
     def _rel(m):
         el = m.group(0)
-        tm = re.search(rb'TargetMode=(["\'])([^"\']*)\1', el)
-        if tm and tm.group(2).lower() == b"external":
+        tm = re.search(rb'TargetMode="([^"]*)"', el)
+        if tm and tm.group(1).lower() == b"external":
             return el
-        t = re.search(rb'Target=(["\'])([^"\']*)\1', el)
+        t = re.search(rb'Target="([^"]*)"', el)
         if not t:
             return el
-        target = url_unquote(t.group(2).decode("utf-8", "replace"))
+        target = t.group(1).decode("utf-8", "replace")
         resolved = posixpath.normpath(posixpath.join(base_dir, target)).lstrip("/")
         if resolved.lower() in dropped:
             notes.append(f"dropped the {name} relationship to the removed part {resolved}")
@@ -2955,33 +2526,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
             if oversized:
                 return data, [f"not stripped: part {oversized[0]!r} expands over the "
                               f"OOXML size budget; metadata left as is"]
-            infos = zin.infolist()
-            if len(infos) > MAX_DOCX_ENTRIES:
-                return data, [f"not stripped: package carries {len(infos)} parts, over the "
-                              f"OOXML entry-count budget ({MAX_DOCX_ENTRIES}); "
-                              f"metadata left as is"]
-            total = sum(i.file_size for i in infos)
-            if total > MAX_DOCX_TOTAL_BYTES:
-                return data, [f"not stripped: package expands to {total} bytes, over the "
-                              f"OOXML total size budget ({MAX_DOCX_TOTAL_BYTES}); "
-                              f"metadata left as is"]
-            # `file_size` is attacker-controlled central-directory metadata:
-            # inflate through a bounded stream and count the REAL bytes, so a
-            # part that declares small and expands large is refused instead of
-            # materialized whole (F04).
-            items = []
-            actual_total = 0
-            for info in infos:
-                with zin.open(info) as fh:
-                    payload = fh.read(MAX_DOCX_PART_BYTES + 1)
-                if len(payload) > MAX_DOCX_PART_BYTES:
-                    return data, [f"not stripped: part {info.filename!r} expands over the "
-                                  f"OOXML size budget; metadata left as is"]
-                actual_total += len(payload)
-                if actual_total > MAX_DOCX_TOTAL_BYTES:
-                    return data, [f"not stripped: package expands to over "
-                                  f"{MAX_DOCX_TOTAL_BYTES} bytes; metadata left as is"]
-                items.append((info.filename, payload))
+            items = [(i.filename, zin.read(i.filename)) for i in zin.infolist()]
     except (zipfile.BadZipFile, OSError, KeyError, RuntimeError,
             NotImplementedError) as e:                            # noqa: BLE001
         return data, [f"not a readable OOXML zip ({e}); metadata left as is"]
@@ -2992,15 +2537,14 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
     def _accept_changes(payload: bytes) -> bytes:
         """Drop revision marks / edit ids; return the accepted document XML."""
         nonlocal accepted
-        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids\s*>", b"", payload, flags=re.S)
+        new = re.sub(rb"<w:rsids\b[^>]*>.*?</w:rsids>", b"", payload, flags=re.S)
         new = re.sub(rb"<w:rsids\b[^>]*/>", b"", new)
-        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=([\"'])[^\"']*\1",
-                     b"", new)
+        new = re.sub(rb"\s(?:[\w]+:)?(?:rsid\w*|paraId|textId|durableId)=\"[^\"]*\"", b"", new)
         new = re.sub(rb"<w:proofErr\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:lastRenderedPageBreak\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:proofState\b[^>]*/>", b"", new)
         new = re.sub(rb"<w:attachedTemplate\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars\s*>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:docVars\b[^>]*>.*?</w:docVars>", b"", new, flags=re.S)
         new = re.sub(rb"<w:trackChanges\b[^>]*/>", b"", new)
         def _drop_nested(tag: bytes) -> None:
             """Remove a nested revision wrapper innermost-first.
@@ -3017,7 +2561,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
             pat = re.compile(
                 rb"<w:" + tag + rb"\b[^>]*/>"
                 rb"|<w:" + tag + rb"\b[^>]*>(?:(?!<w:" + tag
-                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb"\s*>", re.S)
+                + rb"\b(?![^>]*/>)).)*?</w:" + tag + rb">", re.S)
             for _ in range(64):
                 stripped = pat.sub(b"", new)
                 if stripped == new:
@@ -3028,22 +2572,21 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # `<w:del>` wrapper around its cells. Stripping only the marker kept
         # every cell's text, resurrecting the row as accepted content (F19).
         new = re.sub(
-            rb"<w:tr\b[^>]*>(?:(?!</w:tr\s*>).)*?<w:trPr\b[^>]*>"
-            rb"(?:(?!</w:trPr\s*>).)*?<w:del\b[^>]*/>"
-            rb"(?:(?!</w:trPr\s*>).)*?</w:trPr\s*>(?:(?!</w:tr\s*>).)*?</w:tr\s*>",
+            rb"<w:tr\b[^>]*>(?:(?!</w:tr>).)*?<w:trPr\b[^>]*>"
+            rb"(?:(?!</w:trPr>).)*?<w:del\b[^>]*/>"
+            rb"(?:(?!</w:trPr>).)*?</w:trPr>(?:(?!</w:tr>).)*?</w:tr>",
             b"", new, flags=re.S)
         _drop_nested(b"del")
         _drop_nested(b"cellDel")
         _drop_nested(b"moveFrom")
         new = re.sub(rb"<w:del\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText\s*>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:delText\b[^>]*>.*?</w:delText>", b"", new, flags=re.S)
         new = re.sub(rb"<w:(rPrChange|pPrChange|tblPrChange|trPrChange|tcPrChange|"
-                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1\s*>", b"", new,
-                     flags=re.S)
-        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1\s*>",
-                     b"", new, flags=re.S)
+                     rb"sectPrChange|numberingChange)\b[^>]*>.*?</w:\1>", b"", new, flags=re.S)
+        new = re.sub(rb"<w:(cellIns|cellDel|cellMerge|moveFrom)\b[^>]*>.*?</w:\1>", b"",
+                     new, flags=re.S)
         new = re.sub(rb"<w:(?:cellIns|cellDel|cellMerge|moveFrom)\b[^>]*/>", b"", new)
-        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo\s*>", rb"\1", new, flags=re.S)
+        new = re.sub(rb"<w:moveTo\b[^>]*>(.*?)</w:moveTo>", rb"\1", new, flags=re.S)
         # Word nests `w:ins` inside `w:ins` (a later insertion inside an
         # earlier one). One non-greedy pass pairs the OUTER open tag with the
         # INNER close tag, so it unwraps the outer mark and leaves the inner
@@ -3051,7 +2594,7 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
         # (and the judge's read) promises. Re-apply until no `w:ins` survives;
         # each pass removes at least one mark, so this terminates.
         for _ in range(64):
-            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins\s*>", rb"\1", new, flags=re.S)
+            unwrapped = re.sub(rb"<w:ins\b[^>]*>(.*?)</w:ins>", rb"\1", new, flags=re.S)
             if unwrapped == new:
                 break
             new = unwrapped
@@ -3073,34 +2616,19 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 stripped += 1
                 continue                              # a stale rendered page + Word setting
             payload = _prune_dropped_part_references(payload, name, dropped, notes)
-            if "/embeddings/" in low and payload[:2] == b"PK":
-                # An embedded workbook/document is a nested OOXML package; the
-                # outer loop only rewrites top-level XML, so it was copied
-                # byte-for-byte with its own docProps author (F001).
-                nested, nested_notes = _sanitize_ooxml_bytes(payload)
-                if nested != payload:
-                    stripped += 1
-                notes.extend(f"embedded object {name}: {n}" for n in nested_notes)
-                payload = nested
             if low == "docprops/core.xml":
-                # A legal UTF-16 core part is invisible to the byte regexes; the
-                # word/xl/ppt branch normalized it, this branch did not (F004).
-                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"dc:creator", b"cp:lastModifiedBy"),
                                               b"author")
                 payload = _blank_xml_elements(payload, (b"dc:title", b"dc:subject",
                                                         b"dc:description", b"cp:keywords",
                                                         b"cp:category", b"cp:contentStatus"))
-                payload = _blank_xml_elements(payload, (b"dcterms:created", b"dcterms:modified",
-                                                        b"cp:lastPrinted"),
+                payload = _blank_xml_elements(payload, (b"dcterms:created", b"dcterms:modified"),
                                               fixed_date)
                 payload = _blank_xml_elements(payload, (b"cp:revision",), b"1")
                 stripped += 1
             elif low == "docprops/app.xml":
-                payload = _ooxml_xml_utf8(payload)
                 payload = _blank_xml_elements(payload, (b"Company", b"Manager", b"Application",
-                                                        b"AppVersion", b"Template",
-                                                        b"HyperlinkBase", b"TitlesOfParts"))
+                                                        b"AppVersion", b"Template"))
                 payload = _blank_xml_elements(payload, (b"TotalTime", b"LastPrinted"), b"0")
                 # Word's cached statistics go stale the moment a script rewrites
                 # the document -- a judge could read "this was edited after the
@@ -3128,17 +2656,10 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                 payload = _ooxml_xml_utf8(payload)
                 payload = _normalize_word_prefix(payload)
                 payload = _accept_changes(payload)
-                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))=([\"\'])[^\"\']*\2',
-                             rb'\1=\2author\2', payload)
-                new = re.sub(rb"((?:w|w15|w16):date)=([\"\'])[^\"\']*\2",
-                             rb"\1=\2" + fixed_date + rb"\2", new)
-                # Presence info carries the author's account id/provider even
-                # when every w:author attribute is neutralized; remove it and
-                # its identity attributes (F136).
-                new = re.sub(rb"<w15:presenceInfo\b[^>]*/>", b"", new)
-                new = re.sub(
-                    rb"\s((?:w15|w16):(?:userId|providerId|principalId|mainAuthorName|"
-                    rb"authorName))=([\"\'])[^\"\']*\2", b"", new)
+                new = re.sub(rb'((?:w|w15|w16):(?:author|initials))="[^"]*"', rb'\1="author"',
+                             payload)
+                new = re.sub(rb"((?:w|w15|w16):date)=\"[^\"]*\"",
+                             rb"\1=" + b'"' + fixed_date + b'"', new)
                 if new != payload:
                     stripped += 1
                 payload = new
@@ -3148,15 +2669,6 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
                     payload = _blank_xml_elements(
                         payload, (b"author", b"personDisplayName"), b"author")
                     stripped += 1
-                if low.startswith("word/comments") and low.endswith(".xml"):
-                    # `w:author` was neutralized, but the comment BODY (its
-                    # w:t text) can name a person or lab; a comment is not part
-                    # of the accepted document (F024).
-                    new_c = re.sub(rb"(<w:t\b[^>]*>)(.*?)(</w:t\s*>)", rb"\1\3",
-                                   payload, flags=re.S)
-                    if new_c != payload:
-                        stripped += 1
-                    payload = new_c
                 # the pipeline's own hand-off marker prefix must not identify a
                 # package as "revised by the pipeline"; the payload stays.
                 payload = payload.replace(PLACEHOLDER_TOKEN.encode(), b"[TO BE COMPLETED")
@@ -3210,96 +2722,10 @@ def _blank_pdf_value(value: bytes) -> bytes:
 
 def _blank_xmp_fields(stream: bytes) -> bytes:
     for tag in (b"rdf:li", b"xmp:CreateDate", b"xmp:ModifyDate", b"xmp:MetadataDate",
-                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description",
-                b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
-                b"xmpMM:DerivedFrom", b"pdf:Keywords", b"dc:subject"):
-        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb"\s*>)", re.S)
+                b"xmp:CreatorTool", b"pdf:Producer", b"dc:title", b"dc:description"):
+        pat = re.compile(rb"(<" + tag + rb"\b[^>]*>)(.*?)(</" + tag + rb">)", re.S)
         stream = pat.sub(lambda m: m.group(1) + b" " * len(m.group(2)) + m.group(3), stream)
-    # The same properties are also written as rdf:Description ATTRIBUTES; the
-    # element loop cannot see those, so the document id/derived-from filename
-    # survived a blinded PDF (F029).
-    for attr in (b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
-                 b"pdf:Keywords"):
-        apat = re.compile(rb"(\b" + attr + rb"\s*=\s*)([\"'])(.*?)\2", re.S)
-        stream = apat.sub(
-            lambda m: m.group(1) + m.group(2) + b" " * len(m.group(3)) + m.group(2),
-            stream)
     return stream
-
-
-_PDF_INFO_KEYS = (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
-                  b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion")
-
-_PDF_INFO_KEY_RE = re.compile(
-    rb"/(?P<key>" + b"|".join(_PDF_INFO_KEYS) + rb")\b[ \t\r\n]*")
-
-
-def _pdf_literal_end(buf: bytes, start: int) -> int:
-    """Index just past the balanced `)` of the literal starting at `start`.
-
-    A PDF literal string may contain BALANCED nested parentheses and `\\)`
-    escapes; the old regex could not span them, so `< /Author (Jane (J.)
-    Author) >` survived the blanking with no note (F78). -1 = not closed.
-    """
-    depth, i, n = 0, start, len(buf)
-    while i < n:
-        ch = buf[i:i + 1]
-        if ch == b"\\":
-            i += 2
-            continue
-        if ch == b"(":
-            depth += 1
-        elif ch == b")":
-            depth -= 1
-            if depth == 0:
-                return i + 1
-        i += 1
-    return -1
-
-
-def _pdf_blank_object_value(data: bytes, num: bytes) -> tuple:
-    """(bytes, changed): blank the string value(s) of an indirect `num 0 obj`.
-
-    `/Author 3 0 R` is a legal PDF Info value, so blanking only the reference
-    token left the author in object 3 (F10). Resolve the reference and blank
-    the string/hex values of that object IN PLACE (equal length, offsets hold).
-    """
-    m = re.search(rb"(?<![\w.])" + re.escape(num) + rb"\s+0\s+obj\b", data)
-    if not m:
-        return data, False
-    end = data.find(b"endobj", m.end())
-    if end < 0:
-        return data, False
-    body = data[m.end():end]
-    out, i, changed = [], 0, False
-    while i < len(body):
-        ch = body[i:i + 1]
-        if ch == b"\\":
-            out.append(body[i:i + 2])
-            i += 2
-            continue
-        if ch == b"(":
-            close = _pdf_literal_end(body, i)
-            if close < 0:
-                return data, False
-            out.append(_blank_pdf_value(body[i:close]))
-            i = close
-            changed = True
-            continue
-        if ch == b"<" and body[i:i + 2] != b"<<":
-            close = body.find(b">", i)
-            if close < 0:
-                return data, False
-            out.append(_blank_pdf_value(body[i:close + 1]))
-            i = close + 1
-            changed = True
-            continue
-        out.append(ch)
-        i += 1
-    new_body = b"".join(out)
-    if new_body == body:
-        return data, True              # resolved, and already blank
-    return data[:m.end()] + new_body + data[end:], True
 
 
 def _sanitize_pdf_bytes(data: bytes) -> tuple:
@@ -3322,58 +2748,13 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
                 continue
             obj = om.group(0)
             new_obj = obj
-            indirect = []
-            pos = 0
-            # Skip to the END of each value so a key name quoted inside another
-            # value cannot be mistaken for a dictionary key.
-            while True:
-                km = _PDF_INFO_KEY_RE.search(new_obj, pos)
-                if km is None:
-                    break
-                start = km.end()
-                key = km.group("key")
-                pos = start + 1
-                if new_obj[start:start + 1] == b"(":
-                    close = _pdf_literal_end(new_obj, start)
-                    if close < 0:
-                        notes.append(f"PDF /{key.decode()} value is not a delimited "
-                                     f"literal string; that metadata was left as is")
-                        continue
-                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close])
-                               + new_obj[close:])
-                    pos = close
-                elif new_obj[start:start + 1] == b"<" and new_obj[start:start + 2] != b"<<":
-                    close = new_obj.find(b">", start)
-                    if close < 0 or not re.fullmatch(
-                            rb"[0-9A-Fa-f\s]*", new_obj[start + 1:close]):
-                        continue
-                    new_obj = (new_obj[:start] + _blank_pdf_value(new_obj[start:close + 1])
-                               + new_obj[close + 1:])
-                    pos = close + 1
-                elif new_obj[start:start + 1] == b"/":
-                    nm = re.match(rb"/[^\s/<>\[\]()%]*", new_obj[start:])
-                    if nm and nm.end() > 1:       # a name value carries identity too
-                        new_obj = (new_obj[:start + 1] + b" " * (nm.end() - 1)
-                                   + new_obj[start + nm.end():])
-                        pos = start + nm.end()
-                else:
-                    rm = re.match(rb"(\d+)\s+(\d+)\s+R\b", new_obj[start:])
-                    if rm:
-                        indirect.append((rm.group(1), key))
-                        pos = start + rm.end()
+            for key in (b"Author", b"Creator", b"Producer", b"Title", b"Subject", b"Keywords",
+                        b"CreationDate", b"ModDate", b"Trapped", b"GTS_PDFXVersion"):
+                pat = re.compile(rb"(/" + key + rb"\s*)(\((?:[^()\\]|\\.)*\)|<[0-9A-Fa-f\s]*>)")
+                new_obj = pat.sub(lambda mm: mm.group(1) + _blank_pdf_value(mm.group(2)), new_obj)
             if new_obj != obj:
                 data = data[:om.start()] + new_obj + data[om.end():]
                 changed += 1
-            for num, key in indirect:
-                new_data, ok = _pdf_blank_object_value(data, num)
-                if not ok:
-                    notes.append(f"PDF /{key.decode()} is the indirect reference "
-                                 f"{num.decode()} 0 R, which could not be resolved; "
-                                 f"that metadata was left as is")
-                    continue
-                if new_data != data:
-                    data = new_data
-                    changed += 1
     else:
         notes.append("no uncompressed PDF /Info dictionary found; metadata was left as is")
     # /ID is in the trailer/xref at the END of the file, but a LINEARIZED PDF
@@ -3416,190 +2797,19 @@ def _sanitize_pdf_bytes(data: bytes) -> tuple:
     return data, notes
 
 
-_RTF_IDENTITY_RE = re.compile(
-    rb"\{\\(?:\*\\)?(?:author|company|title|operator|manager|subject|keywords|doccomm|"
-    rb"category|hlinkbase)(?=[^A-Za-z])")
-
-
-def _sanitize_rtf_bytes(data: bytes) -> tuple:
-    """(bytes, notes): blank the identity fields of an RTF `{\\info ...}` block.
-
-    RTF is a plain-text format whose `{\\info {\\author ...}{\\company ...}}`
-    block carries the same provenance an OOXML core/app part does. The view used
-    to copy it byte-for-byte, so the blind judge could read the author and the
-    company straight out of the submitted manuscript (F135). Values are blanked
-    IN PLACE (same length), so the document stays valid RTF.
-    """
-    if not data.lstrip()[:5].lower().startswith(b"{\\rtf"):
-        return data, ["not a readable RTF document; metadata left as is"]
-    pos = 0
-    while True:
-        m = _RTF_IDENTITY_RE.search(data, pos)
-        if m is None:
-            break
-        start = m.end()
-        # Find the closing brace of THIS group, honoring \{ \} escapes and
-        # nested groups (an RTF value may contain formatting runs).
-        depth, j = 1, start
-        while j < len(data) and depth:
-            ch = data[j:j + 1]
-            if ch == b"\\":
-                j += 2
-                continue
-            if ch == b"{":
-                depth += 1
-            elif ch == b"}":
-                depth -= 1
-            j += 1
-        if depth:
-            return data, ["unbalanced RTF group; metadata left as is"]
-        close = j - 1
-        if data[start:close].strip(b" \t\r\n"):
-            data = data[:start] + b" " * (close - start) + data[close:]
-        pos = close + 1
-    return data, []
-
-
-_SVG_METADATA_RE = re.compile(rb"(?is)<metadata\b[^>]*>.*?</metadata\s*>")
-_SVG_COMMENT_RE = re.compile(rb"(?s)<!--.*?-->")
-_SVG_TOOL_ATTR_RE = re.compile(
-    rb"(?i)\s+(?:inkscape|sodipodi|adobe|dc|cc|rdf|i):[\w:-]+\s*=\s*"
-    rb"(?:\"[^\"]*\"|'[^']*')")
-
-_SVG_DC_NS = b"http://purl.org/dc/elements/1.1/"
-_SVG_RDF_NS = b"http://www.w3.org/1999/02/22-rdf-syntax-ns#"
-_SVG_DC_LOCALS = (b"contributor", b"coverage", b"creator", b"date", b"description",
-                  b"format", b"identifier", b"language", b"publisher", b"relation",
-                  b"rights", b"source", b"subject", b"title", b"type")
-
-
-def _svg_bound_prefixes(raw: bytes, uri: bytes) -> list:
-    """Every prefix bound to `uri` (b"" for the DEFAULT namespace)."""
-    out = []
-    pat = re.compile(rb"xmlns(?::([A-Za-z_][\w.-]*))?\s*=\s*(?P<q>[\"'])"
-                     + re.escape(uri) + rb"(?P=q)")
-    for m in pat.finditer(raw):
-        prefix = m.group(1) or b""
-        if prefix not in out:
-            out.append(prefix)
-    return out
-
-
-def _sanitize_svg_bytes(raw: bytes) -> tuple:
-    """Strip SVG metadata/comments/tool attributes; record an unparsable gap.
-
-    An SVG is XML and can carry dc:creator/date, RDF metadata and
-    inkscape/sodipodi tool attributes into a judge view byte-for-byte (F164).
-
-    XML binds Dublin Core to a PREFIX, so `<d:creator>` under
-    `xmlns:d="http://purl.org/dc/elements/1.1/"` is the same metadata as
-    `<dc:creator>`; matching the literal `dc:` spelling leaked the author from
-    a legal figure with no note (F84). Resolve the prefixes bound to the DC/RDF
-    URIs and strip by namespace.
-    """
-    if b"</svg" not in raw.lower():
-        return raw, ["not a readable SVG document; metadata left as is"]
-    dc_prefixes = _svg_bound_prefixes(raw, _SVG_DC_NS)
-    rdf_prefixes = _svg_bound_prefixes(raw, _SVG_RDF_NS)
-    out = _SVG_METADATA_RE.sub(b"", raw)
-    out = _SVG_COMMENT_RE.sub(b"", out)
-    out = _SVG_TOOL_ATTR_RE.sub(b"", out)
-    # RDF is not the only carrier: a direct `<dc:creator>` child, an
-    # `<rdf:RDF>` block outside `<metadata>`, and `<title>`/`<desc>` text all
-    # reach the judge view byte-for-byte (F027).
-    out = re.sub(rb"(?is)<dc:[A-Za-z_][\w.-]*\b[^>]*>.*?</dc:[A-Za-z_][\w.-]*\s*>",
-                 b"", out)
-    for prefix in dc_prefixes:
-        if prefix:
-            q = re.escape(prefix)
-            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*>.*?</" + q
-                         + rb":[A-Za-z_][\w.-]*\s*>", b"", out)
-            out = re.sub(rb"(?is)<" + q + rb":[A-Za-z_][\w.-]*\b[^>]*/>", b"", out)
-        else:
-            names = b"|".join(_SVG_DC_LOCALS)
-            out = re.sub(rb"(?is)<(" + names + rb")\b[^>]*>.*?</\1\s*>", b"", out)
-            out = re.sub(rb"(?is)<(?:" + names + rb")\b[^>]*/>", b"", out)
-    out = re.sub(rb"(?is)<rdf:RDF\b[^>]*>.*?</rdf:RDF\s*>", b"", out)
-    for prefix in rdf_prefixes:
-        if prefix:
-            q = re.escape(prefix)
-            out = re.sub(rb"(?is)<" + q + rb":RDF\b[^>]*>.*?</" + q
-                         + rb":RDF\s*>", b"", out)
-    out = re.sub(rb"(?is)<(title|desc)\b[^>]*>.*?</\1\s*>", b"", out)
-    # A metadata ATTRIBUTE in the same namespace (`d:creator="Alice"`) is not
-    # an element and survives the element pass.
-    for prefix in dc_prefixes + rdf_prefixes:
-        if prefix:
-            out = re.sub(rb"(?i)\s+" + re.escape(prefix)
-                         + rb":[\w:-]+\s*=\s*(?:\"[^\"]*\"|'[^']*')", b"", out)
-    notes = []
-    residual = bool(re.search(rb"(?is)<metadata\b|<dc:[A-Za-z_]", out))
-    for prefix in dc_prefixes + rdf_prefixes:
-        if prefix and re.search(rb"(?is)<" + re.escape(prefix) + rb":[A-Za-z_]", out):
-            residual = True
-    if residual:
-        notes.append("an SVG metadata element could not be stripped; inspect the "
-                     "judge view for author metadata")
-    return out, notes
-
-
 def _transform_view_file(old_rel: str, src: Path, file_map: dict):
     """(transformed bytes | None, notes) for one view file (None = copy as is)."""
     ext = src.suffix.lower()
-
-    def _read() -> tuple:
-        try:
-            st = src.stat()
-        except OSError as e:
-            return None, [f"unreadable source ({e}); the file is omitted from the view"]
-        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_PAYLOAD_BYTES:
-            # A multi-gigabyte agent-written payload must fail cheaply: stat the
-            # source and omit an over-budget/irregular one instead of calling
-            # read_bytes() on it (F46). The "unreadable source" wording routes
-            # the omission through the caller's named-gap path.
-            return None, [f"unreadable source (not a regular file within the "
-                          f"{MAX_PAYLOAD_BYTES // (1024 * 1024)} MiB payload budget); "
-                          f"the file is omitted from the view"]
-        try:
-            return src.read_bytes(), []
-        except OSError as e:
-            # One unreadable payload must not abort judge materialization
-            # (F105): the caller omits it and records a named gap.
-            return None, [f"unreadable source ({e}); the file is omitted from the view"]
-
-    if ext == ".svg":
-        raw, _bad = _read()
-        if raw is None:
-            return None, _bad
-        return _sanitize_svg_bytes(raw)
-    if ext == ".eps":
-        raw, _bad = _read()
-        if raw is None:
-            return None, _bad
-        # EPS is PostScript, not XML: its %%Creator/%%CreationDate/
-        # %%DocumentData comments cannot be stripped safely here. The bytes are
-        # copied as-is and the gap is named (F164).
-        return None, ["EPS vector metadata (creator/date/document data) is not "
-                      "sanitized; metadata left as is in the judge view"]
     if _view_is_text(old_rel):
-        raw, _bad = _read()
-        if raw is None:
-            return None, _bad
+        raw = src.read_bytes()
         text = raw.decode("utf-8", "surrogateescape")
         text = _rewrite_view_references(text, old_rel, file_map[old_rel], file_map)
         # The pipeline's hand-off marker prefix must not identify a package as
         # "revised by the pipeline"; the payload the author fills in stays.
         text = text.replace(PLACEHOLDER_TOKEN, "[TO BE COMPLETED")
         return text.encode("utf-8", "surrogateescape"), []
-    if ext in VIEW_RTF_EXTS:
-        raw, _bad = _read()
-        if raw is None:
-            return None, _bad
-        return _sanitize_rtf_bytes(raw)
     if ext in VIEW_OOXML_EXTS or ext in VIEW_PDF_EXTS:
-        raw, _bad = _read()
-        if raw is None:
-            return None, _bad
+        raw = src.read_bytes()
         # The sanitized bytes do not depend on the view seed: the same figure or
         # document appears in many views, so cache by content (bounded).
         kind = "ooxml" if ext in VIEW_OOXML_EXTS else "pdf"
@@ -3637,11 +2847,7 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     # The transform depends on each file's RELATIVE PATH (reference rewriting
     # resolves against it), not only on its bytes: a rename with identical
     # content must not reuse the old expected view (F10).
-    # A chmod-000 payload must not abort judge materialization: the sentinel
-    # makes the view compare as stale (and the build records the gap) instead
-    # of raising PermissionError out of this function.
-    src_key = tuple(sorted((rel, sha256_files([p], on_error="<unreadable>")[0])
-                           for rel, p in files))
+    src_key = tuple(sorted((rel, sha256_file(p)) for rel, p in files))
     key = (int(r), str(vid), str(view_seed), src_key)
     with _VIEW_EXPECT_LOCK:
         hit = _VIEW_EXPECT_CACHE.get(key)
@@ -3651,13 +2857,8 @@ def expected_view_digest(ctx: Ctx, r: int, vid: str, view_seed: str) -> list:
     digs = []
     for old_rel, src in files:
         data, _notes = _transform_view_file(old_rel, src, file_map)
-        if data is None and any("unreadable source" in str(n).lower()
-                                for n in (_notes or [])):
-            # build_judge_view omits the same file and records the gap, so it
-            # must not be part of the expected identity either.
-            continue
         digest = (hashlib.sha256(data).hexdigest() if data is not None
-                  else sha256_files([src], on_error="<unreadable>")[0])
+                  else sha256_file(src))
         # The anonymous NAME is part of the expected identity (F-015): a view
         # whose files carry the right bytes under the wrong names is not the
         # view this corpus materializes.
@@ -3733,42 +2934,12 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                                          "compressed/unparsable", "not stripped",
                                          "could not be blanked", "budget")):
                 _transform_warnings.append(f"{file_map[rel]}: {_note}"[:400])
-        if data is None and any("unreadable source" in str(n).lower()
-                                for n in (_notes or [])):
-            _transform_warnings.append(
-                f"{file_map[rel]}: unreadable source; omitted from the judge view"[:400])
-            continue
         if data is None:
-            try:
-                shutil.copyfile(src, out)             # content only: no metadata
-            except OSError as e:
-                # An unreadable image/other copy-as-is payload must be an
-                # omitted, named gap -- never a PermissionError escaping the
-                # whole judge materialization (F079).
-                _transform_warnings.append(
-                    f"{file_map[rel]}: unreadable source ({type(e).__name__}: {e}); "
-                    f"omitted from the judge view"[:400])
-                continue
-            _suffix = Path(rel).suffix.lower()
-            if _suffix in VIEW_IMAGE_EXTS:
+            shutil.copyfile(src, out)                 # content only: no metadata
+            if Path(rel).suffix.lower() in VIEW_IMAGE_EXTS:
                 _transform_warnings.append(
                     f"{file_map[rel]}: image copied byte-for-byte; embedded "
                     f"metadata (EXIF/IPTC/XMP) was not stripped"[:400])
-            elif _suffix in VIEW_LEGACY_DOC_EXTS:
-                # A legacy binary .doc cannot be sanitized here; it is a NAMED
-                # anonymity gap, not a silently clean file (F135).
-                _transform_warnings.append(
-                    f"{file_map[rel]}: legacy .doc copied byte-for-byte; "
-                    f"author/company metadata was not stripped"[:400])
-            elif not _notes:
-                # Any OTHER extension is copied with no sanitizer at all. ODF
-                # (.odt/.ods/.odp), EPUB and legacy .xls/.ppt containers carry
-                # author/creation metadata, and a silent copy let the view and
-                # `record_anonymity_gaps` report a clean decision (F107). It is
-                # a NAMED gap, like the image/.doc/EPS cases above.
-                _transform_warnings.append(
-                    f"{file_map[rel]}: {_suffix or 'no extension'} copied byte-for-byte; "
-                    f"embedded author/creation metadata was not stripped"[:400])
         else:
             out.write_bytes(data)
         try:
@@ -3811,9 +2982,7 @@ def ensure_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
     want = expected_view_digest(ctx, r, vid, view_seed)
     if dst.is_dir() and judge_view_digest(dst) == want:
         return False
-    if dst.exists() or dst.is_symlink():
-        # A dangling symlink at `dst` makes exists() False; mkdir then raises
-        # FileExistsError and the derived view can never be rebuilt (F188).
+    if dst.exists():
         rmtree_force(dst, ignore_errors=True)
     build_judge_view(ctx, r, vid, dst, stamp, view_seed)
     return True
@@ -3910,127 +3079,16 @@ def stash_logs(sb: Path, logs_dir: Path, rid: str, attempt: int = None) -> list:
 
 
 def bump_attempt(rec: dict) -> int:
-    """Number one session that wrote into the run: since-reset count + total.
+    """Count one attempt: the per-invocation counter AND the monotone total.
 
-    `attempts` numbers the RECORDED sessions since the last reset (`retry
-    --run`, a revalidation reset); `attempts_done` never goes back, so the
-    attempt that wrote a sandbox keeps its number (and therefore its archive
-    directory and its log name) across a reset.
-
-    This is an IDENTITY counter, not the retry budget: a CONTINUATION, a scoped
-    ARTIFACT-REPAIR session and a re-verify all need a number (two records must
-    never share one), but none of them is a retry of the stage. The driver's
-    retry budget is a separate, per-invocation counter (and `stage_attempts`
-    is the cumulative full-launch history); mixing the record count with the
-    budget made a run report "[attempt 5/3]" (2026-11-12, r1_a2_revise: two
-    re-verifies between three launches), which reads as if the retry policy had
-    overrun.
+    `attempts` is what the retry policy and the status table's ATT column use,
+    and `retry` resets it to 0; `attempts_done` never goes back, so the attempt
+    that wrote a sandbox keeps its number (and therefore its archive directory
+    and its log name) across a reset.
     """
     rec["attempts"] = int(rec.get("attempts") or 0) + 1
     rec["attempts_done"] = int(rec.get("attempts_done") or 0) + 1
     return rec["attempts_done"]
-
-
-def bump_stage_attempt(rec: dict) -> int:
-    """Count one FULL stage attempt -- a fresh agent session for the stage.
-
-    This is the run's cumulative full-launch count (the `full` half of the status
-    table's `FULL+AUX` cell and the history). The retry budget itself is tracked
-    per invocation by the driver (`attempts/run`, a live `attempts_left`
-    counter): one FAILED attempt cycle spends one slot, and a scoped repair or a
-    CONTINUATION that fails spends the slot of the attempt it serves, not an
-    extra one. Auxiliary sessions are counted separately (`bump_scoped_repair`,
-    `bump_continuation`, `bump_reverification`) so that neither the console nor
-    the status table can present them as retries of the stage.
-    """
-    rec["stage_attempts"] = int(rec.get("stage_attempts") or 0) + 1
-    return rec["stage_attempts"]
-
-
-def _bump_aux(rec: dict, key: str) -> int:
-    rec[key] = int(rec.get(key) or 0) + 1
-    return rec[key]
-
-
-def bump_scoped_repair(rec: dict) -> int:
-    """Count one scoped artifact-repair session (its own count, never a retry)."""
-    return _bump_aux(rec, "scoped_repairs")
-
-
-def bump_continuation(rec: dict) -> int:
-    """Count one CONTINUATION session (its own count, never a retry)."""
-    return _bump_aux(rec, "continuation_sessions")
-
-
-def bump_reverification(rec: dict) -> int:
-    """Count one re-postcheck of a failed process's complete artifacts.
-
-    A re-verify runs no agent at all; it only gives the same attempt a second
-    look, so it is recorded here instead of being charged to the retry budget.
-    """
-    return _bump_aux(rec, "reverifications")
-
-
-def stage_attempts(rec: dict) -> int:
-    """The number of FULL stage attempts recorded for the run (cumulative)."""
-    try:
-        return int(rec.get("stage_attempts") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def stage_attempt_count(rec: dict) -> int:
-    """The full-attempt count for a report, with a pre-split record's fallback.
-
-    A record written before the split (or built by hand in a test) counted every
-    session as an attempt; it must never be reported as "0 attempt(s)".
-    """
-    n = stage_attempts(rec)
-    if n:
-        return n
-    try:
-        return int(rec.get("attempts") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def auxiliary_sessions(rec: dict) -> int:
-    """How many sessions ran for this run WITHOUT being a full stage retry."""
-    total = 0
-    for key in ("scoped_repairs", "continuation_sessions", "reverifications"):
-        try:
-            total += int(rec.get(key) or 0)
-        except (TypeError, ValueError):
-            pass
-    return total
-
-
-def auxiliary_session_summary(rec: dict) -> str:
-    """`N scoped repair(s), M continuation(s), K re-verification(s)` (empty if none)."""
-    parts = []
-    for key, noun in (("scoped_repairs", "scoped repair"),
-                      ("continuation_sessions", "continuation"),
-                      ("reverifications", "re-verification")):
-        try:
-            n = int(rec.get(key) or 0)
-        except (TypeError, ValueError):
-            n = 0
-        if n:
-            parts.append(f"{n} {noun}{'' if n == 1 else 's'}")
-    return ", ".join(parts)
-
-
-def attempt_split_cell(rec: dict) -> str:
-    """`2+1` -- full stage attempts plus the auxiliary sessions, for the run table.
-
-    The `+` part is shown only when an auxiliary session ran, so an ordinary
-    run's cell stays a plain number. The two numbers are the run's LIFETIME
-    history (the retry budget itself is per invocation and is reported on the
-    console); keeping them apart is what stops the table from reading a scoped
-    repair or a re-verify as a retry.
-    """
-    full, aux = stage_attempt_count(rec), auxiliary_sessions(rec)
-    return f"{full}+{aux}" if aux else str(full)
 
 
 def attempt_number(rec: dict) -> int:
@@ -4078,11 +3136,7 @@ def failed_sandbox_dir(ctx: Ctx, rec: dict, attempt: int = None) -> Path:
     if not _safe_state_segment(rid):
         die(f"refusing a failed-sandbox path for unsafe run id {rid!r} (it must be one "
             f"path component); repair state.json")
-    # The run id is a filename component from state.json: escape glob
-    # metacharacters or a tampered id (`*`) makes this count other runs'
-    # archives (F060).
-    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(
-        f"{glob.escape(rid)}_try*_failed"))) + 1)
+    n = int(attempt or 0) or (len(list(ctx.runs_dir.glob(f"{rid}_try*_failed"))) + 1)
     return ctx.runs_dir / (rid + FAILED_SUFFIX_FMT.format(n=n))
 
 
@@ -4132,11 +3186,6 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "duration": rec.get("last_duration"),
         "status": rec.get("status"),
         "ok": bool(ok),
-        # The attempt's own diagnostic when the process died with an EMPTY
-        # error list: `attempt_history_lines` reads this key from the entry,
-        # but the entry never carried it, so such an attempt always printed
-        # "agent process failed: no message".
-        "last_error": rec.get("last_error"),
         # The TRUE totals, next to the (complete, but size-capped) lists: an
         # operator can see at a glance how many problems an attempt carried even
         # if a pathological list was cut.
@@ -4150,13 +3199,6 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
         "prompt": PROMPT_FILE,
         # Which CLI session produced this attempt (used by the CONTINUATION).
         "agent_session_id": rec.get("agent_session_id"),
-        # The turn cap THIS attempt ran under, and whether it was enforceable
-        # and hit. `rec` keeps only the current attempt's values, so a history
-        # entry without them lost a cap-hit verdict as soon as the run was
-        # retried; the per-attempt record is where the operator reads it.
-        "max_turns": rec.get("max_turns"),
-        "turn_cap_hit": rec.get("turn_cap_hit"),
-        "turn_cap_enforced": rec.get("turn_cap_enforced"),
         "checked_at": (rec.get("postcheck") or {}).get("checked_at"),
         # Filled in when the failed sandbox is actually kept (moved): the attempt
         # record must not claim a path that does not exist yet (`sandbox_attempts`
@@ -4175,23 +3217,6 @@ def record_attempt(ctx: Ctx, rec: dict, ok: bool, errors=None, warnings=None,
     return entry
 
 
-def _inputs_generation(rec: dict):
-    """One digest of the inputs a run was materialized from, or None.
-
-    Used to tie an archived failed trial to the input generation it was built
-    from: after `revalidate_round_inputs` replaces the upstream bytes, an old
-    archive must not be promoted as the current attempt's result (F98).
-    """
-    man = rec.get("inputs_manifest") if isinstance(rec, dict) else None
-    if not isinstance(man, dict) or not man:
-        return None
-    try:
-        blob = json.dumps(man, sort_keys=True, default=str).encode("utf-8")
-    except (TypeError, ValueError):
-        return None
-    return hashlib.sha256(blob).hexdigest()
-
-
 def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     """Rename a failed attempt's WHOLE sandbox to `runs/<run>_try<N>_failed/`.
 
@@ -4205,21 +3230,15 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
     """
     n = attempt_number(rec)
     sb = ctx.sandbox_of(rec)
-    # `sandbox_of()` returns a RESOLVED path while `ctx.root` keeps the raw
-    # `--root` spelling: a root reached through a symlink made every
-    # `relative_to(ctx.root)` below raise ValueError (not an OSError, so the
-    # callers' handlers missed it) before the attempt could be archived.
-    root = ctx.root.resolve()
     inside = sandbox_attempts(rec) or [n]
     dest = failed_sandbox_dir(ctx, rec)
     history = rec.get("attempts_log") or []
     entry = next((e for e in reversed(history) if e.get("attempt") == n), None)
     record = dict(entry or {"attempt": n, "ok": False, "errors": [], "warnings": []})
     record.update({"run_id": rec.get("id"), "kind": rec.get("kind"), "round": rec.get("round"),
-                   "sandbox": str(sb.relative_to(root)) if sb.is_dir() else None,
+                   "sandbox": str(sb.relative_to(ctx.root)) if sb.is_dir() else None,
                    "attempts_in_sandbox": inside,
-                   "inputs_generation": _inputs_generation(rec),
-                   "moved_at": utcnow(), "moved_to": str(dest.resolve().relative_to(root))})
+                   "moved_at": utcnow(), "moved_to": str(dest.relative_to(ctx.root))})
     if not sb.is_dir():
         dest.mkdir(parents=True, exist_ok=True)
         write_json_atomic(dest / "record.json", record)
@@ -4230,352 +3249,28 @@ def move_failed_sandbox(ctx: Ctx, rec: dict) -> Path:
         # record.json: unique_path() may have renamed it, and the post-write
         # update below used to reach only the in-memory dict, leaving the
         # archived record pointing at the pre-collision name.
-        record["moved_to"] = str(dest.resolve().relative_to(root))
+        record["moved_to"] = str(dest.relative_to(ctx.root))
         try:
             sb.rename(dest)
         except OSError:
-            # Copy the TREE, not the files its links point at: the default
-            # symlinks=False materialized every link (legitimate evidence areas
-            # and agent-planted links alike) as its target (F065). Remove a
-            # PARTIAL destination on failure: a tree with no record.json was
-            # later scored as an unknown archive (F115).
-            try:
-                shutil.copytree(sb, dest, symlinks=True)
-            except OSError:
-                rmtree_force(dest, ignore_errors=True)
-                raise
+            shutil.copytree(sb, dest)
             rmtree_force(sb, ignore_errors=True)
         write_json_atomic(dest / "record.json", record)
     if entry is not None:
         entry["archived"] = True
-        entry["archive"] = str(dest.resolve().relative_to(root))
-        entry["sandbox_moved_to"] = str(dest.resolve().relative_to(root))
+        entry["archive"] = str(dest.relative_to(ctx.root))
+        entry["sandbox_moved_to"] = str(dest.relative_to(ctx.root))
         log = dest / "_agent.log"
         if log.is_file():
-            entry["agent_log"] = str(log.resolve().relative_to(root))
+            entry["agent_log"] = str(log.relative_to(ctx.root))
     else:
         rec.setdefault("attempts_log", []).append(record)
     ctx.log("failed-sandbox-moved", rec.get("id"),
-            f"attempt {n}: {dest.resolve().relative_to(root)}")
+            f"attempt {n}: {dest.relative_to(ctx.root)}")
     print(f"  [keep] {rec['id']}: failed try {dest.name.rsplit('_try', 1)[-1].split('_')[0]}'s "
           f"sandbox (attempt(s) {', '.join(str(a) for a in inside)}) is kept at "
-          f"{dest.resolve().relative_to(root)}/ -- deliverables, transcript and record.json")
+          f"{dest.relative_to(ctx.root)}/ -- deliverables, transcript and record.json")
     return dest
-
-
-def _trial_output_dirs(kind: str) -> tuple:
-    """The stage's own output area(s), from the shared signal-directory map."""
-    return tuple(SIGNAL_ALT_DIRS.get(str(kind or ""), ()))
-
-
-# The materializer seeds the stage's output directory with its inputs and
-# scratch (the revise package's base copies, `work/`, the corpus/evidence
-# areas, ...). Those are not deliverables the agent produced. `artifacts/` is
-# NOT excluded: the review's M-sweep artifacts are required output, and every
-# trial starts with the same seeded templates, so counting the agent's disposed
-# files there is a completeness signal. A trial is usable only when it reached
-# the stage's completion signal.
-_TRIAL_SEEDED_DIRS = set(ATTEMPT_ARCHIVE_SKIP_DIRS) | {
-    "work", "selfcheck", "paper_docx_format_parts", "raw_data",
-    HUMAN_FEEDBACK_DIR, LLM_FEEDBACK_DIR, BYTECODE_DIRNAME, SUPERSEDED_DIRNAME,
-}
-
-
-def _trial_marker_names_this_run(data, rec: dict) -> bool:
-    """Does a trial's completion marker belong to THIS run and stage?
-
-    A marker copied from another stage/run is not this trial's completion
-    signal: `relocate_stray_signal` already validates the same fields, but the
-    trial-selection path accepted any regular file with the marker name (F97).
-    An EMPTY object is not a completion signal either: a failed trial whose
-    only output was `{}` counted as one usable deliverable (F18). The historical
-    `kind` spelling some fixture markers use is tolerated; the prompted field is
-    `stage`, and a marker that states it must match this run's kind.
-    """
-    if not isinstance(data, dict) or not data:
-        return False
-    named_stage = data.get("stage")
-    if named_stage is not None:
-        # The prompted contract carries BOTH fields, so a marker that names a
-        # stage is held to the run identity too.
-        if named_stage != rec.get("kind"):
-            return False
-        return data.get("run_id") in (None, rec.get("id"))
-    # A legacy/older-schema marker that names no stage is still a completion
-    # signal when it is non-empty, but a run_id it DOES name must be this run's:
-    # a copied marker from another run is not this trial's signal.
-    return data.get("run_id") in (None, rec.get("id"))
-
-
-def _trial_signal_paths(sandbox: Path, kind: str, rec: dict = None) -> set:
-    """The completion-signal files this trial wrote (empty when it did not).
-
-    `rec` (when given) validates a marker against this run/stage; without it the
-    helper only enumerates signal-shaped files.
-    """
-    found = set()
-    try:
-        dirs = signal_search_dirs(sandbox, kind)
-        names = signal_names_of(kind)
-    except Exception:                                # noqa: BLE001
-        dirs, names = [sandbox], (MARKER_FILE,)
-    for d in dirs:
-        for name in names:
-            p = d / name
-            try:
-                if not (p.is_file() and not p.is_symlink()):
-                    continue
-                if rec is not None and name == MARKER_FILE:
-                    if not _trial_marker_names_this_run(
-                            read_json(p, revive=False, lenient=True), rec):
-                        continue
-                found.add(p.resolve())
-            except (OSError, RuntimeError):
-                continue
-    return found
-
-
-def _trial_signal_present(sandbox: Path, kind: str) -> bool:
-    return bool(_trial_signal_paths(sandbox, kind))
-
-
-def _trial_output_count(sandbox: Path, kind: str, rec: dict = None) -> int:
-    """How many required output files this trial produced, 0 when unusable.
-
-    A trial is usable only if it wrote the stage's completion signal (the
-    marker, or the judge's scores file): an attempt that stopped before the
-    signal is not a candidate, even when the materializer had already seeded its
-    output directory. The count then covers the stage's primary output package,
-    excluding the seeded input/template subdirectories, bytecode caches and the
-    attempt's record. It is the completeness proxy the operator asked for.
-    """
-    signals = _trial_signal_paths(sandbox, kind, rec)
-    if not signals:
-        return 0
-    total = 0
-    for dirname in _trial_output_dirs(kind):
-        root = sandbox / dirname
-        if not root.is_dir():
-            continue
-        for p in root.rglob("*"):
-            try:
-                if not p.is_file() or p.is_symlink():
-                    continue
-                if p.resolve() in signals:
-                    # The completion signal is counted once below, wherever the
-                    # stage placed it; counting it in the package loop too would
-                    # prefer identical output merely because its marker sits in
-                    # the stage directory instead of the sandbox root.
-                    continue
-            except (OSError, RuntimeError):
-                continue
-            rel = p.relative_to(root)
-            if rel.parts and rel.parts[0] in _TRIAL_SEEDED_DIRS:
-                continue
-            if BYTECODE_DIRNAME in p.parts or p.suffix.lower() in BYTECODE_SUFFIXES:
-                continue
-            if p.name == "record.json":
-                continue
-            total += 1
-    if total <= 0:
-        # The signal alone is not a deliverable: a trial whose only output is a
-        # (valid) completion marker produced no required output file and is not
-        # usable (F18). The judge's scores sheet IS its deliverable and is
-        # counted as the signal, so that stage keeps the one output.
-        return 1 if str(kind or "") == "judge" else 0
-    return total + 1                                  # the completion signal itself
-
-
-def best_failed_trial(ctx: Ctx, rec: dict):
-    """The most complete failed trial of `rec`, or None.
-
-    Trials are the kept `runs/<run>_try<N>_failed/` sandboxes plus the run's
-    current (last) sandbox. The score is (required output files produced, fewest
-    FAIL messages, latest failure ordinal); a trial that produced no required
-    output is not usable.
-    """
-    rid = str(rec.get("id") or "")
-    kind = rec.get("kind")
-    current_generation = _inputs_generation(rec)
-    candidates = []
-    try:
-        # A collision-suffixed archive (`..._try3_failed-2`, produced by
-        # unique_path when the destination already exists) is still this run's
-        # trial; the old suffix-free glob and ordinal regex missed it (F108).
-        # Same escape as prune: the id comes from state.json (F060).
-        kept = sorted(ctx.runs_dir.glob(f"{glob.escape(rid)}_try*_failed*"))
-    except OSError:
-        kept = []
-    for p in kept:
-        if not p.is_dir():
-            continue
-        m = re.search(r"_try(\d+)_failed(?:-\d+)?$", p.name)
-        ordinal = int(m.group(1)) if m else 0
-        record = read_json(p / "record.json")
-        # A trial built from a superseded input generation must not be
-        # promoted after the round's inputs were revalidated (F98). A legacy
-        # archive without a generation cannot be compared; it stays eligible.
-        archived_generation = (record or {}).get("inputs_generation") \
-            if isinstance(record, dict) else None
-        if (current_generation and archived_generation
-                and archived_generation != current_generation):
-            continue
-        candidates.append((p, record, ordinal))
-    active = ctx.sandbox_of(rec)
-    if active.is_dir():
-        history = rec.get("attempts_log") or []
-        last = history[-1] if history else {}
-        candidates.append((active, last, 10 ** 9))
-    scored = []
-    for sandbox, record, ordinal in candidates:
-        outputs = _trial_output_count(sandbox, kind, rec)
-        if outputs <= 0:
-            continue
-        # A known record must carry the diagnostics `record_attempt()` writes.
-        # A truncated record.json that still parses (`{"attempt": 1}`) has no
-        # `errors` key: reading that as an empty list gave it 0 FAIL messages,
-        # so it beat a real attempt with errors on the tie-break (F021).
-        known_record = (isinstance(record, dict) and bool(record)
-                        and isinstance(record.get("errors"), list))
-        errors = (record.get("errors") if known_record else []) or []
-        # A missing/corrupt record.json is UNKNOWN, never "zero FAIL messages":
-        # scoring it as 0 made an interrupted archive win the tie-break over a
-        # real attempt with errors (F107).
-        error_score = -len(errors) if known_record else float("-inf")
-        scored.append((outputs, error_score, ordinal, sandbox, record))
-    if not scored:
-        return None
-    scored.sort(key=lambda x: (x[0], x[1], x[2]))
-    outputs, error_score, ordinal, sandbox, record = scored[-1]
-    fail_messages = -error_score if error_score != float("-inf") else 0
-    return {"sandbox": sandbox, "record": record, "outputs": outputs,
-            "fail_messages": int(fail_messages), "ordinal": ordinal,
-            "record_known": error_score != float("-inf")}
-
-
-def use_best_failed_trial(ctx: Ctx, rec: dict) -> bool:
-    """Use an exhausted run's best failed trial; True when it was promoted.
-
-    Only `--tolerate-fail` runs reach here. The chosen trial is moved into the
-    run's active sandbox and the run is marked `done` with a `tolerated_fail`
-    record (its postcheck errors are kept as evidence), so the stages that
-    depend on it continue on the most complete attempt instead of the whole
-    invocation terminating. The result is PROVISIONAL and is never certified.
-    With the policy off, or no usable trial, nothing changes and the caller
-    takes the strict FAIL path.
-    """
-    if not tolerate_fail_of(ctx):
-        return False
-    if rec.get("status") == "done" and rec.get("tolerated_fail"):
-        return True
-    if rec.get("status") != "done" and rec.get("tolerated_fail"):
-        # A marker is only meaningful on a run that is still using the promoted
-        # trial. A stale marker from an earlier tolerated result must not make a
-        # fresh hard failure look tolerated; the new decision is made from this
-        # invocation's trials below.
-        rec.pop("tolerated_fail", None)
-        _post = dict(rec.get("postcheck") or {})
-        _post.pop("tolerated", None)
-        rec["postcheck"] = _post
-    best = best_failed_trial(ctx, rec)
-    if best is None:
-        return False
-    active = ctx.sandbox_of(rec)
-    chosen = Path(best["sandbox"])
-    trial_name = chosen.name
-    try:
-        same = chosen.resolve() == active.resolve()
-    except (OSError, RuntimeError):
-        same = False
-    if not same:
-        # Keep the last attempt as evidence, then put the chosen trial in the
-        # active path. If the evidence move fails, do not lose either copy:
-        # leave the run strict for the caller to report.
-        if active.is_dir():
-            try:
-                move_failed_sandbox(ctx, rec)
-            except (OSError, ValueError):
-                return False
-        try:
-            if active.exists() or active.is_symlink():
-                rmtree_force(active)
-            chosen.rename(active)
-        except OSError:
-            return False
-        # The chosen archive was RENAMED into the run's active path; its own
-        # record.json (and the attempts_log entry) still named the archive that
-        # no longer exists, so prior_failure_block/sandbox_attempts pointed at a
-        # dead path (F111). Record the path the trial actually occupies now.
-        try:
-            active_rel = active.resolve().relative_to(ctx.root.resolve())
-        except (OSError, ValueError):
-            active_rel = active
-        promoted = dict(best.get("record") or {})
-        promoted["moved_to"] = str(active_rel)
-        promoted["promoted"] = True
-        try:
-            write_json_atomic(active / "record.json", promoted)
-        except OSError:
-            pass
-        for entry in (rec.get("attempts_log") or []):
-            # move_failed_sandbox stores these as ROOT-RELATIVE paths
-            # ("runs/<name>"), not basenames. Comparing them to trial_name never
-            # matched, so the promoted entry kept naming the archive that had
-            # just been renamed into the active path (F111).
-            if isinstance(entry, dict) and any(
-                    Path(str(entry.get(key) or "")).name == trial_name
-                    for key in ("archive", "sandbox_moved_to")):
-                entry["archive"] = str(active_rel)
-                entry["sandbox_moved_to"] = str(active_rel)
-                entry["promoted"] = True
-    digest = None
-    if rec.get("kind") in ("rewrite", "revise", "integrate"):
-        # A tolerated candidate must still be pinnable: record the digest of the
-        # package the trial actually left on disk. Without it the round close
-        # refuses to pin the version (and the collection run loses the row).
-        def _unpromote() -> None:
-            """Put the trial back where it came from after a failed promotion."""
-            try:
-                if active.exists() or active.is_symlink():
-                    active.rename(chosen)
-                write_json_atomic(chosen / "record.json",
-                                  dict(best.get("record") or {}))
-            except OSError:
-                pass
-
-        vid = freshness_vid(rec)
-        if not vid:
-            _unpromote()
-            return False
-        try:
-            digest = recompute_corpus_digest(ctx, rec["round"], vid)
-        except Exception:                            # noqa: BLE001
-            _unpromote()
-            return False
-        if not digest:
-            _unpromote()
-            return False
-    rec["tolerated_fail"] = {
-        "mode": "on",
-        "trial": trial_name,
-        "outputs": int(best["outputs"]),
-        "fail_messages": int(best["fail_messages"]),
-        "recorded": utcnow(),
-        "note": ("every retry failed; the best failed trial (most required output files, "
-                 "then fewest FAIL messages) is used as the stage result -- PROVISIONAL, "
-                 "never certified"),
-    }
-    rec["status"] = "done"
-    if digest:
-        rec["corpus_digest"] = digest
-    post = dict(rec.get("postcheck") or {})
-    post["tolerated"] = True
-    rec["postcheck"] = post
-    ctx.save_state()
-    print(f"  [{TOLERATED_FAIL_STATUS}] {rec['id']}: retries exhausted; using the best "
-          f"failed trial {trial_name} ({best['outputs']} output file(s), "
-          f"{best['fail_messages']} FAIL message(s)) -- PROVISIONAL, never certified")
-    return True
 
 
 def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
@@ -4601,7 +3296,7 @@ def keep_failed_sandboxes(ctx: Ctx, manual: bool = False) -> list:
             continue
         try:
             kept.append(move_failed_sandbox(ctx, rec))
-        except (OSError, ValueError) as e:                          # noqa: BLE001
+        except OSError as e:                                        # noqa: BLE001
             print(f"  [warn] {rec['id']}: could not keep the failed sandbox ({e}); its "
                   f"diagnostics stay in state.json's attempts_log")
     if kept:
@@ -4674,7 +3369,7 @@ def attempt_history_lines(ctx: Ctx, indent: str = "  ", limit: int = 40) -> list
     return out
 
 
-def archive_stale_marker(sb: Path, rid: str) -> list:
+def archive_stale_marker(sb: Path, rid: str) -> None:
     """Move any pre-existing completion signal aside before a fresh attempt, so
     a crashed retry can never be scored on the previous attempt's marker.
 
@@ -4684,7 +3379,6 @@ def archive_stale_marker(sb: Path, rid: str) -> list:
     """
     logs = sb.parent / LOGS_DIRNAME
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    failures = []
     for rel, tag in ((MARKER_FILE, "prev_marker"), (SCORES_FILE, "prev_scores")):
         p = sb / rel
         if not p.exists():
@@ -4695,9 +3389,8 @@ def archive_stale_marker(sb: Path, rid: str) -> list:
         except OSError:
             try:
                 p.unlink()
-            except OSError as e:
-                failures.append(f"{rel}: {e}")
-    return failures
+            except OSError:
+                pass
 
 
 def materialize_a1(ctx: Ctx, r: int) -> dict:
@@ -4725,25 +3418,8 @@ def materialize_a1(ctx: Ctx, r: int) -> dict:
                                f"champion though it is marked done (the pin record is missing; "
                                f"restore it from a state.json backup)")
         src_id, src_dir = pin["id"], pinned_docs_dir(ctx, pin)
-    if not src_dir.is_dir():
-        # A recorded digest is not a source: accepting an existing base without
-        # the bytes it must match silently certifies whatever is there (F110).
-        raise RuntimeError(
-            f"cannot materialize round {r} base: the source corpus {src_dir} is "
-            f"missing, so base/ cannot be verified against it")
     want = (working_original_digest(ctx) if src_id == ORIGINAL_ID
             else (find_pin(ctx, src_id) or {}).get("digest"))
-    if not want:
-        # A legacy/damaged registry (or a pin with no recorded digest) used to
-        # make BOTH the stale-base guard and the post-copy check no-ops, so an
-        # existing base/ was trusted even when it was not the source. Derive
-        # the source digest from the SOURCE so the guard compares against what
-        # the round must start from, and record a real verified digest.
-        want = manifest_digest(manifest_for_sources([(src_dir, "", ())]))
-    if not want:
-        raise RuntimeError(
-            f"cannot materialize round {r} base: the source {src_dir} has no "
-            f"verifiable digest, so base/ identity cannot be checked")
     if (base.exists() and want
             and manifest_digest(manifest_for_sources([(base, "", ())])) != want):
         # An earlier round was re-run and its champion changed: a stale base copy
@@ -4786,6 +3462,10 @@ def _require_done(ctx: Ctx, rid: str, why: str) -> dict:
     if rec is None or rec.get("status") != "done":
         raise RuntimeError(f"refusing to materialize downstream sandbox: {why} "
                            f"({rid} is {(rec or {}).get('status', 'missing')})")
+    if rec.get("kind") in ("revise", "response"):
+        problem = required_writer_problem(ctx, rec)
+        if problem:
+            raise RuntimeError(f"refusing downstream use of {rid}: {problem}")
     return rec
 
 
@@ -4822,7 +3502,7 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
         if (fb / "feedback").is_dir():
             ensure_copy(fb / "feedback", sb / "feedback")
             extra_inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
-    safe_mkdir(sb / REWRITTEN_DIR)
+    (sb / REWRITTEN_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "stage")
@@ -4833,10 +3513,9 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
     # different invocation's override.
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
-    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok, _rem_ok)):
+                                                      _prefer_ok)):
         _copy_session_tools(sb)
         # write_text_atomic: a crash mid-write must never leave a truncated
         # PROMPT.md behind for a later invocation to trust.
@@ -4855,11 +3534,10 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                                                 execution_profile=execution_profile_of(ctx),
                                                 insertions_allowed=_ins_ok,
                                                 deletions_allowed=_del_ok,
-                                                prefer_rewrite=_prefer_ok,
-                                                soft_deletions=_rem_ok))
+                                                prefer_rewrite=_prefer_ok))
     rec = ctx.register(rid, "rewrite", r, f"runs/{rid}", upstream_run_id=rid_a1(r),
                        source_id=A1_ID, produces=vid)
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:
@@ -4872,26 +3550,6 @@ def materialize_rewrite(ctx: Ctx, r: int, k: int) -> dict:
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR, follow_dir_links=True)}
     rec["inputs_manifest"].update(extra_inputs)
     return rec
-
-
-def prior_audit_observations(ctx: Ctx, r_prior: int):
-    """The prior round's accepted audit observations, or None.
-
-    ONE predicate shared by `materialize_review` (which COPIES the file into
-    the next review's `prior_audit/`) and `_input_freshness_problems` (which
-    requires the copy to equal it). The materializer only carries observations
-    of a `done` audit; the freshness check used to accept ANY audit record, so
-    a failed/pending audit that had already written UNRESOLVED.md could never
-    match -- every invocation reset the completed review and its dependents.
-    """
-    audit_rec = ctx.run(rid_audit(r_prior))
-    if audit_rec is None or audit_rec.get("status") != "done":
-        return None
-    audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
-    # `is_file()` follows a symlink, and copy2 then imports the target's bytes
-    # into the next review as if the accepted audit had written them. Only a
-    # regular observation file is a prior-audit artifact.
-    return audit_obs if (audit_obs.is_file() and not audit_obs.is_symlink()) else None
 
 
 def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
@@ -4920,15 +3578,9 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
         inputs["feedback"] = hash_manifest(sb / "feedback", follow_dir_links=True)
     if (sb / "concerns").is_dir():
         inputs["concerns"] = hash_manifest(sb / "concerns")
-    prior_files = prior_round_file_sources(prior) if prior is not None else {}
-    if not prior_files:
-        # No current prior review (or it carries no files): a prior_round/ left
-        # by an earlier materialization is STALE and must not be recorded or
-        # shown to this round's reviewer (F139).
-        if (sb / "prior_round").exists() or (sb / "prior_round").is_symlink():
-            rmtree_force(sb / "prior_round", ignore_errors=True)
-    else:
-        want_prior = {name: sha256_file(src) for name, src in prior_files.items()}
+    if prior is not None:
+        want_prior = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
+                      if (prior / name).is_file()}
         if want_prior and not dir_matches(sb / "prior_round", want_prior):
             # A partial carry-over copy is rebuilt, not trusted: the review must
             # reconcile EVERY prior finding, and a silently truncated
@@ -4936,8 +3588,8 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
             if (sb / "prior_round").exists():
                 rmtree_force(sb / "prior_round", ignore_errors=True)
             (sb / "prior_round").mkdir(parents=True, exist_ok=True)
-            for name, src in prior_files.items():
-                shutil.copy2(src, sb / "prior_round" / name)
+            for name in want_prior:
+                shutil.copy2(prior / name, sb / "prior_round" / name)
     if (sb / "prior_round").is_dir():
         inputs["prior_round"] = hash_manifest(sb / "prior_round")
     # The previous round's auditor leaves unresolved observations for the next
@@ -4945,54 +3597,42 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     # the review can file the real ones without touching the prior-round
     # finding list.
     prior_audit_dir = sb / "prior_audit"
-    if prior_audit_dir.exists() or prior_audit_dir.is_symlink():
+    if prior_audit_dir.exists():
         rmtree_force(prior_audit_dir, ignore_errors=True)
     if r > 1:
-        audit_obs = prior_audit_observations(ctx, r - 1)
-        if audit_obs is not None:
-            prior_audit_dir.mkdir(parents=True, exist_ok=True)
-            _copy_ok = True
-            try:
+        audit_rec = ctx.run(rid_audit(r - 1))
+        if audit_rec is not None and audit_rec.get("status") == "done":
+            audit_obs = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
+            # `is_file()` follows a symlink, and copy2 then imports the target's
+            # bytes into the next review as if the accepted audit had written
+            # them. Only a regular observation file is a prior-audit artifact.
+            if audit_obs.is_file() and not audit_obs.is_symlink():
+                prior_audit_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(audit_obs, prior_audit_dir / "UNRESOLVED.md")
-            except OSError:
-                # An unreadable observation source must become an explicit gap
-                # row below, not abort or stage an empty table (F187).
-                _copy_ok = False
-            # The observations are prose lines with no ids, so a review could
-            # not name the one it disposed. Stage the SAME lines with stable
-            # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
-            # and let the postcheck require one disposition per id.
-            _obs_text = (read_text_bounded(prior_audit_dir / "UNRESOLVED.md")
-                         if _copy_ok else None)
-            if _obs_text is None:
-                # An unreadable prior-audit file must not become an EMPTY id
-                # table: the next review would dispose nothing and the audit's
-                # observations would vanish silently (F187). Stage one explicit
-                # gap row, which the postcheck then requires a disposition for.
-                _obs_lines = [
-                    f"UNREADABLE prior-audit observations: {audit_obs} could not be "
-                    f"read; restore the file and retry so this observation can be "
-                    f"disposed"]
-            else:
-                _obs_lines = prior_audit_observation_lines(_obs_text)
-            write_text_atomic(
-                prior_audit_dir / "OBSERVATIONS.md",
-                "\n".join([
-                    "# PRIOR-AUDIT OBSERVATIONS — stable ids (read-only)",
-                    "",
-                    "One row per observation line of `UNRESOLVED.md`, in the same order.",
-                    "Cite the id in the disposition: a finding's explanation says",
-                    "`from prior audit observation <id>`; a not-reproducible note says",
-                    "`prior <id>: not reproducible in base/`.",
-                    "",
-                    "| id | observation |",
-                    "|---|---|",
-                    *[f"| {oid} | {md_table_cell(line)} |"
-                      for oid, line in (
-                          (f"AU-OBS-{i:03d}", line)
-                          for i, line in enumerate(_obs_lines, 1))],
-                ]) + "\n")
-            inputs["prior_audit"] = hash_manifest(prior_audit_dir)
+                # The observations are prose lines with no ids, so a review could
+                # not name the one it disposed. Stage the SAME lines with stable
+                # ids (an indexed READ-ONLY view; UNRESOLVED.md stays verbatim)
+                # and let the postcheck require one disposition per id.
+                _obs_lines = prior_audit_observation_lines(
+                    read_text_bounded(prior_audit_dir / "UNRESOLVED.md") or "")
+                write_text_atomic(
+                    prior_audit_dir / "OBSERVATIONS.md",
+                    "\n".join([
+                        "# PRIOR-AUDIT OBSERVATIONS — stable ids (read-only)",
+                        "",
+                        "One row per observation line of `UNRESOLVED.md`, in the same order.",
+                        "Cite the id in the disposition: a finding's explanation says",
+                        "`from prior audit observation <id>`; a not-reproducible note says",
+                        "`prior <id>: not reproducible in base/`.",
+                        "",
+                        "| id | observation |",
+                        "|---|---|",
+                        *[f"| {oid} | {md_table_cell(line)} |"
+                          for oid, line in (
+                              (f"AU-OBS-{i:03d}", line)
+                              for i, line in enumerate(_obs_lines, 1))],
+                    ]) + "\n")
+                inputs["prior_audit"] = hash_manifest(prior_audit_dir)
     split_mode = review_split_of(ctx)
     review_a_findings = None
     if part == "b" and split_mode != "off":
@@ -5006,7 +3646,7 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
                       if a_rec is not None else None)
         if a_findings is not None and a_findings.is_file():
             review_a_findings = sha256_file(a_findings)
-    safe_mkdir(sb / GUIDED_REVIEW_DIR)
+    (sb / GUIDED_REVIEW_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     # Seed the M20 formatting sweep: the code-side OOXML scan IS the enumeration
@@ -5049,33 +3689,6 @@ def materialize_review(ctx: Ctx, r: int, part: str = "a") -> dict:
     return rec
 
 
-def _frozen_review_copy_problem(dirp: Path) -> str:
-    """Why a materialized frozen-review copy cannot be trusted ("" when fine).
-
-    A symlinked/absent/empty copy used to read as an empty finding list for the
-    audit and revise stages, silently disabling their finding gates (F011).
-    """
-    if dirp.is_symlink():
-        return f"{dirp} is a symlink"
-    if not dirp.is_dir():
-        return f"{dirp} is missing"
-    found = False
-    for rel in ("findings.json", "round2/findings_extra.json"):
-        p = dirp / rel
-        if p.is_symlink():
-            return f"{rel} is a symlink"
-        if not p.exists():
-            continue
-        found = True
-        doc = read_json(p, revive=False, lenient=True)
-        # The frozen review's own postcheck owns the row contract; this copy
-        # check must only refuse a symlinked/absent/EMPTY file, not a shape the
-        # consumers already handle (a bare list or a metadata object).
-        if not isinstance(doc, (dict, list)):
-            return f"{rel} is not a readable finding document"
-    return "" if found else "it carries no findings.json/findings_extra.json"
-
-
 def materialize_audit(ctx: Ctx, r: int) -> dict:
     """The AUDITOR sandbox: base/ + non_revised/ + the FROZEN guided_review/, read-only.
 
@@ -5104,11 +3717,6 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
         ensure_copy(_stage_frozen_review, sb / GUIDED_REVIEW_DIR)
     else:
         synthesize_frozen_review(ctx, r, sb)
-    _frozen_problem = _frozen_review_copy_problem(sb / GUIDED_REVIEW_DIR)
-    if _frozen_problem:
-        raise RuntimeError(f"cannot materialize {rid}: the frozen review copy is not "
-                           f"usable ({_frozen_problem}); the audit cannot dispose an "
-                           f"unknown finding list")
     # The COLD-START REVIEW session is an independent producer of X-9xx rows: merge them
     # into THIS sandbox's frozen review copy (never into the source review), so
     # the auditor disposes them beside every other frozen id.
@@ -5126,7 +3734,7 @@ def materialize_audit(ctx: Ctx, r: int) -> dict:
             ensure_copy(ctx.sandbox_of(rev_rec) / "concerns", sb / "concerns")
         if (ctx.sandbox_of(rev_rec) / "feedback").is_dir():
             ensure_copy(ctx.sandbox_of(rev_rec) / "feedback", sb / "feedback")
-    safe_mkdir(sb / "audit")
+    (sb / "audit").mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "base", "audit")
@@ -5195,7 +3803,7 @@ def seeded_cold_start_paths(sb: Path) -> set:
             sb / COLD_START_OBLIGATIONS_REL}
 
 
-def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) -> list:
+def cold_start_obligation_rows(root: Path, limit: int = 200) -> list:
     """Rows for `COLD_START_OBLIGATIONS_REL`: what the submission promises, resolved.
 
     Three families, each derived from the corpus's own declarations -- nothing
@@ -5238,9 +3846,7 @@ def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) ->
     # Written pointers and cited display items: the two shapes the submission
     # itself creates, resolved against what the package actually carries.
     try:
-        for r in non_submitted_reference_rows(
-                root, area_names if area_names is not None
-                else submission_not_carried_areas_plain()):
+        for r in non_submitted_reference_rows(root, submission_not_carried_areas_plain()):
             rows.append({"family": "written pointer",
                          "obligation": f"{r.get('reference')} (in {r.get('file')}:{r.get('line')})",
                          "resolves": "no (the submission does not carry it)",
@@ -5255,32 +3861,10 @@ def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) ->
                          "where": str(r.get("detail") or "")[:120]})
     except Exception:                                             # noqa: BLE001
         pass
-    coverage = {"family": "coverage",
-                "obligation": f"the corpus carries {len(carried)} file(s); "
-                              f"{len(submitted)} declared as submitted",
-                "resolves": "context", "where": ""}
-    if limit <= 0:
-        return []
-    # Never slice the coverage row away, and never truncate silently: the
-    # inventory is a CANDIDATE list the reviewer relies on, so a prefix says
-    # how many entries it omitted (F099).
-    if len(rows) > limit - 1:
-        # The branch keeps `limit - 2` original rows and spends the other two
-        # slots on the truncation row and the coverage row, so the omitted
-        # count is what `rows[:limit - 2]` dropped (R03). With `limit == 1`
-        # there is no truncation row and every original row is omitted.
-        kept = max(0, limit - 2)
-        omitted = len(rows) - kept
-        coverage["obligation"] += f"; {omitted} inventory row(s) omitted by the {limit}-row limit"
-        if limit >= 2:
-            rows = rows[:kept] + [{
-                "family": "truncation",
-                "obligation": f"{omitted} row(s) omitted from this inventory by the "
-                              f"{limit}-row limit",
-                "resolves": "gap", "where": "raise the limit to see them"}]
-        else:
-            rows = []
-    rows.append(coverage)
+    rows.append({"family": "coverage",
+                 "obligation": f"the corpus carries {len(carried)} file(s); "
+                               f"{len(submitted)} declared as submitted",
+                 "resolves": "context", "where": ""})
     return rows[:limit]
 
 
@@ -5305,14 +3889,10 @@ def cold_start_table_inventory(corpus: Path, limit: int = 400) -> list:
             rel = p.relative_to(corpus).as_posix()
             columns, count = "(non-tabular)", ""
             if suffix in (".tsv", ".csv"):
-                # An agent-writable package file: read through the shared
-                # no-follow/bounded reader, never a plain open that follows a
-                # symlink or blocks on a FIFO (F020).
                 try:
-                    data = read_regular_file(p, PACKAGE_TEXT_BYTES_LIMIT)
-                    lines = data.decode("utf-8", "replace").splitlines()
-                    header = lines[0] if lines else ""
-                    count = max(0, len(lines) - 1)
+                    with open(p, "r", encoding="utf-8", errors="replace", newline="") as f:
+                        header = f.readline().rstrip("\n")
+                        count = sum(1 for _ in f)
                     cells = header.split("\t" if suffix == ".tsv" else ",")
                     columns = " | ".join(str(c).strip()[:40] for c in cells[:14]) or "(empty)"
                 except OSError:
@@ -5344,25 +3924,6 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         ev = code_side_evidence(ctx, corpus, f"{rid_cold_start_review(r)}:probe")
     except Exception as e:                                        # noqa: BLE001
         ev = {"error": f"{type(e).__name__}: {e}"}
-    # A failed scan must not read as "the model found no claim": the cold-start
-    # review would then be told a clean empty list where the model never ran
-    # (a hidden coverage gap). Record the failure in the artifact itself.
-    claim_error = ""
-    if not isinstance(ev, dict):
-        claim_error = "the code-side evidence call returned no mapping"
-    else:
-        if ev.get("error"):
-            claim_error = str(ev["error"])
-        claims_ev = ev.get("claims")
-        if isinstance(claims_ev, dict) and claims_ev.get("error"):
-            claim_error = claim_error or str(claims_ev["error"])
-        if not isinstance(claims_ev, dict):
-            # The claim ledger shares the one guarded block with the number
-            # ledger; a failure there is recorded on `numbers`, never `claims`.
-            numbers_ev = ev.get("numbers")
-            if not claim_error and isinstance(numbers_ev, dict) and numbers_ev.get("error"):
-                claim_error = str(numbers_ev["error"])
-            claim_error = claim_error or "the code-side evidence carried no claim ledger"
     claim_rows = []
     for c in ((ev.get("claims") or {}).get("rows") or []):
         markers = c.get("markers")
@@ -5379,10 +3940,6 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "= a maximal claim, `under` = a hedge. This list is NOT the enumeration: read the surfaces "
         "themselves — the abstract, every figure legend, the cover letter, the Results and "
         "statistics paragraphs — and account for each surface in `coverage.md`.\n\n"
-        + (("> **COVERAGE GAP** — the code-side claim scan did not produce a ledger: "
-            + claim_error + ". An empty table below means the scan FAILED, not that the corpus "
-            "carries no claim. Enumerate the claim surfaces yourself and record this gap in "
-            "`coverage.md`.\n\n") if claim_error else "")
         + _evidence_artifact_table(
             claim_rows, ["document", "paragraph", "kind", "direction", "marker(s)", "sentence"],
             "no claim-bearing sentence was found by the code-side model")
@@ -5413,12 +3970,11 @@ def seed_cold_start_surfaces(ctx: Ctx, sb: Path, r: int) -> dict:
         "appears in the text)? A missing section or a cited-but-absent item belongs to this "
         "family even though nothing on the page is wrong.\n\n"
         + _evidence_artifact_table(
-            cold_start_obligation_rows(
-                corpus, area_names=submission_not_carried_areas(ctx)),
+            cold_start_obligation_rows(corpus),
             ["family", "obligation", "resolves", "where"],
             "no obligation could be derived (no README declaration, no pointer, no display item)")
         + "\n"))
-    return {"claims": len(claim_rows), "error": claim_error}
+    return {"claims": len(claim_rows)}
 
 
 def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
@@ -5439,14 +3995,7 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
     sb.mkdir(parents=True, exist_ok=True)
     ensure_copy(ctx.sandbox_of(a1) / "base", sb / "base")
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    safe_mkdir(sb / COLD_START_DIR)
-    # The cold-start prompt tells the session to check the structure the venue's
-    # own recorded rule set requires, and the prompt appends `venue_norm_for(ctx)`
-    # like every other role. Both are actionable only when the venue template is
-    # actually inside the sandbox: this materializer was the one producer that
-    # never staged `venue_template/`, so the class it was told to inspect was
-    # uninspectable (and the omission was not recorded as a gap).
-    stage_venue_template(ctx, sb)
+    (sb / COLD_START_DIR).mkdir(exist_ok=True)
     seed_cold_start_surfaces(ctx, sb, r)
     note = prior_failure_block(ctx.run(rid) or {}, sb) if ctx.run(rid) else PRIOR_FAILURE_NONE
     prompt = sb / PROMPT_FILE
@@ -5459,7 +4008,6 @@ def materialize_cold_start_review(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt, cold_start_review_prompt(sb, rid, r, prior_failure=note,
                                                venue=venue_profile_of(ctx),
-                                               venue_norm=venue_norm_for(ctx),
                                                author_to_complete=author_to_complete_mode_of(ctx),
                                                execution_profile=execution_profile_of(ctx),
                                                guided_review_off=not guided_review_enabled(ctx)))
@@ -5662,80 +4210,15 @@ def _cold_start_contract_problems(sb: Path) -> tuple:
     return errs, warns, findings
 
 
-def _verifier_jail_command(sb: Path, script: str):
-    """The argv that re-runs `script` inside a read-only bubblewrap jail, or None.
-
-    A verifier is agent-authored code, so it is never executed with the
-    orchestrator's filesystem, environment or network (F76: a verifier escaped
-    with `Path('../ESCAPED.txt')` and could read `~/.ssh` or benchmark ground
-    truth). The jail gives it:
-
-      * private user/PID/network/IPC/UTS/cgroup namespaces and a cleared
-        environment (no secrets, no network);
-      * the interpreter, its system libraries and /etc read-only;
-      * the sandbox READ-ONLY at `/sandbox` (the script's cwd) and a writable
-        tmpfs at `/tmp` only -- `$HOME` and every other host path stay unmounted.
-
-    None means this host cannot build the jail (no bubblewrap, not Linux, or
-    bwrap unable to create a namespace). The caller then REFUSES to run the
-    script: an optional verifier is better omitted than run with host access.
-    """
-    if not sys.platform.startswith("linux"):
-        return None
-    bwrap = shutil.which("bwrap")
-    if not bwrap:
-        return None
-    # Bind the TOP-LEVEL paths (not their realpaths): /bin, /lib and /lib64
-    # are usually symlinks into /usr, and the kernel looks for the ELF
-    # interpreter at the literal /lib64/... path, so the symlink NAME must
-    # exist in the jail too. A nested path such as /usr/bin is NOT bound on
-    # top of /usr -- that recursive over-mount made the tree unreachable.
-    roots = []
-    for rel in ("/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc"):
-        if Path(rel).exists() and rel not in roots:
-            roots.append(rel)
-    # A virtualenv/conda interpreter lives outside the system roots; expose
-    # ONLY that prefix (never the rest of $HOME) so `sys.executable` resolves.
-    covered = {os.path.realpath(r) for r in roots}
-    for prefix in (sys.prefix, sys.base_prefix):
-        try:
-            real = str(Path(prefix).resolve())
-        except OSError:
-            continue
-        if real in ("", "/") or any(real == r or real.startswith(r + "/") for r in covered):
-            continue
-        if str(prefix) not in roots:
-            roots.append(str(prefix))
-            covered.add(real)
-    exe = os.path.abspath(sys.executable)
-    argv = [bwrap, "--unshare-all", "--die-with-parent", "--new-session",
-            "--clearenv",
-            "--setenv", "PATH", f"{os.path.dirname(exe)}:/usr/bin:/bin",
-            "--setenv", "HOME", "/tmp",
-            "--setenv", "TMPDIR", "/tmp",
-            "--setenv", "PYTHONUTF8", "1",
-            "--setenv", "PYTHONIOENCODING", "utf-8",
-            "--setenv", "PYTHONDONTWRITEBYTECODE", "1"]
-    for root in roots:
-        argv += ["--ro-bind", root, root]
-    # The sandbox is bound at /sandbox AFTER the system roots and BEFORE the
-    # /tmp tmpfs, so a sandbox that itself lives under /tmp is not shadowed.
-    argv += ["--ro-bind", str(sb), "/sandbox", "--tmpfs", "/tmp",
-             "--proc", "/proc", "--dev", "/dev", "--chdir", "/sandbox",
-             exe, "/sandbox/" + script.lstrip("/")]
-    return argv
-
-
 def cold_start_reproduction(sb: Path, findings: list) -> dict:
     """Re-run every DECLARED verifier and record what it printed.
 
     A finding's `verifier` is {script, computed, shows}: the script's last
     non-empty stdout line must equal `computed`. The orchestrator runs it itself
-    inside a read-only jail (see `_verifier_jail_command`) with cwd = the
-    sandbox root; a mismatch, a missing script, a non-zero exit, an empty
-    output, a timeout or an unavailable jail is an error the caller turns into
-    a failed attempt -- a computation the cold-start review cannot reproduce is
-    a correctness blocker, not a finding. Findings WITHOUT a verifier are
+    (offline, bounded, cwd = the sandbox root); a mismatch, a missing script, a
+    non-zero exit, an empty output or a timeout is an error the caller turns into
+    a failed attempt -- a computation the cold-start review cannot reproduce is a
+    correctness blocker, not a finding. Findings WITHOUT a verifier are
     evidence/quotation rows: they are not re-run (their evidence is the quoted
     text or file:line reference), and they carry status `no-verifier` in the
     record.
@@ -5782,35 +4265,14 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             entry.update(status="missing")
             results.append(entry)
             continue
-        # The verifier is agent code: execute it only inside the jail. A host
-        # that cannot build one fails the verifier instead of running it with
-        # the orchestrator's filesystem/network/environment (F76).
-        jail = _verifier_jail_command(sb, script)
-        if jail is None:
-            entry.update(status="no-jail",
-                         detail="no verifier jail available (install bubblewrap; agent code "
-                                "is never run with host access)")
-            results.append(entry)
-            continue
-        # Enforce the AGGREGATE budget on this run too: checking elapsed only
-        # BEFORE each verifier let one started just under the total run its
-        # full per-script timeout, so the enforced wall clock exceeded
-        # COLD_START_REPRO_TOTAL_BUDGET by up to COLD_START_REPRO_TIMEOUT.
-        remaining = COLD_START_REPRO_TOTAL_BUDGET - (time.monotonic() - started)
-        timeout = max(0.0, min(COLD_START_REPRO_TIMEOUT, remaining))
         try:
             # The WHOLE stdout, not its final 8192 bytes: a correct last line
             # longer than that failed, and a long line whose suffix happened to
             # float-equal the claim passed. Output goes to files and is capped:
             # a verifier that floods stdout is an over-budget failure, never
             # unbounded memory in the orchestrator (F61).
-            rc, out, err = run_bounded(jail, timeout, cwd=str(sb))
-            if rc != 0 and (err or b"").startswith(b"bwrap:"):
-                entry.update(status="no-jail",
-                             detail=("bubblewrap could not build the jail: "
-                                     + (err or b"").decode("utf-8", "replace").strip())[:200])
-                results.append(entry)
-                continue
+            rc, out, _err = run_bounded(
+                [sys.executable, str(target)], COLD_START_REPRO_TIMEOUT, cwd=str(sb))
             text = (out or b"").decode("utf-8", "replace")
             lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
             produced = lines[-1] if lines else ""
@@ -5824,7 +4286,7 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
             else:
                 entry.update(status="mismatch")
         except subprocess.TimeoutExpired:
-            entry.update(status="timeout", detail=f"over {timeout:.0f}s")
+            entry.update(status="timeout", detail=f"over {COLD_START_REPRO_TIMEOUT}s")
         except ToolOutputOverBudget as e:
             entry.update(status="failed", detail=str(e)[:120])
         except OSError as e:                                     # noqa: BLE001
@@ -5834,14 +4296,12 @@ def cold_start_reproduction(sb: Path, findings: list) -> dict:
     # it is NOT a verified computation (the old code counted it while its status
     # was absent from `broken`, so an unexecuted declared computation passed).
     verified = [r for r in results if r["status"] not in ("no-verifier",
-                                                          "skipped-over-budget",
-                                                          "no-jail")]
+                                                          "skipped-over-budget")]
     skipped = [r["row"] for r in results if r["status"] == "skipped-over-budget"]
-    no_jail = [r["row"] for r in results if r["status"] == "no-jail"]
     mismatches = [r["row"] for r in verified if r["status"] == "mismatch"]
     broken = [r["row"] for r in verified
               if r["status"] in ("missing", "timeout", "failed", "empty")]
-    broken += skipped + no_jail
+    broken += skipped
     return {"rows": len(results), "verified": len(verified),
             "reproduced": sum(1 for r in verified if r["status"] == "reproduced"),
             "skipped": skipped,
@@ -5867,25 +4327,6 @@ def _write_cold_start_reproduction(sb: Path, repro: dict) -> None:
     write_text_atomic(sb / COLD_START_REPRO_REL, "\n".join(lines))
 
 
-def cold_start_coverage_problems(sb: Path) -> list:
-    errs = []
-    coverage = sb / COLD_START_COVERAGE_REL
-    if coverage.is_symlink() or not coverage.is_file():
-        errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and the "
-                    f"round's honest limits are part of the deliverable")
-    else:
-        # Agent-written prose: use the shared regular-file/no-follow/byte-budget
-        # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
-        coverage_text = read_text_bounded(coverage)
-        if coverage_text is None:
-            errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
-                        f"non-regular file or over the byte budget)")
-        elif not coverage_text.strip():
-            errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, the "
-                        f"findings they produced and what could not be checked")
-    return errs
-
-
 def postcheck_cold_start_review(ctx: Ctx, rec: dict):
     """The cold-start session's contract: the checked inventory, the findings, and
     every DECLARED verifier RE-RUN.
@@ -5907,7 +4348,20 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
     perrs, pwarns, findings = _cold_start_contract_problems(sb)
     errs.extend(perrs)
     warns.extend(pwarns)
-    errs.extend(cold_start_coverage_problems(sb))
+    coverage = sb / COLD_START_COVERAGE_REL
+    if coverage.is_symlink() or not coverage.is_file():
+        errs.append(f"{COLD_START_COVERAGE_REL} is missing: the areas examined, the counts and the "
+                    f"round's honest limits are part of the deliverable")
+    else:
+        # Agent-written prose: use the shared regular-file/no-follow/byte-budget
+        # reader. A huge or blocking COVERAGE.md could hang/OOM postcheck (F57).
+        coverage_text = read_text_bounded(coverage)
+        if coverage_text is None:
+            errs.append(f"{COLD_START_COVERAGE_REL} could not be read (it is a symlink/"
+                        f"non-regular file or over the byte budget)")
+        elif not coverage_text.strip():
+            errs.append(f"{COLD_START_COVERAGE_REL} is EMPTY: account for the areas examined, the "
+                        f"findings they produced and what could not be checked")
     repro = cold_start_reproduction(sb, findings)
     if findings:
         _write_cold_start_reproduction(sb, repro)
@@ -5920,16 +4374,9 @@ def postcheck_cold_start_review(ctx: Ctx, rec: dict):
                         f"{r['produced']!r} where the finding declares {r['declared']!r} -- the "
                         f"declared computation does not reproduce (a correctness blocker: fix "
                         f"the script or the declared value)")
-        elif r["status"] in ("missing", "timeout", "failed", "empty", "no-jail"):
-            if r["status"] == "missing":
-                _what = "is missing"
-            elif r["status"] == "no-jail":
-                _what = ("was NOT re-run because no verifier jail is available on this host "
-                         "(agent-written code is never run with host access)")
-            else:
-                _what = r["status"]
+        elif r["status"] in ("missing", "timeout", "failed", "empty"):
             errs.append(f"{COLD_START_FINDINGS_REL} {r['row']}: the verifier `{r['script']}` "
-                        f"{_what}"
+                        f"{'is missing' if r['status'] == 'missing' else r['status']}"
                         + (f" ({r['detail']})" if r["detail"] else "")
                         + " -- a declared verifier must be a re-runnable script that prints its "
                           "`computed` value as the last stdout line (omit the verifier when no "
@@ -5961,16 +4408,9 @@ def cold_start_findings_rows(ctx: Ctx, r: int) -> list:
         live = ctx.sandbox_of(rec) / COLD_START_FINDINGS_REL
         if live.is_file():
             doc = read_json(live, revive=False, lenient=True)
-            found = doc.get("findings") if isinstance(doc, dict) else None
-            if isinstance(found, list):
-                return [f for f in (found or ()) if isinstance(f, dict)
-                        and str(f.get("id") or "").strip()]
-            # The live probe file EXISTS but cannot be read as a findings
-            # document (damaged, oversized, symlinked or corrupt). That is not
-            # the same as a genuinely empty list: fall through to the archive and
-            # SAY SO, instead of silently dropping every X-9xx row (F142).
-            print(f"[warn] {live} is unreadable; reading the archived cold-start "
-                  f"findings for round {r}", file=sys.stderr)
+            found = doc.get("findings") if isinstance(doc, dict) else []
+            return [f for f in (found or ()) if isinstance(f, dict)
+                    and str(f.get("id") or "").strip()]
         # The sandbox was pruned: a DONE record must read the archive, not
         # silently return an empty discovery list.
     # The ARCHIVED round keeps the probe findings MERGED into its
@@ -6027,11 +4467,7 @@ def cold_start_findings_for_merge(existing_ids, rows) -> tuple:
         row = dict(row)
         fid = str(row.get("id") or "").strip()
         new = fid
-        # The docstring's invariant is the RESERVED X-9xx block, not the
-        # discovery pattern (^X-\d+$): `DISCOVERY_X_ID_RE` accepted an
-        # out-of-block id such as X-101 and passed it into the merged frozen
-        # list, where every later probe-id check rejects it.
-        if not COLD_START_ID_RE.match(new) or new in used:
+        if not DISCOVERY_X_ID_RE.match(new) or new in used:
             k = COLD_START_FINDING_ID_BASE + 1
             while True:
                 cand = f"X-{k:03d}"
@@ -6106,10 +4542,7 @@ def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
         ctx, r, cold_start_review_upstream_doc(ctx, r))
     if merged is None:
         return {"rows": 0, "remap": {}}
-    # PIPELINE-written (write_json_atomic above): revive the NUL-escaped
-    # "NaN"/"Infinity" sentinels, or a finding value that happens to be one of
-    # those exact strings never compares equal and every call rewrites the file.
-    current = read_json(target, revive=True, lenient=True)
+    current = read_json(target, revive=False, lenient=True)
     if isinstance(current, dict) and current == merged:
         return {"rows": len(merged_rows), "remap": remap, "skipped": True}
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -6126,123 +4559,6 @@ def merge_cold_start_into_review_copy(ctx: Ctx, r: int, sb: Path) -> dict:
                       + ", ".join(f"{k} -> {v}" for k, v in sorted(remap.items())), ""]
     write_text_atomic(sb / COLD_START_FINDINGS_MD_REL, "\n".join(lines) + "\n")
     return {"rows": len(merged_rows), "remap": remap}
-
-
-# =====================================================================
-# THE TWO LATE DELIVERABLES ARE SEEDED EMPTY-BUT-SHAPED
-# =====================================================================
-# A weak model tends to spend its whole session on the manuscript and stop
-# before the two files that carry the EVIDENCE of the revision: the per-finding
-# ledger and the L1-L11 language-pass coverage table. A stage that stops before
-# writing a file loses a two-hour attempt to a "missing deliverable" error that
-# is really a one-line omission (the 2026-11-13 qwen arm wrote the revised
-# brief and stopped three bookkeeping files short).
-#
-# Seeding is a HEAD START, never a pass: the rows exist, the judgement does not.
-# An empty verdict / an empty coverage cell is still a postcheck ERROR, and the
-# scoped repair (`--strict-artifacts fix`) may complete the cells from the
-# package's own evidence. The completion marker is deliberately NOT seeded: it
-# is the signal that the stage finished, so a stage that never wrote it is
-# UNFINISHED and is continued (RESUME_PROMPT.md), not completed by paperwork.
-def _revise_frozen_finding_ids(sb: Path) -> list:
-    """The ids this revise session must resolve (frozen review + audit, X-* included)."""
-    ids = []
-    for row in findings_from_sandbox(sb, sandbox_audit_record(sb)):
-        fid = str((row or {}).get("id") or "").strip()
-        if fid and fid not in ids:
-            ids.append(fid)
-    return ids
-
-
-def _revise_frozen_review_readable(sb: Path) -> bool:
-    """True when the frozen review file exists and parses as a findings object.
-
-    A zero-finding review is a legitimately CLEAN review, not an unreadable one:
-    the ledger is seeded `[]` for it (the postcheck accepts an empty ledger only
-    when the frozen total is zero), while a missing/unreadable file gets no seed.
-    """
-    data = read_json(sb / FINDINGS_REL, revive=False, lenient=True)
-    return isinstance(data, dict) and isinstance(data.get("findings"), list)
-
-
-def revise_ledger_skeleton(ids: list) -> str:
-    """The machine-readable ledger with one EMPTY row per frozen finding id."""
-    return json.dumps(
-        [{"id": fid, "verdict": "", "rationale": "", "evidence": "",
-          "final_status": ""} for fid in ids],
-        indent=2, ensure_ascii=False) + "\n"
-
-
-def revise_language_skeleton() -> str:
-    """The L1-L11 coverage table with one EMPTY row per step."""
-    lines = [
-        "# Language pass — L1–L11 (seeded empty by the pipeline)",
-        "",
-        "The pipeline seeded this coverage table with one row per step so the pass",
-        "cannot be silently skipped. Fill `rows changed` with an integer and `note`",
-        "for EVERY row, including the steps that changed nothing",
-        "(`L3 | 0 | no logic jumps found`). Record each edit above the table as",
-        "`step | location | before | after | reason`.",
-        "",
-        "| step | rows changed | note |",
-        "|---|---|---|",
-    ]
-    lines += [f"| L{i} |  |  |" for i in range(1, 12)]
-    return "\n".join(lines) + "\n"
-
-
-def seed_revise_deliverable_skeletons(sb: Path) -> dict:
-    """Write the ledger and language-pass skeletons when absent (never overwrite).
-
-    Returns ``{"ledger": bool, "language": bool}`` naming what this call created.
-    The ledger is seeded when the frozen review is READABLE: a zero-finding
-    review is legitimately clean and gets ``[]``, while a missing/unreadable
-    list gets NO seed -- an empty skeleton must not satisfy the all-clean branch
-    of a review whose findings could not be read.
-    """
-    rev = sb / REVISED_DIR
-    rev.mkdir(parents=True, exist_ok=True)
-    seeded = {"ledger": False, "language": False}
-    ids = _revise_frozen_finding_ids(sb)
-    if ids or _revise_frozen_review_readable(sb):
-        ledger = rev / "revision_report.json"
-        if not ledger.is_file():
-            write_text_atomic(ledger, revise_ledger_skeleton(ids))
-            seeded["ledger"] = True
-    lang = rev / "work" / "R6_language.md"
-    if not lang.is_file():
-        lang.parent.mkdir(parents=True, exist_ok=True)
-        write_text_atomic(lang, revise_language_skeleton())
-        seeded["language"] = True
-    return seeded
-
-
-def untouched_revise_seed_paths(sb: Path) -> set:
-    """The seeded files that are STILL byte-identical to the seed (inputs).
-
-    `leftovers_present` must not mistake a fresh sandbox for a partial package:
-    a materialized revise sandbox already carries the ledger and language-pass
-    seeds, so a plain "any file?" probe would never launch its first agent.
-    Comparing CONTENT is what keeps the guard honest the other way too: a seed
-    the agent has edited is the agent's own work, and a crashed session is then
-    "dirty" rather than silently re-entered.
-    """
-    rev = sb / REVISED_DIR
-    expected = {}
-    ids = _revise_frozen_finding_ids(sb)
-    if ids or _revise_frozen_review_readable(sb):
-        expected[rev / "revision_report.json"] = revise_ledger_skeleton(ids)
-    expected[rev / "work" / "R6_language.md"] = revise_language_skeleton()
-    untouched = set()
-    for path, text in expected.items():
-        try:
-            # The seeded files live in the agent-writable sandbox: never read a
-            # multi-GB file (or a planted symlink) whole just to compare it.
-            if read_text_bounded(path) == text:
-                untouched.add(path)
-        except (OSError, UnicodeError):
-            continue
-    return untouched
 
 
 def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
@@ -6271,16 +4587,9 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     rid = rid_for_fresh(r, vid)
     sb = ctx.runs_dir / rid
     if journal_is_scoped(ctx):
-        # A major/minor revision consumes the CONCERN-REPAIRED ledger and
-        # finding list, not a general review: that is what keeps the edits
-        # concern-scoped AND human-grounded. When the concern audit/repair
-        # chain is off, the generated concerns are consumed unaudited (the
-        # skip is recorded by the scheduler).
-        _crepair = ctx.run(rid_concern_repair(r))
-        merge_rid = (rid_concern_repair(r)
-                     if _crepair is not None and _crepair.get("status") == "done"
-                     else rid_concerns(r))
-        review_only = False
+        # A major/minor revision consumes the concerns run's finding list, not a
+        # general review: that is what keeps the edits concern-scoped.
+        merge_rid, review_only = rid_concerns(r), False
     else:
         # ONE policy for "which run defines the round's frozen review" (p19),
         # shared with the auditor: the guided review (or its split session B)
@@ -6300,11 +4609,6 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         synthesize_frozen_review(ctx, r, sb)
     else:
         ensure_copy(src_sb / GUIDED_REVIEW_DIR, sb / GUIDED_REVIEW_DIR)
-    _frozen_problem = _frozen_review_copy_problem(sb / GUIDED_REVIEW_DIR)
-    if _frozen_problem:
-        raise RuntimeError(f"cannot materialize {rid}: the frozen review copy is not "
-                           f"usable ({_frozen_problem}); the revision cannot resolve an "
-                           f"unknown finding list")
     # The COLD-START REVIEW session's X-9xx findings are part of the frozen list this
     # reviser must resolve: merge them into THIS sandbox's review copy (the
     # source review sandbox is never touched; every consumer gets the same
@@ -6318,12 +4622,6 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
             ensure_copy(src_sb / "concerns", sb / "concerns")
         if (src_sb / "feedback").is_dir():
             ensure_copy(src_sb / "feedback", sb / "feedback")
-    draft_manifest = None
-    if journal_has_feedback(ctx) and journal_needs_response(ctx):
-        _draft = _require_done(ctx, rid_response_draft(r),
-                               "the reviser implements the point-by-point response plan")
-        ensure_copy(ctx.sandbox_of(_draft) / "response", sb / "response_plan")
-        draft_manifest = hash_manifest(sb / "response_plan")
     aud_manifest = None
     if audit_enabled(ctx) and not journal_is_scoped(ctx):
         # The reviser acts on the AUDITED list: the auditor's drops (with their
@@ -6332,11 +4630,7 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                 "the reviser consumes the AUDITED finding list (--audit on)")
         ensure_copy(ctx.sandbox_of(aud_rec) / "audit", sb / "audit")
         aud_manifest = hash_manifest(sb / "audit")
-    safe_mkdir(sb / REVISED_DIR)
-    # Seed the ledger and the language-pass coverage table EMPTY-BUT-SHAPED (a
-    # head start, not a pass: the empty cells are still postcheck errors; the
-    # completion marker is not seeded, so a stopped stage stays unfinished).
-    skeleton_seed = seed_revise_deliverable_skeletons(sb)
+    (sb / REVISED_DIR).mkdir(exist_ok=True)
     # A retry used to start from base/ with only the failure TEXT, while the
     # prompt told the agent to read a sibling sandbox it was forbidden to open.
     # Copy the rejected package INTO this sandbox so the retry can inspect (and
@@ -6362,10 +4656,9 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
-    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok, _rem_ok)):
+                                                      _prefer_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, revise_prompt(sb, rid, r, index=int(str(vid)[1:]) - 1,
                                                total=n,
@@ -6383,18 +4676,10 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                guided_review_off=not guided_review_enabled(ctx),
                                                insertions_allowed=_ins_ok,
                                                deletions_allowed=_del_ok,
-                                               prefer_rewrite=_prefer_ok,
-                                               soft_deletions=_rem_ok))
+                                               prefer_rewrite=_prefer_ok))
     rec = ctx.register(rid, "revise", r, f"runs/{rid}",
                        upstream_run_id=merge_rid, source_id=A1_ID, produces=vid)
-    if journal_is_scoped(ctx) and _crepair is None:
-        rec["concern_audit"] = {
-            "status": "skipped",
-            "reason": ("the concern audit/repair chain is off (--concern-audit off); "
-                       "the scoped revision consumed the generated ledger unaudited"),
-        }
-    rec["seeded_skeletons"] = skeleton_seed
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:
@@ -6411,8 +4696,6 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
                                                           follow_dir_links=True)
     if (sb / "concerns").is_dir():
         rec["inputs_manifest"]["concerns"] = hash_manifest(sb / "concerns")
-    if draft_manifest is not None:
-        rec["inputs_manifest"]["response_plan"] = draft_manifest
     if aud_manifest is not None:
         rec["inputs_manifest"]["audit"] = aud_manifest
     return rec
@@ -6443,39 +4726,23 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     for v in pool:
         _require_done(ctx, rid_for_fresh(r, v),
                       f"an integration run consumes the WHOLE pool (member {v!r} is not done)")
-    # The sandbox is reused across attempts and is agent-writable, so a previous
-    # attempt can leave `sb` or `sb/others` as a symlink to an outside directory.
-    # A bare mkdir follows it, and ensure_corpus_dir's repair then deletes and
-    # rebuilds the OUTSIDE tree. Create both through the guarded helper (F006).
-    safe_mkdir(sb)
+    sb.mkdir(parents=True, exist_ok=True)
     # Every view is verified against the CURRENT pool member and rebuilt when it
     # does not match, so a sandbox killed mid-copy can never hand the agent a
     # truncated base or a truncated donor set.
     ensure_corpus_dir(ctx, r, self_id, sb / "self")
-    others_dir = sb / "others"
-    safe_mkdir(others_dir)
     for other in other_ids:
-        ensure_corpus_dir(ctx, r, other, others_dir / other)
+        ensure_corpus_dir(ctx, r, other, sb / "others" / other)
     # Drop donor directories that do not belong to this run's pool (a leftover
     # from an interrupted materialization of a different plan would otherwise be
     # read as if it were a member of this round).
+    others_dir = sb / "others"
     if others_dir.is_dir():
-        # EVERY entry that is not a current donor is removed, not only
-        # directories: a leftover regular file/symlink survived, entered the
-        # inputs manifest and was visible to the integrator (F071).
-        for stale in list(others_dir.iterdir()):
-            if stale.name in other_ids:
-                continue
-            try:
-                if stale.is_symlink() or not stale.is_dir():
-                    stale.unlink()
-                else:
-                    rmtree_force(stale, ignore_errors=True)
-            except OSError as e:
-                print(f"[run] WARNING: could not remove stale donor entry {stale}: {e}",
-                      file=sys.stderr)
+        for stale in [p for p in others_dir.iterdir()
+                      if p.is_dir() and p.name not in other_ids]:
+            rmtree_force(stale, ignore_errors=True)
     ensure_pristine_input(ctx, sb / PRISTINE_DIR)
-    safe_mkdir(sb / INTEGRATED_DIR)
+    (sb / INTEGRATED_DIR).mkdir(exist_ok=True)
     stage_venue_template(ctx, sb)
     seed_template_visuals(ctx, sb)
     seed_evidence_pack(ctx, sb, sb / "self", "stage")
@@ -6488,10 +4755,9 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     prompt = sb / "PROMPT.md"
     _ins_ok, _del_ok = content_edit_policy_for_sandbox(ctx, ctx.run(rid), prompt)
     _prefer_ok = prefer_rewrite_for_sandbox(ctx, ctx.run(rid), prompt)
-    _rem_ok = soft_deletions_for_sandbox(ctx, ctx.run(rid), prompt)
     if (not prompt.is_file()
             or not prompt_content_edit_policy_matches(prompt, _ins_ok, _del_ok,
-                                                      _prefer_ok, _rem_ok)):
+                                                      _prefer_ok)):
         _copy_session_tools(sb)
         write_text_atomic(prompt, integrate_prompt(sb, rid, r, self_id, other_ids,
                                                   caption_limit=caption_limit_of(ctx),
@@ -6505,12 +4771,11 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
                                                   execution_profile=execution_profile_of(ctx),
                                                   insertions_allowed=_ins_ok,
                                                   deletions_allowed=_del_ok,
-                                                  prefer_rewrite=_prefer_ok,
-                                                  soft_deletions=_rem_ok))
+                                                  prefer_rewrite=_prefer_ok))
     rec = ctx.register(rid, "integrate", r, f"runs/{rid}", self_id=self_id,
                        other_ids=other_ids, pool_ids=pool, produces=vid,
                        field_ids=other_ids, discovery_ids=list(disc["ids"]))
-    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok, _rem_ok)
+    _policy_rec = content_edit_policy_record(ctx, _ins_ok, _del_ok, _prefer_ok)
     if _policy_rec is None:
         rec.pop("content_edit_policy", None)
     else:
@@ -6649,23 +4914,6 @@ def materialize_judges(ctx: Ctx, r: int, field: list) -> list:
             view_seed = judge_view_seed_for(ctx, r, vid, j)
             ensure_judge_view(ctx, r, vid, sb / "target", view_stamp, f"{view_seed}|target")
             labels = sample_labels(r, vid, j, k_opp, salt=judge_salt_of(ctx))
-            # This branch runs when the sandbox exists WITHOUT a PROMPT.md (an
-            # interrupted first materialization). Delete every field/<label>
-            # directory this attempt does not name: a leftover opponent is an
-            # unlisted, possibly superseded version the judge can read, and the
-            # inputs_manifest recorded below then protects the stale view.
-            field_root = sb / "field"
-            if field_root.is_symlink():
-                field_root.unlink()
-            elif field_root.is_dir():
-                keep = set(labels)
-                for stale in list(field_root.iterdir()):
-                    if stale.name in keep:
-                        continue
-                    if stale.is_symlink() or stale.is_file():
-                        stale.unlink()
-                    else:
-                        rmtree_force(stale, ignore_errors=True)
             label_map = {}
             for label, w in zip(labels, others):
                 ensure_judge_view(ctx, r, w["id"], sb / "field" / label, view_stamp,
@@ -6773,10 +5021,6 @@ def build_field(ctx: Ctx, r: int) -> tuple:
         e["fingerprint"] = fp
         if fp in seen:
             dropped.append({"id": e["id"],
-                            # The representative lets a caller resolve a
-                            # deduplicated CANDIDATE to the field member whose
-                            # panel row judges the same content (F005).
-                            "representative": seen[fp],
                             "reason": f"content-identical (same documents, ignoring file names "
                                       f"and bookkeeping text) to '{seen[fp]}' -- deduplicated"})
             continue
@@ -6843,7 +5087,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
         # builds a fresh sandbox at the original path.
         try:
             move_failed_sandbox(ctx, rec)
-        except (OSError, ValueError) as e:                      # noqa: BLE001
+        except OSError as e:                                    # noqa: BLE001
             print(f"  [warn] {rec['id']}: could not keep attempt {attempt_number(rec)}'s sandbox "
                   f"({e}); its diagnostics stay in state.json's attempts_log")
             rmtree_force(sb, ignore_errors=True)
@@ -6864,6 +5108,7 @@ def rebuild_sandbox(ctx: Ctx, rec: dict) -> None:
     # renamed to the attempt archive and a fresh tree materialized). Keeping
     # the audit/repair records would make the next accepted revision look
     # audited and suppress the chain on bytes that were never audited.
+    rec.pop("write_quality", None)
     rec.pop("revision_audit", None)
     rec.pop("revision_repair", None)
     rec.pop("revision_chain", None)
@@ -6899,9 +5144,7 @@ def _vid_index(rec: dict) -> int:
 
 def reset_run_record(rec: dict) -> None:
     """Clear a run's bookkeeping so the next attempt cannot inherit an old result."""
-    rec.update({"status": "pending", "attempts": 0, "stage_attempts": 0,
-                "scoped_repairs": 0, "continuation_sessions": 0, "reverifications": 0,
-                "last_error": None, "postcheck": None,
+    rec.update({"status": "pending", "attempts": 0, "last_error": None, "postcheck": None,
                 "scores": None, "summary": None})
     for k in ("stale_reason", "corpus_digest", "content_fingerprint", "captions",
               "document_set", "placeholders", "critical_findings_input",
@@ -6911,7 +5154,7 @@ def reset_run_record(rec: dict) -> None:
               # that package (a rebuilt sandbox, a revalidation reset), so the
               # chain must run again on the new one -- inheriting these keys
               # made a retried revise run look audited when it was not.
-              "revision_audit", "revision_repair", "revision_chain",
+              "write_quality", "revision_audit", "revision_repair", "revision_chain",
               # The CLI session id names the attempt whose transcript is in THIS
               # sandbox (see capture_agent_session_id) -- and every caller of this
               # reset replaces that sandbox: `rebuild_sandbox` moves the old one
@@ -6944,31 +5187,6 @@ PRIOR_ROUND_FILES = ("findings.json", "findings.md", "findings_extra.json",
                      "findings_extra.md", "new_sweeps.md", "round2_summary.md")
 
 
-def prior_round_file_sources(prior: Path) -> dict:
-    """{flat prior_round/ name: actual source path} for one prior review dir.
-
-    The ARCHIVED layout is flat, but `prior_review_dir()` falls back to the LIVE
-    review sandbox, whose layout is `guided_review/<name>` with the discovery
-    deliverables under `guided_review/round2/`. The carry-over used to look only
-    at the top level, so `prior_round/findings_extra.json` -- the file the review
-    prompt and its postcheck name -- was silently absent on the fallback path
-    (F145). Resolve each of the six names against both layouts and hand the
-    caller one flat name, exactly as the prompt states.
-    """
-    out = {}
-    if prior is None:
-        return out
-    for name in PRIOR_ROUND_FILES:
-        for cand in (prior / name,
-                     prior / "round2" / name,
-                     prior / GUIDED_REVIEW_DIR / name,
-                     prior / GUIDED_REVIEW_DIR / "round2" / name):
-            if cand.is_file() and not cand.is_symlink():
-                out[name] = cand
-                break
-    return out
-
-
 def _synthesized_review_problems(ctx: Ctx, r: int, sb: Path) -> list:
     """Drift of a `--no-guided-review` sandbox's SYNTHESIZED frozen view.
 
@@ -6978,9 +5196,7 @@ def _synthesized_review_problems(ctx: Ctx, r: int, sb: Path) -> list:
     and every reviser, exactly like a review retry (F01).
     """
     rel = f"{GUIDED_REVIEW_DIR}/round2/findings_extra.json"
-    # synthesize_frozen_review() writes this with write_json_atomic, so the
-    # matching read must revive its sentinel strings (see read_json's docstring).
-    doc = read_json(sb / rel, revive=True, lenient=True)
+    doc = read_json(sb / rel, revive=False, lenient=True)
     actual = doc.get("findings") if isinstance(doc, dict) else None
     want = list(cold_start_findings_rows(ctx, r) or [])
     if actual != want:
@@ -7019,9 +5235,7 @@ def _review_copy_mismatch(ctx: Ctx, r: int, sb: Path, upstream_dir: Path):
         return (f"{GUIDED_REVIEW_DIR}/ no longer matches its current upstream source "
                 f"({', '.join(others[:3])})")
     expected, _rows, _remap = cold_start_merged_review_doc(ctx, r, cold_start_review_upstream_doc(ctx, r))
-    # PIPELINE-written merged view (merge_cold_start_into_review_copy /
-    # synthesize_frozen_review use write_json_atomic): read it back the same way.
-    actual = read_json(sb / GUIDED_REVIEW_DIR / rel, revive=True, lenient=True)
+    actual = read_json(sb / GUIDED_REVIEW_DIR / rel, revive=False, lenient=True)
     if expected is None or actual != expected:
         return (f"{GUIDED_REVIEW_DIR}/{rel} no longer matches the frozen list this round's auditor "
                 f"and revisers must consume (the probe findings changed)")
@@ -7053,35 +5267,6 @@ def _journal_staged_freshness_problems(ctx: Ctx, r: int, sb: Path) -> list:
                                   hash_manifest(src, follow_dir_links=True)):
             probs.append(f"{area}/ no longer matches the current feedback/concerns ledger")
     return probs
-
-
-def _discovery_seed_problems(ctx: Ctx, r: int, rec: dict, sb: Path) -> list:
-    """Drift of an integration sandbox's frozen discovery seed (F138).
-
-    materialize_integrate() records `frozen_discovery/` in inputs_manifest and
-    the integrator's ledger must reconcile every X-* id in it. Rebuild the seed
-    the CURRENT producers would write (in a throwaway directory) and compare it
-    with the sandbox copy, so a retried review/cold-start/audit cannot leave a
-    done integrator reconciling a superseded id set.
-    """
-    seed_sb = sb / DISCOVERY_SEED_DIR
-    recorded = (rec.get("inputs_manifest") or {}).get(DISCOVERY_SEED_DIR)
-    tmp = Path(tempfile.mkdtemp(prefix="pr-discovery-seed-check-"))
-    try:
-        want = seed_discovery_findings(ctx, r, tmp)
-        if want.get("dir") is None:
-            if recorded is not None or seed_sb.exists():
-                return [f"{DISCOVERY_SEED_DIR}/ no longer has an X-* row to reconcile "
-                        f"(the round's discovery list changed)"]
-            return []
-        expected = hash_manifest(tmp / DISCOVERY_SEED_DIR)
-        if not seed_sb.is_dir():
-            return [f"{DISCOVERY_SEED_DIR}/ is missing (the round's discovery list grew)"]
-        if not manifests_equal(hash_manifest(seed_sb), expected):
-            return [f"{DISCOVERY_SEED_DIR}/ no longer matches the round's discovery list"]
-        return []
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
@@ -7119,12 +5304,17 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             probs.append(mismatch(pristine_dirname(sb), ctx.source_manifest))
         prior = prior_review_dir(ctx, r)
         if prior is not None and (sb / "prior_round").is_dir():
-            expected = {name: sha256_file(src)
-                        for name, src in prior_round_file_sources(prior).items()}
+            expected = {name: sha256_file(prior / name) for name in PRIOR_ROUND_FILES
+                        if (prior / name).is_file()}
             if expected and hash_manifest(sb / "prior_round").get("files") != expected:
                 probs.append("prior_round/ no longer matches the archived prior review")
-        # The SAME predicate the materializer copies with (one source of truth).
-        prior_audit_obs = prior_audit_observations(ctx, r - 1) if r > 1 else None
+        prior_audit_obs = None
+        if r > 1:
+            audit_rec = ctx.run(rid_audit(r - 1))
+            if audit_rec is not None:
+                cand = ctx.sandbox_of(audit_rec) / "audit" / "UNRESOLVED.md"
+                if cand.is_file():
+                    prior_audit_obs = cand
         prior_audit_copy = sb / "prior_audit" / "UNRESOLVED.md"
         if prior_audit_obs is not None:
             if (not prior_audit_copy.is_file()
@@ -7178,18 +5368,6 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
             else:
                 probs.append(_review_copy_mismatch(ctx, r, sb,
                                                    ctx.sandbox_of(rev_rec) / GUIDED_REVIEW_DIR))
-        # materialize_revise records the AUDITOR'S audit/ copy as an input. A
-        # retried auditor rebuilds that directory, so a done reviser must be
-        # revalidated against the CURRENT dispositions -- otherwise it keeps
-        # implementing the superseded drops/adds while the round records the new
-        # audit (F137).
-        if (rec.get("inputs_manifest") or {}).get("audit") is not None:
-            aud_rec = ctx.run(rid_audit(r))
-            if aud_rec is None or aud_rec.get("status") != "done":
-                probs.append("upstream audit run is not done")
-            else:
-                probs.append(mismatch("audit",
-                                      hash_manifest(ctx.sandbox_of(aud_rec) / "audit")))
     elif kind == "cold_start_review":
         # The probe reads the round base and the pristine original, like every
         # other round-family session; its own provenance record is written by
@@ -7206,10 +5384,7 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
     elif kind == "response":
         tgt_rel = str(rec.get("target_dir") or "").strip()
         if tgt_rel:
-            # A recorded path is DATA: an absolute value would discard the root
-            # and `../` would escape it, so the revalidation hashed outside
-            # content (F064).
-            tgt = contained_under(ctx.root, tgt_rel)
+            tgt = ctx.root / tgt_rel
             if tgt.is_dir() and (sb / "target").is_dir():
                 # The sandbox target/ is copied with exclude_top=("work",) and
                 # skip_aux=True; comparing it with the FULL source manifest made
@@ -7264,7 +5439,6 @@ def _input_freshness_problems(ctx: Ctx, rec: dict) -> list:
                     expected[f"{vid}/{rel}"] = dig
             if hash_manifest(others_dir).get("files") != expected:
                 probs.append("others/ no longer matches the current pool corpora")
-        probs.extend(_discovery_seed_problems(ctx, r, rec, sb))
     elif kind == "judge":
         # A judge view is ANONYMIZED (build_judge_view), so it cannot be
         # compared by path: the invariant is the CONTENT multiset of each view
@@ -7335,18 +5509,14 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     # panel scores the whole field), and every pool member feeds every
     # integration run that takes it as a donor.
     dependents = {rid_a1(r): rewrite_ids + ([rid_guided_review(r)] if n else []) + cold_start_ids,
-                  rid_guided_review(r): list(audit_ids) + list(revise_ids)
-                  + list(integrate_ids)}
+                  rid_guided_review(r): list(audit_ids) + list(revise_ids)}
     for _pid in cold_start_ids:
         # The auditor and every reviser consume the merged review copy, so a
         # reset probe must reach them (their frozen list is derived from it).
-        # The integration runs consume the same X-* rows through their
-        # `frozen_discovery/` seed (F138).
-        dependents[_pid] = list(audit_ids) + list(revise_ids) + list(integrate_ids)
+        dependents[_pid] = list(audit_ids) + list(revise_ids)
     for _aid in audit_ids:
-        # The revisers' sandboxes carry the auditor's `audit/` copy, and an
-        # auditor DROP changes the integration seed's `dropped` rows.
-        dependents[_aid] = list(revise_ids) + list(integrate_ids)
+        # The revisers' sandboxes carry the auditor's `audit/` copy.
+        dependents[_aid] = list(revise_ids)
     if j_feedback:
         dependents.setdefault(rid_a1(r), []).append(j_feedback)
         dependents[j_feedback] = (list(rewrite_ids) + ([rid_guided_review(r)] if n else []))
@@ -7370,17 +5540,13 @@ def revalidate_round_inputs(ctx: Ctx, r: int) -> list:
     if n and review_split_of(ctx) != "off":
         # B's frozen input is A's guided_review/ output, so resetting A resets B too.
         dependents[rid_guided_review(r)] = [rid_guided_review_b(r)] + dependents[rid_guided_review(r)]
-        dependents[rid_guided_review_b(r)] = (list(audit_ids) + list(revise_ids)
-                                              + list(integrate_ids))
+        dependents[rid_guided_review_b(r)] = list(audit_ids) + list(revise_ids)
     for k_idx, vid in enumerate(pool):
         if vid == A1_ID:
             continue
         rid = rid_for_fresh(r, vid)
-        # EVERY integration run consumes this member: the one whose self/ IS this
-        # member, and every run that takes it as a donor. The old `src != vid`
-        # filter omitted the self consumer, so a rebuilt pool member left its own
-        # integration base on the superseded corpus (F139).
-        consumers = [rid_for_fresh(r, integrate_vid(j + 1)) for j in range(len(pool))]
+        consumers = [rid_for_fresh(r, integrate_vid(j + 1))
+                     for j, src in enumerate(pool) if src != vid]
         # APPEND, never overwrite: the resubmit-mode branch above already
         # declared the response letter a dependent of every pool member (it
         # describes the final package), and a plain assignment would discard it

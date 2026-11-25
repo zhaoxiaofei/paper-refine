@@ -380,7 +380,7 @@ def test_run_policy():
             "run", "--root", str(root),
             "--agent-cmd", json.dumps([sys.executable, str(lib.STUB)]),
             "--judge-agent-cmd", json.dumps([sys.executable, str(lib.STUB_JUDGE)]),
-            "--retries", "1", "--only", "1:w1",
+            "--retries", "1", "--only", "1:w1,1:judge",
             "--agent-harness", "dsh", "--agent-model", "deepseek-flash",
             "--judge-agent-harness", "gpt-codex", "--judge-agent-model", "gpt-sol")
         check("the selected stage ran", p.returncode == 3, (p.stdout + p.stderr)[-300:])

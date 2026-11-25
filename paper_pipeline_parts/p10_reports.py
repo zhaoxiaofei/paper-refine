@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 10/25 of the pipeline -- executed by the
+# Part 10/21 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -95,13 +95,7 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None)
                                `opponent_id`; `credited` is that integer;
       * `direction = received` another member's session scored THAT member against
                                this one; the entry in this member's list is the
-                               negation, so `credited = -score_as_written`. Here
-                               `opponent_id` is the SOURCE sheet's target, so
-                               `opponent_label` names that target
-                               (`sheet_target`), never the label the source sheet
-                               used for this member: copying the latter made the
-                               (opponent_id, opponent_label) pair identify a
-                               different version (F166).
+                               negation, so `credited = -score_as_written`.
 
     `member_n` / `member_median` / `member_mean` repeat the RECORDED statistic for
     the member on every one of its rows, so the file answers "why do the median
@@ -121,22 +115,9 @@ def write_round_raw_scores(ctx: Ctx, r: int, agg: dict = None, name: str = None)
     for row in agg.get("score_rows") or []:
         st = stats.get(row["member"]) or {}
         out = dict(row)
-        if str(out.get("direction") or "") == "received":
-            # The row's opponent is the SOURCE sheet's target; in that sheet the
-            # target is identified by its version id, not by an issued label.
-            # Copying the sheet's `opponent_label` here named this row's MEMBER,
-            # so (opponent_id, opponent_label) pointed at a different version
-            # (F166). Only relabel when the two columns really are the same
-            # version, so a hand-built row is never rewritten on a guess.
-            _target = str(out.get("sheet_target") or "")
-            if _target and _target == str(out.get("opponent_id") or ""):
-                out["opponent_label"] = _target
         out["member_n"] = st.get("n")
         out["member_median"] = st.get("median")
-        # The docstring promises the RECORDED statistic, and the ranking
-        # compared aggregate_round's unrounded fmean; rounding to 6 dp made the
-        # file unable to reproduce that value (F137).
-        out["member_mean"] = (st["mean"]
+        out["member_mean"] = (round(float(st["mean"]), 6)
                               if isinstance(st.get("mean"), (int, float)) else None)
         rows.append(out)
     rows.sort(key=lambda x: (order.get(str(x["member"]), 10 ** 6), str(x["member"]),
@@ -224,16 +205,8 @@ def _issue_file_agg(ctx: Ctx, r: int, agg: dict = None) -> tuple:
     """(round, aggregation) for the census/matrix/cumulative writers."""
     r = int(r)
     if agg is None:
-        rec = ctx.round_rec(r)
-        field = [str(v) for v in (rec.get("field") or [])]
-        # Re-aggregate with the mode the round was DECIDED with, not today's
-        # config: a `--dedup-mode location` round back-filled here must produce
-        # the same census/dedup audit its decision read (F166). A legacy round
-        # that predates the record was decided with the historical default
-        # (`off`); passing None made `aggregate_round` read the LIVE config, so
-        # changing today's mode re-aggregated a past round under it (F035).
-        agg = (aggregate_round(ctx, r, field, dedup=rec.get("dedup_mode") or "off")
-               if field else {"issue_census": {}, "field": []})
+        field = [str(v) for v in (ctx.round_rec(r).get("field") or [])]
+        agg = aggregate_round(ctx, r, field) if field else {"issue_census": {}, "field": []}
     return r, agg
 
 
@@ -296,16 +269,10 @@ def defect_list_rows(ctx: Ctx, r: int, agg: dict) -> list:
 
 def _defect_rows_by_reaggregation(ctx: Ctx, r: int) -> list:
     """Re-derive one round's defect rows from its judge sheets (never invents)."""
-    rec = ctx.round_rec(int(r))
-    field = [str(v) for v in (rec.get("field") or [])]
+    field = [str(v) for v in (ctx.round_rec(int(r)).get("field") or [])]
     if not field:
         return []
-    # The defect list is the census's long form, so it must re-aggregate under
-    # the SAME historical mode: a legacy round (no recorded dedup_mode) was
-    # decided with the documented default "off", never today's live config
-    # (F035).
-    return list(aggregate_round(ctx, int(r), field,
-                                dedup=rec.get("dedup_mode") or "off").get("issue_rows") or [])
+    return list(aggregate_round(ctx, int(r), field).get("issue_rows") or [])
 
 
 def write_round_defects(ctx: Ctx, r: int, agg: dict = None, name: str = None) -> Path:

@@ -279,6 +279,12 @@ and the ORCHESTRATOR publishes it afterwards.
 """
 import json, sys
 from pathlib import Path
+
+prompt = sys.stdin.read()
+if prompt.startswith("INDEPENDENT WRITE AUDITOR"):
+    Path("AUDIT.json").write_text(json.dumps({"rows": [], "blocked": []}))
+    sys.exit(0)
+
 dest, vid = Path(sys.argv[1]), sys.argv[2]
 stage = Path.cwd() / "store"
 stage.mkdir(parents=True, exist_ok=True)
@@ -474,7 +480,8 @@ def test_add_venue_cli(tmp: Path):
                         capture_output=True, text=True, timeout=600)
     out2 = r2.stdout + r2.stderr
     check("a session that writes no profile is reported as a PROBLEM with exit 1",
-          r2.returncode == 1 and "broken-venue.json was not written" in out2, out2[-300:])
+          r2.returncode == 1 and ("broken-venue.json was not written" in out2
+                                    or "not a regular artifact directory" in out2), out2[-300:])
     # No exemplars at all: the deterministic command reports it and writes nothing.
     r3 = subprocess.run(cli + ["build-venue-templates", "--venue", "empty-venue",
                                "--profiles-dir", str(store)],
