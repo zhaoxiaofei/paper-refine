@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 02/23 of the pipeline -- executed by the
+# Part 02/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -509,7 +509,21 @@ def review_feedback_files_in(dirp: Path, area_name: str) -> list:
     if not area.is_dir():
         return out
     for p in sorted(area.rglob("*")):
-        if not p.is_file() or is_bookkeeping_name(p.name):
+        # lstat, not is_file(): `is_file()` follows a symlink, so a planted
+        # `decision_letter.txt -> <outside file>` was enumerated as feedback and
+        # its target's bytes were staged and read (F102). A FIFO/socket is not a
+        # feedback document either.
+        try:
+            st = p.lstat()
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode) or is_bookkeeping_name(p.name):
+            continue
+        if area_name == LLM_FEEDBACK_DIR and is_non_submitted_readme_name(p.name):
+            # The LLM-feedback area is the review, but an author README (never
+            # submitted, rule 9) is explanatory material, not reviewer prose:
+            # ingesting it fed operator notes to the concern session as if a
+            # reviewer had written them (F119).
             continue
         label = p.relative_to(Path(dirp)).as_posix()
         if area_name == HUMAN_FEEDBACK_DIR and is_original_submission_rel(label):
@@ -568,14 +582,163 @@ def journal_previous_responses(ctx: Ctx) -> list:
             and not _COVER_WORD_RE.search(p.name)]
 
 
+_RTF_DESTINATION_GROUPS = frozenset({
+    "fonttbl", "colortbl", "stylesheet", "info", "pict", "object", "header",
+    "footer", "footnote", "annotation", "field", "fldinst", "listtable",
+    "listoverridetable", "rsidtbl", "generator", "themedata", "colorschememapping",
+})
+
+
+def _rtf_plain_text(raw: str) -> str:
+    r"""Best-effort RTF -> text (the reviewer prose, not the control stream).
+
+    Accepted feedback formats included `.rtf`, but `feedback_text_of` returned
+    '' for it, so the concern ledger had no quoting text to verify against
+    (F106). This parser handles the constructs a word processor's "Save as
+    RTF" emits: groups/destinations, `\'hh` bytes, `\uN` escapes, paragraph
+    and tab controls, and the `\\`/`\{`/`\}` literals.
+    """
+    out, stack = [], []
+    skip = False
+    uc_skip = 1
+    i, n = 0, len(raw)
+    while i < n:
+        ch = raw[i]
+        if ch == "{":
+            stack.append(skip)
+            i += 1
+            continue
+        if ch == "}":
+            if stack:
+                skip = stack.pop()
+            i += 1
+            continue
+        if ch == "\\":
+            j = i + 1
+            if j < n and raw[j] in "\\{}":
+                if not skip:
+                    out.append(raw[j])
+                i = j + 1
+                continue
+            if j < n and raw[j] == "'":
+                if not skip and j + 2 < n:
+                    try:
+                        out.append(bytes([int(raw[j + 1:j + 3], 16)])
+                                   .decode("cp1252", "replace"))
+                    except ValueError:
+                        pass
+                i = j + 3
+                continue
+            k = j
+            while k < n and raw[k].isalpha():
+                k += 1
+            word = raw[j:k]
+            m = re.match(r"-?\d+", raw[k:])
+            num = m.group(0) if m else ""
+            if m:
+                k += len(num)
+            if k < n and raw[k] == " ":
+                k += 1
+            if word == "uc" and num:
+                try:
+                    uc_skip = max(0, int(num))
+                except ValueError:
+                    uc_skip = 1
+            elif word == "*" or word in _RTF_DESTINATION_GROUPS:
+                skip = True
+            elif word in ("par", "line", "sect", "page"):
+                if not skip:
+                    out.append("\n")
+            elif word == "tab":
+                if not skip:
+                    out.append("\t")
+            elif word == "u" and num:
+                if not skip:
+                    try:
+                        out.append(chr(int(num) % 65536))
+                    except ValueError:
+                        pass
+                i = k
+                for _ in range(uc_skip):
+                    if i < n and raw[i] not in "\\{}":
+                        i += 1
+                continue
+            i = k
+            continue
+        if ch in "\r\n":
+            i += 1
+            continue
+        if not skip:
+            out.append(ch)
+        i += 1
+    text = "".join(out).replace("\x00", "")
+    return re.sub(r"[ \t]{2,}", " ", text).strip()
+
+
+def _html_plain_text(raw: str) -> str:
+    """Visible text of an HTML feedback file (scripts/styles/head dropped)."""
+    from html.parser import HTMLParser
+
+    class _Collector(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.parts, self.skip = [], 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag in ("script", "style", "head"):
+                self.skip += 1
+            elif tag in ("p", "br", "div", "li", "tr", "h1", "h2", "h3",
+                         "h4", "h5", "h6", "blockquote"):
+                self.parts.append("\n")
+
+        def handle_endtag(self, tag):
+            if tag in ("script", "style", "head"):
+                self.skip = max(0, self.skip - 1)
+
+        def handle_data(self, data):
+            if not self.skip:
+                self.parts.append(data)
+
+    collector = _Collector()
+    collector.feed(raw)
+    collector.close()
+    text = "".join(collector.parts)
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip()).strip()
+
+
+def _legacy_doc_text(path: Path) -> tuple:
+    """Legacy binary `.doc` -> text via LibreOffice, or a named gap."""
+    exe = shutil.which("soffice") or shutil.which("libreoffice")
+    if not exe:
+        return "", "legacy .doc needs LibreOffice to convert it; none is on PATH"
+    try:
+        with tempfile.TemporaryDirectory(prefix="paper-doc-text-") as td:
+            rc, _out, _err = run_bounded(
+                [exe, "--headless", "--convert-to", "txt:Text", "--outdir", td,
+                 str(path)], timeout=120)
+            cand = Path(td) / (path.stem + ".txt")
+            if rc == 0 and cand.is_file():
+                text = cand.read_text(encoding="utf-8", errors="replace")
+                if text.strip():
+                    return text, ""
+            return "", f"LibreOffice could not convert the legacy .doc (exit {rc})"
+    except Exception as e:                                           # noqa: BLE001
+        return "", f"LibreOffice conversion failed: {e}"
+
+
 def feedback_text_of(path: Path) -> tuple:
     """(text, note) for one feedback file -- the reviewable rendering."""
     ext = path.suffix.lower()
     if ext in (".txt", ".md", ".markdown", ".rst", ".tex", ".bib", ".csv", ".tsv"):
-        try:
-            return path.read_text(encoding="utf-8", errors="replace"), ""
-        except OSError as e:
-            return "", f"unreadable: {e}"
+        # The shared bounded reader, not `Path.read_text`: it enforces the
+        # agent-output byte budget, refuses a symlink/FIFO (lstat + O_NOFOLLOW
+        # + fstat) and applies BOM/UTF-16 detection. A raw read here bypassed
+        # all three and turned a Windows UTF-16 letter into NUL mojibake
+        # (F101/F102/F103).
+        text = read_text_bounded(path)
+        if text is None:
+            return "", "unreadable or over the text byte budget (or not a regular file)"
+        return text, ""
     if ext == ".docx":
         paras = _docx_paragraphs(path)
         if paras is None:
@@ -596,6 +759,20 @@ def feedback_text_of(path: Path) -> tuple:
             except Exception as e:                                   # noqa: BLE001
                 return "", f"pdftotext failed: {e}"
         return "", "pdf-unconvertible: pdftotext not available"
+    if ext == ".rtf":
+        raw = read_text_bounded(path)
+        if raw is None:
+            return "", "unreadable or over the text byte budget (or not a regular file)"
+        text = _rtf_plain_text(raw)
+        return (text, "") if text.strip() else ("", "the RTF carried no visible text")
+    if ext in (".html", ".htm"):
+        raw = read_text_bounded(path)
+        if raw is None:
+            return "", "unreadable or over the text byte budget (or not a regular file)"
+        text = _html_plain_text(raw)
+        return (text, "") if text.strip() else ("", "the HTML carried no visible text")
+    if ext == ".doc":
+        return _legacy_doc_text(path)
     return "", f"unparseable extension {ext!r} (the original is still copied for the session)"
 
 
@@ -623,6 +800,12 @@ def seed_concern_candidates(text: str) -> list:
             starts.append(i)
     rows = []
     if starts:
+        # The editor's preamble before the FIRST reviewer/heading can carry the
+        # decision and concrete demands; it used to be dropped silently, while
+        # a heading-less letter kept the same text as paragraphs (F104).
+        preamble = " ".join(x.strip() for x in lines[:starts[0]] if x.strip())
+        if preamble:
+            rows.append({"heading": "preamble", "excerpt": preamble[:400]})
         bounds = starts + [len(lines)]
         for a, b in zip(bounds, bounds[1:]):
             block = " ".join(x.strip() for x in lines[a:b] if x.strip())
@@ -5188,6 +5371,12 @@ def _readme_action_rows(text: str) -> list:
     rows, seen = [], set()
     separator = re.compile(r"^\s*\|?[\s:\-|]*\-[\s:\-|]*\|?\s*$")
     table_lines = []
+    # A valid two-column GFM table may be written without outer pipes, so its
+    # header and data rows carry ONE pipe each. The old `count("|") >= 2` test
+    # dropped every such row, and the caller then re-appended existing author
+    # work under fresh T-ids (F003). Track the table's separator instead: the
+    # one-pipe row ABOVE it is the header, the one-pipe rows below are data.
+    two_col_table = False
 
     def add(value) -> None:
         row = _clean_handoff_row(value)
@@ -5196,7 +5385,7 @@ def _readme_action_rows(text: str) -> list:
             rows.append(row)
 
     def flush_table() -> None:
-        nonlocal table_lines
+        nonlocal table_lines, two_col_table
         if not table_lines:
             return
         # A normal table has a header followed by its separator. A one-line
@@ -5213,16 +5402,32 @@ def _readme_action_rows(text: str) -> list:
             # string from the gate's parser (F196).
             add(" | ".join(cell.strip() for cell in _manual_md_cells(line)))
         table_lines = []
+        two_col_table = False
 
-    for raw in str(text or "").splitlines():
+    lines = str(text or "").splitlines()
+    for idx, raw in enumerate(lines):
         bullet = re.match(r"^\s*(?:[-*+]|\d+[.)])\s+(.+?)\s*$", raw)
         if bullet:
             flush_table()
             add(bullet.group(1))
             continue
-        if raw.count("|") >= 2:
+        pipes = raw.count("|")
+        if pipes >= 2:
             table_lines.append(raw)
             continue
+        if pipes == 1:
+            # The separator OPENS a no-outer-pipe table; the one-pipe line above
+            # it is its header (dropped by flush_table), the rows below are data.
+            if separator.match(raw):
+                table_lines.append(raw)
+                two_col_table = True
+                continue
+            nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
+            # Only a PIPE-bearing delimiter opens a table; a bare `---`
+            # horizontal rule must not turn the preceding prose into a header.
+            if two_col_table or ("|" in nxt and separator.match(nxt)):
+                table_lines.append(raw)
+                continue
         flush_table()
     flush_table()
     return rows

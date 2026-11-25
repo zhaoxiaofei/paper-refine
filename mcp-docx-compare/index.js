@@ -10,15 +10,25 @@
 // OOXML writer.
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { accessSync, constants, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
 import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
-         stageContainedInput } from './containment.mjs';
+         sameFile, stageContainedInput } from './containment.mjs';
 import { derivedOutput, inFlightKey } from './derived-output.mjs';
 
-import { isWsl, runFile } from './run-child.mjs';
+import { isWsl, runFile, killAllChildren } from './run-child.mjs';
+
+// F042: on SIGTERM/SIGINT the server kills its in-flight Word/COM tree
+// before exiting, so the Python driver's timeout does not orphan
+// bash -> PowerShell -> Word.
+const _shutdown = () => {
+  try { killAllChildren(); } catch { /* best effort */ }
+  process.exit(0);
+};
+process.on('SIGTERM', _shutdown);
+process.on('SIGINT', _shutdown);
 
 // The comparer script is NOT welded to one machine: an explicit env override
 // wins, then the repo-relative copy, then a sibling copy, then PATH. A
@@ -141,9 +151,12 @@ serveStdio(() => {
       // caller gets a clear reason instead of a mysterious COM failure. The
       // comparison is made on the REAL paths: a symlinked alias of the input
       // names the same file the cleanup would delete.
-      const lc = (s) => s.toLowerCase();
+      // Identity, not spelling: on a case-sensitive filesystem `report.docx`
+      // and `Report.docx` are two files, and folding case refused the latter
+      // as "an input file" (F053). sameFile() compares device+inode when both
+      // exist and only folds case on win32 for a not-yet-created output.
       const realInputs = [absOriginal, absRevised].map((p) => realOrResolved(p));
-      if (absOutput && realInputs.some((p) => lc(absOutput) === lc(p))) {
+      if (absOutput && realInputs.some((p) => sameFile(absOutput, p))) {
         return {
           content: [{ type: 'text', text: `refused: outputPath must not be an input file: `
                                           + `${outputPath}` }],
@@ -163,7 +176,13 @@ serveStdio(() => {
       // the lexical paths are kept unchanged.
       let spawnOriginal = absOriginal;
       let spawnRevised = absRevised;
-      let spawnOutput = absOutput;
+      // Compute the documented DEFAULT output in the non-containment branch
+      // too (the converter already does). With containment off, spawnOutput
+      // used to stay "" when outputPath was omitted, so windowsPidPath("")
+      // returned "" and a WSL timeout killed no Windows pid while reporting
+      // the tree kill as successful (F045). derivedOutput() is the same name
+      // docxcompare.sh derives.
+      let spawnOutput = absOutput || derivedOutput(absOriginal, absRevised);
       let realOriginal = absOriginal;
       let realRevised = absRevised;
       let stagingDir = '';
@@ -182,6 +201,14 @@ serveStdio(() => {
           // shared with Windows on WSL).
           stagingDir = mkdtempSync(path.join(path.dirname(spawnOutput),
                                              '.docx-mcp-compare-'));
+          // mkdtemp followed the path string: a directory component swapped
+          // after containedSpawnPath() would create the private stage (and the
+          // copied manuscripts) outside the roots. Verify where it really is
+          // before the child writes there (F046).
+          if (!containsPath(stagingDir, ALLOWED_ROOTS)) {
+            throw new Error(`the private staging directory ${stagingDir} is outside `
+                            + `DOCX_MCP_ALLOWED_ROOTS`);
+          }
           spawnOriginal = stageContainedInput(realOriginal, ALLOWED_ROOTS,
                                               stagingDir, 'original.docx');
           spawnRevised = stageContainedInput(realRevised, ALLOWED_ROOTS,
@@ -209,14 +236,13 @@ serveStdio(() => {
         }
       }
       const argv = [spawnOriginal, spawnRevised, ...(spawnOutput ? [spawnOutput] : [])];
-      // 900_000 matches the orchestrator's redline budget
-      // (paper_pipeline.render_docx_visual(timeout=900) and the redline chain's
-      // own 900s); a smaller server-side cap would kill a slow-but-valid Word
-      // comparison before the caller's own timeout and silently downgrade the
-      // redline to a lower-fidelity fallback.
+      // The server timer must fire BEFORE the caller's deadline: the Python
+      // redline budget is 900 s, so an equal server cap let the client kill the
+      // server first and skip runFile's WSL taskkill/diagnostics (F043).
+      // 870 s leaves 30 s for staging and for the server's own report.
       const windowsPidFile = windowsPidPath(spawnOutput);
       const run = () => runFile(COMPARER, argv,
-                                  { timeout: 900_000, maxBuffer: 4 * 1024 * 1024,
+                                  { timeout: 870_000, maxBuffer: 4 * 1024 * 1024,
                                     windowsPidFile });
       // Key on the REAL destination, not the random staging directory: two
       // revised files that share a basename derive the same redline path, and
@@ -228,6 +254,28 @@ serveStdio(() => {
       let keepWindowsPidFile = false;
       try {
         const { stdout, stderr } = await next;
+        // The child wrote to a path validated before it ran; a writer inside
+        // the allowed root can swap a directory component in between and send
+        // the write outside DOCX_MCP_ALLOWED_ROOTS. Verify where the output
+        // actually landed, remove the stray file, and refuse instead of
+        // reporting a contained success (F046). A Node process cannot openat()
+        // for the child, so this detection is the enforcement point.
+        if (ALLOWED_ROOTS.length && spawnOutput && existsSync(spawnOutput)
+            && !containsPath(spawnOutput, ALLOWED_ROOTS)) {
+          let stray = '';
+          try { stray = realOrResolved(spawnOutput); } catch { stray = ''; }
+          if (stray) {
+            try {
+              if (lstatSync(stray).isFile()) rmSync(stray, { force: true });
+            } catch { /* already gone */ }
+          }
+          return {
+            content: [{ type: 'text', text: `refused: the output was written outside `
+                                            + `DOCX_MCP_ALLOWED_ROOTS (its path changed during `
+                                            + `the run): ${outputPath || spawnOutput}` }],
+            isError: true,
+          };
+        }
         return {
           content: [{
             type: 'text',

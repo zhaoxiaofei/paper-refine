@@ -88,6 +88,14 @@ case "${OUTPUT,,}" in
         ;;
 esac
 
+# Resolve a relative output against the CALLER's directory, as docx2pdf.sh
+# already does: `wslpath -w` returns a relative path unchanged, so Word
+# resolved the temp name against ITS OWN working directory while the
+# WSL-side checks and the final `mv` looked only at the caller's cwd -- the
+# comparison then failed (or wrote outside the requested destination) for
+# every relative output argument.
+if [[ "$OUTPUT" != /* ]]; then OUTPUT="$PWD/$OUTPUT"; fi
+
 if ! command -v powershell.exe >/dev/null 2>&1; then
     echo "Error: powershell.exe not found. Run from WSL or Git Bash on Windows." >&2
     exit 1

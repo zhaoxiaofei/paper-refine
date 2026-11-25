@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/23 of the pipeline -- executed by the
+# Part 05/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -849,10 +849,19 @@ class Ctx:
                         f"on disk under {self.runs_dir}); the pipeline never adopts a partial "
                         f"registry automatically.")
                 try:
-                    int(rec["round"])
+                    _round_no = int(rec["round"])
                 except (TypeError, ValueError):
                     die(f"state.json is damaged: run record {rid!r} has a non-numeric 'round' "
                         f"({rec['round']!r}).\n       {self.state_path}")
+                # Validate AND normalise: a legacy/hand-edited JSON string "1"
+                # passed the check above, but `Ctx.runs(round_no=…)` compares
+                # `r.get("round") == int(round_no)`, so that record was invisible
+                # to every round-scoped query and its judge session was never
+                # revalidated (F109). Only the string spelling is coerced; a
+                # non-integral numeric stays non-integral (never silently
+                # truncated into another round).
+                if isinstance(rec["round"], str):
+                    rec["round"] = _round_no
                 if rec.get("status") not in RUN_STATUSES:
                     die(f"state.json is damaged: run record {rid!r} has unknown status "
                         f"{rec.get('status')!r} (expected one of "
@@ -1923,7 +1932,8 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     for i, (src, prefix, excluded) in enumerate(sources):
         if not src.is_dir():
             continue
-        for rel, p in corpus_dir_view_files(src, owner_root=ctx.root):
+        for rel, p in corpus_dir_view_files(src, owner_root=ctx.root,
+                                            exclude_top=excluded):
             if excluded and rel.split("/", 1)[0] in excluded:
                 continue
             key = prefix + rel
@@ -1934,21 +1944,28 @@ def corpus_files_for_view(ctx: Ctx, r: int, vid: str) -> list:
     return out
 
 
-def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
+def corpus_dir_view_files(dirp: Path, owner_root: Path = None,
+                          exclude_top=CORPUS_EXCLUDE_TOP) -> list:
     """[(relative path, path)] for one directory under the judge-view rules.
 
     Slightly narrower than the corpus `build_corpus_dir()` materializes, because
     the judge is the one party that may not even READ what the corpus carries:
     difference-tracking auxiliaries (see TRACKING_AUX_NAME_RE), the pipeline's
-    own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the process
-    scratch (`CORPUS_EXCLUDE_TOP`, i.e. `work/`) and every derived output whose
-    editable source is in the package (see `_is_view_excluded_file()`: a
+    own bookkeeping/report files (`CORPORA_STRIP_BOOKKEEPING`), the SOURCE's own
+    process-scratch exclusion set (`exclude_top`, `CORPUS_EXCLUDE_TOP` --
+    `work/` -- by default) and every derived output whose editable source is in
+    the package (see `_is_view_excluded_file()`: a
     `.log`/`.fls` records the build machine's paths and dates in its CONTENT, a
     version an agent went over loses the whole by-product set so its PRESENCE
     would say which package was worked on, and a `.bbl`/`.pdf` that can be
     compiled from a shipped `.bib`/`.docx`/`.tex` is redundant next to its
     source) never reach a judge view -- so a judge cannot score or infer anything
     from an auxiliary file, a changelog, a ledger, a build log or a rendering.
+
+    `exclude_top` is threaded from the SOURCE (`corpus_sources`): a source with
+    no scratch set (the original, the a1 base, a pin) must not lose a file the
+    digest and the pin carry, or the judged corpus is a strict subset of the
+    scored one (F108).
 
     `owner_root` is the run root that owns the copy. Passing it makes an
     evidence-area link follow only when it is THIS root's canonical
@@ -1977,7 +1994,7 @@ def corpus_dir_view_files(dirp: Path, owner_root: Path = None) -> list:
         if is_bookkeeping_name(p.name):
             continue
         rel = p.relative_to(dirp).as_posix()
-        if excluded_corpus_component(rel, CORPUS_EXCLUDE_TOP):
+        if excluded_corpus_component(rel, exclude_top):
             continue
         if is_disabled_evidence_rel(rel):
             # An inert `<evidence>.disabled/` area is neither submission content
@@ -3683,6 +3700,15 @@ def build_judge_view(ctx: Ctx, r: int, vid: str, dst: Path, stamp: float,
                 _transform_warnings.append(
                     f"{file_map[rel]}: legacy .doc copied byte-for-byte; "
                     f"author/company metadata was not stripped"[:400])
+            elif not _notes:
+                # Any OTHER extension is copied with no sanitizer at all. ODF
+                # (.odt/.ods/.odp), EPUB and legacy .xls/.ppt containers carry
+                # author/creation metadata, and a silent copy let the view and
+                # `record_anonymity_gaps` report a clean decision (F107). It is
+                # a NAMED gap, like the image/.doc/EPS cases above.
+                _transform_warnings.append(
+                    f"{file_map[rel]}: {_suffix or 'no extension'} copied byte-for-byte; "
+                    f"embedded author/creation metadata was not stripped"[:400])
         else:
             out.write_bytes(data)
         try:
@@ -6336,17 +6362,22 @@ def materialize_integrate(ctx: Ctx, r: int, k: int) -> dict:
     for v in pool:
         _require_done(ctx, rid_for_fresh(r, v),
                       f"an integration run consumes the WHOLE pool (member {v!r} is not done)")
-    sb.mkdir(parents=True, exist_ok=True)
+    # The sandbox is reused across attempts and is agent-writable, so a previous
+    # attempt can leave `sb` or `sb/others` as a symlink to an outside directory.
+    # A bare mkdir follows it, and ensure_corpus_dir's repair then deletes and
+    # rebuilds the OUTSIDE tree. Create both through the guarded helper (F006).
+    safe_mkdir(sb)
     # Every view is verified against the CURRENT pool member and rebuilt when it
     # does not match, so a sandbox killed mid-copy can never hand the agent a
     # truncated base or a truncated donor set.
     ensure_corpus_dir(ctx, r, self_id, sb / "self")
+    others_dir = sb / "others"
+    safe_mkdir(others_dir)
     for other in other_ids:
-        ensure_corpus_dir(ctx, r, other, sb / "others" / other)
+        ensure_corpus_dir(ctx, r, other, others_dir / other)
     # Drop donor directories that do not belong to this run's pool (a leftover
     # from an interrupted materialization of a different plan would otherwise be
     # read as if it were a member of this round).
-    others_dir = sb / "others"
     if others_dir.is_dir():
         # EVERY entry that is not a current donor is removed, not only
         # directories: a leftover regular file/symlink survived, entered the

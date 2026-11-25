@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 14/23 of the pipeline -- executed by the
+# Part 14/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -98,6 +98,23 @@ def tracking_manifest(ctx: Ctx, tool: str, extra_notes=()) -> dict:
             "notes": list(TRACKING_MANIFEST_NOTES) + list(extra_notes)}
 
 
+def stored_tracking_entries(out_root: Path) -> dict:
+    """{(round, version): entry} from the stored manifest, shape-hardened.
+
+    `read_json` returns whatever JSON value is on disk, and a non-empty JSON
+    list (or scalar) is truthy, so `stored.get("versions")` raised
+    AttributeError out of `track`/`run_difference_tracking`/the template stage
+    instead of rebuilding the auxiliary tree (F019). A non-object manifest is an
+    empty registry; non-object version rows are dropped as stale.
+    """
+    stored = read_json(out_root / TRACKING_MANIFEST) or {}
+    if not isinstance(stored, dict):
+        stored = {}
+    return {(str(v.get("round")), str(v.get("version"))): v
+            for v in stored.get("versions") or []
+            if isinstance(v, dict)}
+
+
 def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
                            extra_notes=()) -> dict:
     """Merge freshly written entries into <root>/tracking/ (manifest + README).
@@ -107,10 +124,8 @@ def merge_tracking_entries(ctx: Ctx, entries: list, *, tool: str = "auto",
     disk is replaced by the fresh one.
     """
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
-    stored = read_json(out_root / TRACKING_MANIFEST) or {}
     manifest = tracking_manifest(ctx, tool, extra_notes=extra_notes)
-    prev = {(str(v.get("round")), str(v.get("version"))): v
-            for v in stored.get("versions") or []}
+    prev = stored_tracking_entries(out_root)
     order = list(prev)
     for entry in entries:
         key = (str(entry.get("round")), str(entry.get("version")))
@@ -652,9 +667,7 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
     # copies themselves persist, so dropping their rows would make the manifest
     # claim the tree is empty. A full `run` therefore ends with one manifest
     # covering every round it tracked.
-    stored = read_json(out_root / TRACKING_MANIFEST) or {}
-    prev_versions = {(str(v.get("round")), str(v.get("version"))): v
-                     for v in stored.get("versions") or []}
+    prev_versions = stored_tracking_entries(out_root)
     version_order = [k for k in prev_versions]
 
     def put_version(entry: dict) -> None:
@@ -1018,9 +1031,7 @@ def track_template_stage(ctx: Ctx, sb, *, quiet: bool = False) -> dict:
     baselines = [(TRACK_TOKEN_ORIGINAL, [(ctx.pristine, "", ())],
                   "the pre-conformed submission (non_revised/)")]
     out_root = ensure_aux_output_root(ctx.root, TRACKING_DIRNAME)
-    stored = read_json(out_root / TRACKING_MANIFEST) or {}
-    prev = {(str(v.get("round")), str(v.get("version"))): v
-            for v in stored.get("versions") or []}
+    prev = stored_tracking_entries(out_root)
     key = ("1", A1_ID)
     if key in prev and tracking_entry_is_fresh(ctx, prev[key], baselines, srcs):
         return {"ok": True, "entry": prev[key], "skipped": True}

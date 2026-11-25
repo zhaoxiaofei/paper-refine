@@ -722,6 +722,8 @@ def test_f90_skip_only_suite() -> None:
           "SKIP  test_skiponly.py" in out, out[-500:])
     check("F90 it is not counted as passed",
           "0 passed, 1 skipped" in out and "1 passed" not in out, out[-500:])
+    check("F90 a skip-only run is not a successful run",
+          proc.returncode != 0, f"rc={proc.returncode}")
 
 
 def test_f76_verifier_jail() -> None:

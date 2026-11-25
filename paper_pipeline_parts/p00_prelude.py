@@ -1,4 +1,4 @@
-# Part 00/23 of the pipeline -- the shared prelude, executed by the loader
+# Part 00/24 of the pipeline -- the shared prelude, executed by the loader
 # before every other part.
 from __future__ import annotations
 
@@ -508,6 +508,7 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_pipeline_parts/p20_judge_conflicts.py",
     "paper_pipeline_parts/p21_removal_accounting.py",
     "paper_pipeline_parts/p22_resume_continuation.py",
+    "paper_pipeline_parts/p23_postchecks_mcp.py",
     # The FORMATTER's ordered parts are a separate tree with the same
     # all-or-nothing requirement: `paper_docx_format.py` executes whatever
     # `p[0-9][0-9]_*.py` it finds and has no completeness check of its own, so a

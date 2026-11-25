@@ -388,10 +388,10 @@ def test_visual_evidence_is_top_level_work_only() -> None:
     print("\n== F08: only the top-level work/ holds rendered-page evidence ==")
     root = scratch("paper_debug1018b_vis_")
     (root / "work").mkdir()
-    (root / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
     (root / "figures" / "work").mkdir(parents=True)
-    (root / "figures" / "work" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
-    (root / "figures" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "figures" / "work" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
+    (root / "figures" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
     got = [p.relative_to(root).as_posix() for p in pp.render_evidence_files([root])]
     check("F08 a nested figures/work image is NOT render evidence",
           got == ["work/page-1.png"], str(got))

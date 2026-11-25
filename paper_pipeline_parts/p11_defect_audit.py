@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 11/23 of the pipeline -- executed by the
+# Part 11/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -38,8 +38,8 @@ def _defect_audit_prompt(r: int, n_rows: int) -> str:
     return with_context_budget(CONTRADICTION_RULE + F"""You are the pipeline's DEFECT AUDITOR for round {int(r)}.
 
 The round's judge panel filed {int(n_rows)} defect rows. They are in
-`defects.json` in this directory: one object per row of
-`reports/round{int(r)}_defects.csv`, carrying
+`defects.json` in this directory: that file is an object whose `defects` array
+holds one object per row of `reports/round{int(r)}_defects.csv`, carrying
 {{defect_id, version, check, tier, severity, side, target_version, peer_version,
 session, judge_index, evidence}}.
 `judge_opinions.json` carries the round's resolved directed comparisons (score,
@@ -160,14 +160,23 @@ def _defect_audit_reason_ok(reason) -> bool:
         return False
     words = [w for w in text.split()
              if not _DEFECT_AUDIT_FILLER_TOKEN_RE.match(w)]
-    content = [w for w in words if re.search(r"[A-Za-z0-9]", w)]
-    if len({w.lower() for w in content}) < 2:
+    # A one/two-character token ("a", "b", "x") is not content: "a b c" used
+    # to pass as a basis because it produced three distinct words.
+    content = [w for w in words if re.search(r"[A-Za-z0-9]", w)
+               and len(re.sub(r"[^A-Za-z0-9]", "", w)) >= 2]
+    # A named locator (a file, `file:line`, a quote, a URL, a value) IS a basis
+    # even when it is the only content token: "checked main.md:4" used to be
+    # rejected because "checked" is filler and one content word is not two.
+    has_evidence = bool(_DEFECT_AUDIT_EVIDENCE_RE.search(text))
+    if len({w.lower() for w in content}) < 2 and not has_evidence:
         return False
     # An anonymous pointer ("see above", "as discussed") names no artifact,
     # location or computation; the review-coverage gate already refuses it as
     # F040 filler, so the audit reason gate refuses the same phrase (F132).
+    # A bare "see the file" is the same defect.
     if re.fullmatch(
-            r"(?i)(?:see\s+(?:above|below|here|there|prior|previous|report|details?)|"
+            r"(?i)(?:see\s+(?:the\s+)?(?:above|below|here|there|prior|previous|"
+            r"report|details?|file|source|sheet|document|artifact|paper)|"
             r"as\s+(?:discussed|above|before|noted|stated)|ditto|ibid(?:\.|em)?)"
             r"[.!]?", text):
         return False

@@ -245,7 +245,7 @@ def main() -> int:
         check("F3a a full visual claim with NO rendered files now FAILS",
               bool(errs) and any("no rendered page" in e for e in errs), f"errs={errs[:1]}")
         (tmp / "work").mkdir()
-        (tmp / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (tmp / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
         errs, warns = [], []
         nb.check_visual_artifact(art, "the visual-inspection record", errs, warns,
                                  render_roots=[tmp])

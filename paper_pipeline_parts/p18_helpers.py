@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/23 of the pipeline -- executed by the loader AFTER the command
+# Part 18/24 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -585,7 +585,11 @@ _REFERENCE_HEADING_RE = re.compile(
     r"\\begin\{thebibliography\}|"
     r"\\(?:sub)?section\*?\s*\{\s*(?:references?|bibliography|"
     r"references?\s+(?:and|&)\s+notes)\s*\}")
-_REFERENCE_ENTRY_LINE_RE = re.compile(r"^\s*(?:\[\d{1,4}\]|\(\d{1,4}\)|\d{1,4}[.)])\s+\S")
+# A bracketed/parenthesised label may sit directly against the author surname
+# (`[1]Smith J.` is a legal, common rendered style); only a bare ordinal still
+# needs the space, so `1.Methods` is prose and not an entry (F022).
+_REFERENCE_ENTRY_LINE_RE = re.compile(
+    r"^\s*(?:\[\d{1,4}\]\s*|\(\d{1,4}\)\s*|\d{1,4}[.)]\s+)\S")
 
 
 def _reference_entries_in_lines(lines, entries: set) -> set:
@@ -1056,7 +1060,10 @@ def _with_table_gaps(rows: list, gaps: list, rule: str, limit: int) -> list:
 # `ONLY_STAGE_GROUPS` (p02) are read at CALL time, so the split is invisible.
 # =====================================================================
 
-ONLY_ROUND_RANGE_CAP = 64
+# `setup --rounds` accepts up to MAX_ROUNDS (p02), so a single `--only`/
+# `--runs` range must be able to name that whole supported plan (F024). The
+# bound is kept: `1-999999999` must not expand into a billion-element set.
+ONLY_ROUND_RANGE_CAP = MAX_ROUNDS
 
 
 def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
@@ -1083,8 +1090,8 @@ def parse_only_rounds(text: str, item: str, flag: str = "--only") -> set:
             # configured round count.
             if hi - lo + 1 > ONLY_ROUND_RANGE_CAP:
                 die(f"{flag}: round range {chunk!r} in {item!r} names "
-                    f"{hi - lo + 1} rounds; the pipeline's round count is a handful "
-                    f"(rounds are 1-based)", code=2)
+                    f"{hi - lo + 1} rounds; the plan supports at most "
+                    f"{ONLY_ROUND_RANGE_CAP} rounds (rounds are 1-based)", code=2)
             rounds.update(range(lo, hi + 1))
             continue
         if not chunk.isdigit():
@@ -2554,6 +2561,59 @@ def die(msg: str, code: int = 1):
 
 
 # ---- moved from paper_pipeline_parts/p04_utils.py to keep every ordered part under 10,000 lines ----
+_MD_FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", re.S)
+_MD_FENCE_RE = re.compile(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$")
+_MD_OPEN_FENCE_RE = re.compile(r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*\Z")
+_MD_COMMENT_RE = re.compile(r"(?s)<!--.*?-->")
+
+
+def _blank_indented_markdown_code(text: str) -> str:
+    """Blank top-level 4-space/tab code blocks; keep the line count."""
+    lines = str(text or "").split("\n")
+    out, in_list, prev_blank = [], False, True
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        indented = bool(re.match(r"^(?: {4}|\t)", line))
+        if indented and prev_blank and not in_list:
+            while i < len(lines) and (not lines[i].strip()
+                                      or re.match(r"^(?: {4}|\t)", lines[i])):
+                out.append("")
+                i += 1
+            prev_blank = True
+            continue
+        out.append(line)
+        if line.strip():
+            if re.match(r"^ {0,3}(?:[-*+]|\d{1,3}[.)])\s+\S", line):
+                in_list = True
+            elif not indented:
+                in_list = False
+            prev_blank = False
+        else:
+            prev_blank = True
+        i += 1
+    return "\n".join(out)
+
+
+def _strip_markdown_nonprose(text: str) -> str:
+    """Blank Markdown code/comments/front matter (line structure preserved).
+
+    The M19 artifact (count_words.py) and the pipeline's own length scan must
+    read one text; this mirrors the script's line-preserving pass (F055).
+    """
+    src = str(text or "")
+
+    def _blank(m):
+        return "\n" * m.group(0).count("\n")
+
+    src = _MD_FRONT_MATTER_RE.sub(_blank, src, count=1)
+    src = _MD_FENCE_RE.sub(_blank, src)
+    src = _MD_OPEN_FENCE_RE.sub(_blank, src)
+    src = _blank_indented_markdown_code(src)
+    src = _MD_COMMENT_RE.sub(_blank, src)
+    return src
+
+
 def scan_lengths_in_sources(sources: list, profile=None) -> dict:
     """Abstract/main-text word counts over [(dir, prefix, excluded_top)] sources.
 
@@ -2693,6 +2753,11 @@ def scan_lengths_in_sources(sources: list, profile=None) -> dict:
                     # empty rendering (F65).
                     unparsed.append(doc)
                     continue
+                if ext in (".md", ".markdown"):
+                    # The M19 artifact (count_words.py) already blanked code,
+                    # HTML comments and front matter; counting them here made
+                    # the gate and the artifact disagree (F055).
+                    text = _strip_markdown_nonprose(text)
                 lines = text.splitlines()
                 caption_spans = [(a, b) for _, _, a, b
                                  in _caption_units_from_lines(lines, with_spans=True,

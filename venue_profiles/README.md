@@ -225,7 +225,9 @@ types; the shape is the one to copy for a real journal:
     {
       "id": "brief-communication", "label": "Brief Communication",
       "length_limits": {
-        "source": "Nature Biotechnology content-types table (Brief Communication: this profile carries no number for that type -- the stage names the limits the table states)"
+        "source": "Nature Biotechnology content-types table (Brief Communication: abstract 3 sentences up to 70 words; main text 1,000-1,500 words including abstract, references and figure legends)",
+        "abstract": {"base": 70, "relaxation": 1.0},
+        "main_text": {"base": 1500, "relaxation": 1.0}
       }
     }
   ],
@@ -240,9 +242,9 @@ types; the shape is the one to copy for a real journal:
 }
 ```
 
-Selecting `brief-communication` on such a profile yields **no caps**: the
-stages count the sections and hand the author the table's own number instead of
-reusing the Article limits.
+Selecting a type that carries no numbers (for example `analysis` in the shipped
+profile) yields **no caps**: the stages count the sections and hand the author
+the table's own number instead of reusing the Article limits.
 
 **2. A custom journal with its own per-type numbers.** Say the venue publishes
 Research Articles (abstract <= 250 words, main text <= 4,000 words), Reviews

@@ -156,7 +156,13 @@ def test_f012_f013_f026_f027_shape_gates():
     finding = {"id": "F-001", "location": "x", "check": "M1", "category": 1,
                "severity": "Major", "evidence": "e", "explanation": "x",
                "status": "resolvable"}
-    for cid, ok in (("M99", False), ("M37", False), ("M0", False),
+    # F089 (wave 20261125 A): the review must be able to file the instances of
+    # an ADOPTED discovery sweep, and the adoption machinery numbers proposals
+    # from DISCOVERY_PROPOSAL_MIN (M37). A finding's check id is therefore any
+    # M<n> with n >= 1 (the prompt/sweeps text still caps the FROZEN sweep set
+    # at M36, which is what `M36` below pins); only a malformed id -- M0 or a
+    # non-M/J token -- is refused.
+    for cid, ok in (("M99", True), ("M37", True), ("M0", False),
                     ("M36", True), ("M1", True), ("J5", True)):
         sb = sandbox()
         row = dict(finding, check=cid)

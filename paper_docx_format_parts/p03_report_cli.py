@@ -461,7 +461,16 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
         style = para_style(p)
         ital = [text_of(r[2]) for r in runs(p)
                 if text_of(r[2]).strip() and run_is_italic(styles, style, r[2])]
-        field = in_field(franges, p0)
+        # Probe EVERY run, not the paragraph's opening `<w:p>` offset: a complex
+        # Zotero bibliography field BEGINS in its first entry paragraph, so the
+        # `fldChar begin` lies AFTER p0 and `in_field(franges, p0)` reported the
+        # first entry unprotected while later entries were protected (F032).
+        # The rest of the file already takes a RUN offset (p0 + r0).
+        field = ""
+        for _r0, _r1, _run in runs(p):
+            field = in_field(franges, p0 + _r0)
+            if field:
+                break
         # "No italic run" is not "no italic JOURNAL TITLE": a book/report/thesis
         # entry has no journal title to italicize. Only an ARTICLE-like entry --
         # one whose remaining text carries a volume/page locator (a digit that
@@ -510,12 +519,34 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
             "pick one treatment (plain black, or one link colour/underline) everywhere")
 
     # ---- text hygiene ---------------------------------------------------------
+    doc_field_results = _field_result_spans(xml)
     full = "\n".join(text_of(p[2]) for p in paras)
     n_straight, n_curly = len(STRAIGHT_RE.findall(full)), len(CURLY_RE.findall(full))
+    # A quote that sits in a live field RESULT cannot be normalized by this
+    # tool (Word/Zotero regenerate the result; rewriting it would change what
+    # the citation shows and the live-field fence rejects the repair). Counting
+    # such a quote as a MECHANICAL FMT-T1 row made the documented fixer unable
+    # to clear its own row, with no `error` explaining why (F026): the row is
+    # field-protected (style-field under a normalizing policy) instead.
+    _field_quote_paras = 0
+    if n_straight and n_curly:
+        for _p0, _p1, _para in paras:
+            _spans = field_result_text_ranges(_para, doc_field_results, _p0)
+            if not _spans:
+                continue
+            _ptext = text_of(_para)
+            if any(any(a <= m.start() < b for a, b in _spans)
+                   for m in re.finditer(r"[\"'\u2018\u2019\u201c\u201d]", _ptext)):
+                _field_quote_paras += 1
     if n_straight and n_curly:
         row("FMT-T1", "medium", "document",
-            f"mixed quotation marks: {n_straight} straight vs {n_curly} curly",
-            "use one apostrophe/quote style throughout", )
+            f"mixed quotation marks: {n_straight} straight vs {n_curly} curly"
+            + (f" ({_field_quote_paras} paragraph(s) hold a quote inside a live "
+               f"Zotero field result)" if _field_quote_paras else ""),
+            "use one apostrophe/quote style throughout"
+            + ("; a field result's quotation style comes from the CSL style, "
+               "not from the document's runs" if _field_quote_paras else ""),
+            protected=bool(_field_quote_paras))
     # A spaced em dash (or any punctuation-only token) is not a word: counting
     # it in the denominator understated the very density being measured (F52).
     words = max(1, sum(1 for _tok in re.findall(r"\S+", full)
@@ -538,7 +569,6 @@ def analyse_document(xml: str, styles: dict, policy: dict, doc: str,
     # (possible lowercase sentence start) and FMT-G3 (missing space after
     # punctuation) are reported for the editing arms.
     is_ref_para = ref_flags
-    doc_field_results = _field_result_spans(xml)
     field_result_text = [field_result_text_ranges(p[2], doc_field_results, p[0])
                          for p in paras]
     rows.extend(hygiene_rows(paras, is_ref_para, doc, protected=field_result_text))
@@ -1746,8 +1776,16 @@ def fix_document(xml: str, styles: dict, policy: dict,
             live = child_elem(ppr, "keepNext")
             if live is not None:
                 # `<w:keepNext w:val="0"/>` is explicitly OFF: flip it on in
-                # place instead of adding a duplicate element.
-                new_para = new_para.replace(live, "<w:keepNext/>", 1)
+                # place instead of adding a duplicate element. Splice the LIVE
+                # child's span: `str.replace(live, ...)` replaced the first
+                # identical text, which can be an earlier commented-out copy, so
+                # the live property stayed off and the re-scan rejected the file
+                # (F030). `_para_child_span` is the comment-aware reader used by
+                # the other property repairs.
+                span = _para_child_span(para, "keepNext")
+                if span is None:
+                    continue
+                new_para = para[:span[0]] + "<w:keepNext/>" + para[span[1]:]
             else:
                 element = ("<w:keepNext/>" if ppr and "<w:keepLines" in ppr
                            else "<w:keepNext/><w:keepLines/>")
@@ -2069,6 +2107,15 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # and keying `'` off the `"` state flipped a quoted phrase inside-out
         # (`'quoted'` -> '\u2018quoted\u2018'); the text-identity verifier strips
         # quotes before comparing, so that corruption shipped silently.
+        #
+        # A `<w:t>` inside a live field RESULT is NOT ordinary text: Word (and
+        # Zotero's refresh) regenerates it from the stored item, so rewriting
+        # its quote characters changes what the citation/reference currently
+        # shows and makes `zotero_field_signature(before) != signature(after)` --
+        # the live-field fence then rejects the whole repair although the scan
+        # called the row mechanical (F026). Leave those tokens verbatim.
+        _quote_field_spans = _field_result_spans(xml)
+
         def conv(mm, prev_open):
             raw = mm.group(0)
             _open_end = _tag_end(raw, 0)
@@ -2098,7 +2145,7 @@ def fix_document(xml: str, styles: dict, policy: dict,
                     prev_open = text[-1] in quote_openers
             return open_tag + esc(text) + close_tag, prev_open
 
-        def _paragraph(xml_frag: str) -> str:
+        def _paragraph(xml_frag: str, base: int = 0) -> str:
             """Normalize one paragraph's text runs with state across runs."""
             prev_open = True
             pieces, pos = [], 0
@@ -2116,6 +2163,17 @@ def fix_document(xml: str, styles: dict, policy: dict,
                 if re.search(r"<w:(?:tab|br|cr)(?=[\s/>])", gap):
                     prev_open = True
                 pieces.append(gap)
+                if in_field_result(_quote_field_spans, base + mm.start(),
+                                   base + mm.end()):
+                    # The token IS the live result: carry the visible quote
+                    # state (so a quote after the field still closes) but copy
+                    # the bytes unchanged -- a rewrite would break the fence.
+                    for ch in _text_token_text(mm.group(0)):
+                        if ch not in "\"'":
+                            prev_open = ch in quote_openers
+                    pieces.append(mm.group(0))
+                    pos = mm.end()
+                    continue
                 new_frag, prev_open = conv(mm, prev_open)
                 pieces.append(new_frag)
                 pos = mm.end()
@@ -2128,9 +2186,9 @@ def fix_document(xml: str, styles: dict, policy: dict,
         # and turning the outer closing quote into a second opening quote.
         for p0, p1, para in paragraphs(xml):
             pieces.append(xml[pos:p0])
-            pieces.append(_paragraph(para))
+            pieces.append(_paragraph(para, p0))
             pos = p1
-        pieces.append(_paragraph(xml[pos:]))
+        pieces.append(_paragraph(xml[pos:], pos))
         new = "".join(pieces)
         if new != xml:
             xml = new
@@ -2543,19 +2601,30 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
     remaining = sorted(mech_after)
     # The body-only analyse_document() call above cannot see a header/footer
     # part. Re-read every REFERENCED aux part the fixer touched (orphan parts are
-    # ignored by the scanner and must not fail the fence here).
+    # ignored by the scanner and must not fail the fence here). The AUX rules
+    # derive `fix` from the CURRENT shape, so after a PARTIAL repair the
+    # surviving row can be reclassified manual and the old `fix=="mechanical"`
+    # filter dropped it: keep the same ROW (rule + location) when it was
+    # mechanical BEFORE the fix and is still present after, unless that row was
+    # already manual before (F025). Row identity matters: another row of the
+    # same rule may legitimately be editorial (a refused caption merge beside a
+    # repaired one) and must not fail the fence.
     aux_remaining = []
     for name, (_axml, arels) in aux.items():
         if name not in referenced_aux:
             continue
         fixed = _ooxml_part_codec(parts_new.get(name, _axml.encode("utf-8")))[0]
-        _aux_rows, _aux_fixes = drawing_geometry_rows(fixed, arels, sizes, src.name,
-                                                      policy)
-        aux_remaining += [r["rule"] for r in _aux_rows
+        _aux_before = (drawing_geometry_rows(_axml, arels, sizes, src.name, policy)[0]
+                       + page_field_rows([(name, _axml)], src.name))
+        _before_mech = {(r["rule"], r.get("_part") or r.get("location"))
+                        for r in _aux_before if r.get("fix") == "mechanical"}
+        _aux_after = (drawing_geometry_rows(fixed, arels, sizes, src.name, policy)[0]
+                      + page_field_rows([(name, fixed)], src.name))
+        aux_remaining += [r["rule"] for r in _aux_after
                           if r["rule"] in MECHANICAL_RULES
-                          and r.get("fix") == "mechanical"]
-        aux_remaining += [r["rule"] for r in page_field_rows([(name, fixed)], src.name)
-                          if r.get("fix") == "mechanical"]
+                          and (r.get("fix") == "mechanical"
+                               or (r["rule"], r.get("_part") or r.get("location"))
+                               in _before_mech)]
     remaining = sorted(set(remaining) | set(aux_remaining))
     schema = validate_package(tmp_out)
     verified = {
@@ -2580,14 +2649,32 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
         "zotero_field_deleted": field_problems["deleted"],
         "zotero_field_plain_text": field_problems["plain_text"],
     }
-    ok = bool(same_parts
-              and (verified["text_identical"] or verified["text_diff_only_quotes"]
+    text_ok = bool(verified["text_identical"] or verified["text_diff_only_quotes"]
                    or (verified["text_stage_diff_only_quotes"]
                        and verified["text_diff_only_recorded_edits"]))
+    ok = bool(same_parts
+              and text_ok
               and not remaining
               and xml_wellformed
               and schema[0] is not False
               and not field_errors)
+    # `cmd_fix` prints `rep["error"]` when the output is refused; without one it
+    # fell back to a generic "a verification check failed", so a live-field
+    # refusal named no field at all (F026). State the check that failed.
+    failure_reasons = []
+    if not same_parts:
+        failure_reasons.append("the package parts were not carried through unchanged")
+    if not text_ok:
+        failure_reasons.append("the document text changed beyond the recorded edits")
+    if remaining:
+        failure_reasons.append("mechanical finding(s) still present: "
+                               + ", ".join(remaining))
+    if not xml_wellformed:
+        failure_reasons.append(f"the output is not well-formed XML: {xml_detail}")
+    if schema[0] is False:
+        failure_reasons.append(f"schema validation failed: {schema[1]}")
+    if field_errors:
+        failure_reasons.append("live-field check failed: " + "; ".join(field_errors))
     if ok:
         try:
             os.replace(tmp_out, out)
@@ -2605,8 +2692,13 @@ def fix_package(src: Path, out: Path, policy: dict) -> dict:
             tmp_out.unlink()
         except OSError:
             pass
-    return {"source": str(src), "output": str(out), "changes": changes, "verified": verified,
-            "zotero_refresh": zotero_refresh, "reference_repair": reference_repair, "ok": ok}
+    result = {"source": str(src), "output": str(out), "changes": changes,
+              "verified": verified, "zotero_refresh": zotero_refresh,
+              "reference_repair": reference_repair, "ok": ok}
+    if not ok:
+        result["error"] = ("; ".join(failure_reasons)
+                           or "a verification check failed")
+    return result
 
 
 def validate_package(path: Path):
@@ -4742,12 +4834,23 @@ def validate_latex(path: Path, workdir: Path = None, timeout: int = 300) -> dict
             # `_is_aux_name()` rule can decide what to leave out. The compile
             # copy itself is skipped, so a workdir that IS the document's
             # directory cannot copy the copy into itself.
+            #
+            # SYMLINKS and other non-regular entries are skipped: `copytree`
+            # defaults to `symlinks=False`, so a directory link in the package
+            # was DEREFERENCED and its outside target copied into the compile
+            # sandbox -- content the package walker refuses for explicitly
+            # named inputs and that can make validation read files outside the
+            # package boundary (F034). The engine may then fail on a missing
+            # `\input`; that is a compile result, not an outside-file leak.
             shutil.copytree(
                 path.parent, target_dir, dirs_exist_ok=True,
                 ignore=lambda d, names: [
                     n for n in names
                     if n == "work" or _is_aux_name(n)
-                    or (Path(d) == path.parent and n == target_dir.name)])
+                    or (Path(d) == path.parent and n == target_dir.name)
+                    or os.path.islink(os.path.join(d, n))
+                    or not (os.path.isdir(os.path.join(d, n))
+                            or os.path.isfile(os.path.join(d, n)))])
             # The shared bounded runner puts latexmk in its OWN session, caps
             # both streams and kills the whole process GROUP on timeout.
             # `subprocess.run(capture_output=True)` allocated every byte the
@@ -5748,6 +5851,12 @@ def _cell_font_pt(styles: dict, cell: str) -> float:
     for tag in re.findall(r'<w:sz(?=[\s/>])[^>]*>', live_cell):
         val = attr_of(tag, "w:val")
         if val is not None and val.isdigit():
+            # Bounded parse: a 5000-digit w:sz otherwise raised ValueError
+            # (CPython 3.11+'s int() limit) out of the whole package scan
+            # (F027), like the unbounded grid width `_table_grid_widths`
+            # already refuses.
+            if len(val) > 6:
+                continue
             sizes.append(int(val) / 2.0)
     if sizes:
         return max(sizes)
@@ -7103,7 +7212,12 @@ def cmd_scan_figures(args) -> int:
             # source and the scan proceeded with no vocabulary terms, exit 0.
             ET.fromstring(xml)
             texts.append("\n".join(text_of(p[2]) for p in paragraphs(xml)))
-        except (OSError, zipfile.BadZipFile, KeyError, ET.ParseError) as e:
+        except (OSError, zipfile.BadZipFile, KeyError, RuntimeError,
+                NotImplementedError, ET.ParseError) as e:
+            # ZipFile.read raises NotImplementedError for an unsupported
+            # compression method and RuntimeError for an ENCRYPTED entry: both
+            # escaped `main()` as a traceback while every sibling reader already
+            # caught them (F028). The documented exit is this exit-2 report.
             log(f"error: cannot read {f}: {e}")
             return 2
     if texts:

@@ -266,7 +266,13 @@ TEXT_RUN_RE = re.compile(
     # non-breaking hyphen and a symbol glyph have no w:t either: `text_of`
     # renders them as "-" and U+FFFD, and dropping them fused
     # `ten<w:noBreakHyphen/>year` into "tenyear".
-    r"<w:(instrText|t)(?:\s[^>]*)?>(.*?)</w:\1\s*>"
+    #
+    # The open tag's attributes are matched quote-aware: XML permits `>` (even
+    # `/>`) inside a quoted attribute value, and a plain `[^>]*` ended the tag
+    # there, leaking the attribute tail (`b">`) into the corpus text. The
+    # pipeline's own reader (`text_of`) is quote-aware and returned the clean
+    # paragraph (F08 class).
+    r"<w:(instrText|t)(?:\s(?:[^>\"']|\"[^\"]*\"|'[^']*')*)?>(.*?)</w:\1\s*>"
     r"|<w:(br|cr|tab|noBreakHyphen|sym)(?=[\s/>])[^>]*/?>", re.S)
 
 # `mc:AlternateContent` carries the same content twice (Choice + Fallback);

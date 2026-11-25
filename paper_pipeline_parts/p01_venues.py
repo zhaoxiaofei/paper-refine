@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 01/23 of the pipeline -- executed by the
+# Part 01/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -3353,6 +3353,15 @@ def venue_norm_block(venue_id, root=None, transfer: bool = False,
         return ""
     try:
         summary = (pack / VENUE_NORM_FILE).read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as e:
+        # The pack EXISTS, so an undecodable summary is a BROKEN pack (not a
+        # venue without one): the same contract official_template_requirements()
+        # enforces for structure.json.  Letting the UnicodeDecodeError escape
+        # killed every prompt-rendering command with a traceback instead.
+        raise VenueProfileError(
+            f"{pack / VENUE_NORM_FILE}: the venue template pack's {VENUE_NORM_FILE} is not "
+            f"valid UTF-8 ({e}); regenerate the pack with `build-venue-templates` or "
+            f"remove it") from e
     except OSError:
         return ""
     digest = sha256_file(pack / VENUE_NORM_FILE)

@@ -1,4 +1,4 @@
-# Part 19/23 of the pipeline -- executed by the loader, in order, in the
+# Part 19/24 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string
@@ -464,7 +464,14 @@ def page_stage_prompt(sandbox, text: str, blocks, stage: str,
             # high prompt's rule sequence (AGENTS.md rule 12); trimming the
             # block here would join it to the next block on expansion.
             parts.append(f"\n## {title}\n\n{body}\n")
-        write_text_atomic(sb / rel, "".join(parts))
+        # The TARGET can itself be a directory (or a planted link) in a reused
+        # agent-writable sandbox; `write_text_atomic` then raised an unhandled
+        # IsADirectoryError instead of the intended fail-closed message (F023).
+        target = sb / rel
+        if target.is_symlink() or (target.exists() and not target.is_file()):
+            die(f"refusing to page the profile rules: {rel} is a symlink or not a "
+                f"regular file in the session sandbox ({sb}). Remove it and re-run.")
+        write_text_atomic(target, "".join(parts))
     # The profile contract first (the capacity discipline is the profile's
     # point), then the contradiction rule every stage prompt carries; the
     # contract defers to it explicitly, so the profile block is governed by the

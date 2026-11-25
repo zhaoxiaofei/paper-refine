@@ -392,8 +392,8 @@ COVER_LETTER_MAX = 500
 # authors' words -- an upward drift on an equation-heavy .tex, the dangerous
 # direction against a venue cap.
 TEX_MATH_ENV = re.compile(
-    r"\\begin\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
-    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\{\1\}", re.M)
+    r"\\begin\s*\{(equation\*?|align\*?|alignat\*?|eqnarray\*?|gather\*?|multline\*?|"
+    r"displaymath|math|split|flalign\*?)\}[\s\S]*?\\end\s*\{\1\}", re.M)
 
 
 def blank_math_environments(text: str) -> str:
@@ -490,11 +490,11 @@ def tex_lines(text: str):
         # environment, or the rest of the document is blanked as code.
         _line = strip_tex_comment(_line)
         while True:
-            _b = re.search(r"\\begin\{(verbatim|lstlisting|minted|Verbatim)\}",
+            _b = re.search(r"\\begin\s*\{(verbatim|lstlisting|minted|Verbatim)\}",
                            _line)
             if not _b:
                 break
-            _e = re.search(r"\\end\{" + re.escape(_b.group(1)) + r"\}",
+            _e = re.search(r"\\end\s*\{" + re.escape(_b.group(1)) + r"\}",
                            _line[_b.end():])
             if _e:
                 _line = _line[:_b.start()] + _line[_b.end() + _e.end():]
@@ -514,8 +514,8 @@ def tex_lines(text: str):
         # `re.search`, not `re.match`: a legal one-line abstract preceded by
         # title text on the same source line is still an abstract environment,
         # exactly as the pipeline's scan treats it (F05).
-        begins = re.search(r"\\begin\{abstract\}", line)
-        ends = re.search(r"\\end\{abstract\}", line)
+        begins = re.search(r"\\begin\s*\{abstract\}", line)
+        ends = re.search(r"\\end\s*\{abstract\}", line)
         if begins or ends:
             # Both tokens may sit ANYWHERE on the line (`\begin{abstract} ...
             # \end{abstract}`, or the usual `Last sentence.\end{abstract}`):
@@ -1080,6 +1080,19 @@ def main(argv=None) -> int:
                     if isinstance(block, dict):
                         cover_configured = True
                     break
+            if not cover_configured:
+                # The venue-level block is the LAST fallback in the pipeline's
+                # VenueProfile.length_limits (type -> default type -> venue), so
+                # a profile that carries an article_types table AND a venue-wide
+                # cover_letter preference is bounded by that block, never by the
+                # built-in 300-500 preference. Without this fallback the two M19
+                # readers disagreed about the same profile.
+                venue_block = (profile or {}).get("length_limits") or {}
+                block = (venue_block.get("cover_letter")
+                         if isinstance(venue_block, dict) else None)
+                if isinstance(block, dict):
+                    cover = block
+                    cover_configured = True
         def _profile_number(value, key):
             """A profile's numeric limit, or None (with a warning) when malformed."""
             if value is None:

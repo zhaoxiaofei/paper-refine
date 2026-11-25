@@ -277,6 +277,29 @@ FIG_CAPTION_RE = re.compile(
 TABLE_CAPTION_RE = re.compile(
     r"^\s*(?:#{1,6}\s*)?(?:extended\s+data|supplementary\s+)?tables?\.?\s*"
     r"(?:s\d+|\d+[a-z]?)\s*" + CAP_SEP, re.I)
+
+_CAPTION_BODY_PRONOUN_RE = re.compile(r"^(?:we|i|our|here)\b", re.I)
+
+
+def _caption_line(raw, pattern):
+    """True for a display-item caption, not a body sentence that opens like one.
+
+    `section_label` used to apply its 60-character HEADING cap to captions as
+    well, so a real legend longer than 60 characters was never its own context
+    (and a body sentence "Figure 1. We next tested..." was). The caption's own
+    label/separator decides; only a following FIRST-PERSON continuation marks
+    the body sentence whose "Figure 1." is a citation, not a caption ("This
+    figure shows..." stays a legitimate caption opening).
+    """
+    m = pattern.match(raw)
+    if not m:
+        return False
+    head = raw[:m.end()]
+    cut = max(head.rfind(ch) for ch in ".:|\u2014\u2013,")
+    rest = raw[cut + 1:].strip()
+    return not _CAPTION_BODY_PRONOUN_RE.match(rest)
+
+
 NUM_ENTRY_RE = re.compile(r"^\s*(?:\[?\d{1,3}[\].)]|\d{1,3}[.)])\s+")
 BULLET_ENTRY_RE = re.compile(r"^\s*[-*•]\s+\S")
 YEAR_RE = re.compile(r"\b(?:19|20)\d{2}[a-z]?\b")
@@ -424,12 +447,17 @@ def blank_tex_verbatim(text):
 def section_label(raw):
     """In-file section heading or display-item caption, else None."""
     s = raw.strip()
-    if not s or len(s) > 60:
+    if not s:
         return None
-    if FIG_CAPTION_RE.match(raw):
+    # The caption tests come BEFORE the 60-character HEADING cap: a real legend
+    # is often longer, and capping first attributed its metrics to the previous
+    # section (the bug extract_acronyms.section_label already fixed).
+    if _caption_line(raw, FIG_CAPTION_RE):
         return "figure legend"
-    if TABLE_CAPTION_RE.match(raw):
+    if _caption_line(raw, TABLE_CAPTION_RE):
         return "table"
+    if len(s) > 60:
+        return None
     # F101: LaTeX sectioning and emphasized Markdown headings are contexts too.
     _tex = re.match(r"^\\(?:section|subsection|subsubsection|chapter)\*?\s*\{([^{}]*)\}", s)
     if _tex:

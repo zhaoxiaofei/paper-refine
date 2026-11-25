@@ -22,16 +22,20 @@ def _fresh_run_dir(run_dir, skill_root):
     is still cleaned so a re-run starts fresh.
     """
     import tempfile
-    run_dir = os.path.abspath(run_dir)
-    root = os.path.abspath(skill_root)
-    home = os.path.abspath(os.path.expanduser("~"))
+    # Resolve symlinks before the containment test: a run dir reached through
+    # a symlinked parent looked lexically outside the skill tree and its
+    # rmtree deleted real content inside the tree (F32, 2026-11-23). The two
+    # sibling harnesses already do this; this one kept the pre-fix guard.
+    run_dir = os.path.realpath(run_dir)
+    root = os.path.realpath(skill_root)
+    home = os.path.realpath(os.path.expanduser("~"))
     if run_dir in (os.path.abspath(os.sep), home, root) or run_dir.startswith(root + os.sep):
         raise SystemExit(f"refusing --run-dir {run_dir!r}: it is the skill tree, "
                          f"the home directory or the filesystem root")
     if os.path.exists(run_dir) and not os.path.isdir(run_dir):
         raise SystemExit(f"refusing --run-dir {run_dir!r}: it is not a directory")
     if os.path.isdir(run_dir) and os.listdir(run_dir):
-        tmp = os.path.abspath(tempfile.gettempdir())
+        tmp = os.path.realpath(tempfile.gettempdir())
         if not (run_dir == tmp or run_dir.startswith(tmp + os.sep)):
             raise SystemExit(f"refusing --run-dir {run_dir!r}: it is non-empty and "
                              f"outside the temp directory; not deleting it")

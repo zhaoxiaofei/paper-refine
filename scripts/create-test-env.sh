@@ -145,7 +145,18 @@ esac
 
 # --- 1. delete the previous environment (only with --recreate) -------------
 if [[ "${RECREATE}" -eq 1 ]]; then
-  if env_exists || env_registered; then
+  if [[ -n "${ENV_PREFIX}" && -e "${ENV_PREFIX}" \
+        && ! -e "${ENV_PREFIX}/conda-meta/history" ]]; then
+    # The prefix exists but is not a conda environment (an empty directory, or
+    # the debris of an interrupted install). `conda env remove` refuses it with
+    # EnvironmentLocationNotFound, and `set -e` used to abort --recreate before
+    # the rm -rf below and before any recreation -- the documented "supported
+    # repair" could never repair this state (F037). conda's own environment
+    # test is conda-meta/history; with no such file there is nothing conda can
+    # remove, so only an explicit --recreate may delete the directory.
+    echo "removing non-conda directory at the prefix ${ENV_PREFIX}"
+    rm -rf -- "${ENV_PREFIX}"
+  elif env_exists || env_registered; then
     if ! env_exists; then
       echo "removing existing-but-broken environment (its Python does not run):" \
            "${ENV_PREFIX:-${ENV_NAME}}"

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 22/23 of the pipeline -- executed by the
+# Part 22/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -487,7 +487,14 @@ def _audit_disposition_ok(value) -> bool:
     if not AUDIT_COVERAGE_DISPOSITION_RE.match(text):
         return False
     if _reason_is_generic_filler(text):
-        return False
+        # `no findings` is the documented zero-count spelling and is made ONLY
+        # of generic words, so the shared filler gate refused the very verdict
+        # the prompt accepts as `0 findings`'s equivalent (F021). The count is
+        # the evidence; only a filler TAIL is refused, exactly as the numeric
+        # zero form is below.
+        _zero = re.match(r"(?i)^\s*no\s+finding(?:s)?\b", text)
+        if _zero is None or _count_tail_is_filler(text[_zero.end():], 0):
+            return False
     if _AUDIT_COUNT_RE.search(text):
         # The count prefix itself is a complete verdict, but a TAIL made only
         # of generic filler (`0 findings -- lorem ipsum`, `0 findings; all

@@ -333,8 +333,12 @@ def test_check_id_coverage():
           and "M25" not in expected and "M30" not in expected and "J5" not in expected)
     check("the review postcheck's required-coverage list names M25-M29 + J5",
           'wanted += ["M25", "M26", "M27", "M28", "M29", "J5"]' in src)
+    # F080: observe the CONTRACT, not a source substring. `wanted += ["M30"]`
+    # could stay in the file while a later filter/dead branch dropped the id;
+    # calling the function the postcheck and the prompt share is the check.
+    required_ids = nb.required_review_check_ids()
     check("the review postcheck's required-coverage list names M30",
-          'wanted += ["M30"]' in src)
+          "M30" in required_ids, str(required_ids)[:200])
     check("the review postcheck requires the rewrite-parity and M30 artifacts",
           "M25_artwork_parity.md" in src and "ARCHITECTURE.md" in src
           and "M29_caption_schema.md" in src

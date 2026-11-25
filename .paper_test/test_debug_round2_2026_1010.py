@@ -463,8 +463,7 @@ def test_self_closing_first_section_in_template_writer():
     stripped = re.sub(r"<w:sectPr[\s\S]*?</w:sectPr>|<w:sectPr[^>]*/>", "", xml)
     check("no header/footer reference is spliced outside a section",
           not re.search(r"headerReference|footerReference", stripped), stripped[-200:])
-    ET.fromstring(xml)
-    check("the output stays well-formed", True)
+    check("the output stays well-formed", ET.fromstring(xml) is not None)
 
 
 def test_blank_pdf_reaches_the_publish_scan():

@@ -2512,7 +2512,7 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 
 | stage | `high` | `medium` | cut |
 |---|---|---|---|
-| review | 125 KB | 55 KB | 56% |
+| review | 126 KB | 55 KB | 56% |
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
 | revise | 122 KB | 68 KB | 44% |
@@ -3728,7 +3728,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 295 suites (a few
+any failure. They are independent, so run them in parallel — 304 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

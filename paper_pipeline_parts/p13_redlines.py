@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 13/23 of the pipeline -- executed by the
+# Part 13/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1904,9 +1904,14 @@ def run_redlines(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
         _prev = read_json(out_root / "manifest.json") or {}
     except (OSError, ValueError):
         _prev = {}
-    _prev_versions = ((_prev.get("versions") if isinstance(_prev, dict) else None) or [])
-    _prev_map = {(v.get("round"), v.get("version")): v for v in _prev_versions
-                 if isinstance(v, dict)}
+    # One non-dict entry (a corrupted/merged/hand-edited manifest, or a
+    # `versions` value that is an object rather than a list) crashed the
+    # accumulation below with AttributeError from a pass whose product is only an
+    # audit aid (F018). Drop such entries as stale ONCE, at read time.
+    _prev_versions = [v for v in
+                      ((_prev.get("versions") if isinstance(_prev, dict) else None) or [])
+                      if isinstance(v, dict)]
+    _prev_map = {(v.get("round"), v.get("version")): v for v in _prev_versions}
     # A "not materialized" placeholder must not REPLACE a stored entry whose
     # comparisons were really produced (a temporarily absent source dir).
     _drop = set()

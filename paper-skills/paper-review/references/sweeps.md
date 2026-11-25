@@ -1441,8 +1441,13 @@ surface forms collapse to the same normalised token. Decide ONE authoritative
 form per family ONCE and write it to `WORK/STYLE_CONVENTIONS.md`
 (`family | authoritative form | basis (corpus majority / the manuscript's own
 first use / a stated venue rule) | forbidden variants`). Every deviating
-occurrence is a row, in every document including the cover letter, legends,
-the SI and the references' own text that the manuscript controls.
+occurrence is a row, in every document the manuscript controls: the cover
+letter, the legends and the SI. The reference list's own text — the lines under
+a References heading — is NOT enumerated: a bibliography is quoted text, not
+the author's prose, so a UK/US or hyphenation variant inside a cited title or
+journal name is not a manuscript convention and harmonizing it would edit a
+quotation. `STYLE_VARIANTS.md` records that exclusion as a recorded gap for the
+sweep.
 
 **Artifact.** `M26_conventions.md`: family | variant | location
 (document/line) | count | authoritative form (from STYLE_CONVENTIONS.md) |

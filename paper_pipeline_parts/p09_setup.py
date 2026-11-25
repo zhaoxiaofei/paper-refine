@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/23 of the pipeline -- executed by the
+# Part 09/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -155,31 +155,40 @@ def cmd_setup(args) -> None:
         _fmt_mod = _format_module()
         _policy_defaults = dict(getattr(_fmt_mod, "POLICY_DEFAULTS", {}) or {}) \
             if _fmt_mod is not None else {}
-        _policy_extra = {"unlink_zotero_fields_at_publish"}
+        # Not a formatter POLICY_DEFAULTS member, but a documented BOOLEAN
+        # switch (README) that `_policy_flag` reads as bool(value): without a
+        # type entry a non-empty list/object/number was accepted and silently
+        # enabled the irreversible unlink (F011).
+        _policy_extra = {"unlink_zotero_fields_at_publish": "bool"}
         _unknown = sorted(k for k in format_policy
                           if k not in _policy_defaults and k not in _policy_extra)
         if _unknown:
             die(f"--format-policy has unknown key(s): {', '.join(_unknown)}; known keys are "
-                f"{', '.join(sorted(set(_policy_defaults) | _policy_extra))}", code=2)
+                f"{', '.join(sorted(set(_policy_defaults) | set(_policy_extra)))}", code=2)
         _bad_types = []
         for _k, _v in format_policy.items():
-            if _k not in _policy_defaults:
-                continue
-            _d = _policy_defaults[_k]
-            if isinstance(_d, bool):
+            if _k in _policy_extra:
                 _ok = isinstance(_v, bool)
-            elif isinstance(_d, (int, float)):
-                _ok = isinstance(_v, (int, float)) and not isinstance(_v, bool)
-            elif isinstance(_d, str):
-                _ok = isinstance(_v, str)
-            elif isinstance(_d, list):
-                _ok = isinstance(_v, list)
-            elif isinstance(_d, dict):
-                _ok = isinstance(_v, dict)
-            else:                                      # pragma: no cover
-                _ok = True
+                _expected = _policy_extra[_k]
+            elif _k in _policy_defaults:
+                _d = _policy_defaults[_k]
+                if isinstance(_d, bool):
+                    _ok = isinstance(_v, bool)
+                elif isinstance(_d, (int, float)):
+                    _ok = isinstance(_v, (int, float)) and not isinstance(_v, bool)
+                elif isinstance(_d, str):
+                    _ok = isinstance(_v, str)
+                elif isinstance(_d, list):
+                    _ok = isinstance(_v, list)
+                elif isinstance(_d, dict):
+                    _ok = isinstance(_v, dict)
+                else:                                  # pragma: no cover
+                    _ok = True
+                _expected = type(_d).__name__
+            else:
+                continue
             if not _ok:
-                _bad_types.append(f"{_k}={_v!r} (expected {type(_d).__name__})")
+                _bad_types.append(f"{_k}={_v!r} (expected {_expected})")
         if _bad_types:
             die("--format-policy has invalid value(s): " + "; ".join(_bad_types), code=2)
     format_fix = str(getattr(args, "format_fix", DEFAULT_FORMAT_FIX) or
@@ -2138,6 +2147,32 @@ def _merge_readme_row(staged: Path, dest: Path, vid: str,
     return "synthesized" if synthesized else "appended"
 
 
+def _add_venue_staged_roots(sb: Path, notes: list = None) -> list:
+    """The add-venue staging roots, refusing a symlinked `store/` (F007).
+
+    `is_file()`/`is_dir()` FOLLOW an ancestor symlink, so a planted
+    `store -> /outside` made the publisher read the profile/README and copy the
+    official tree from the host into the shared venue store; only the final
+    component was checked. Refuse the staged `store/` itself (and a non-directory
+    entry of that name) and keep the sandbox root, which is not reached through
+    an agent-planted link.
+    """
+    sb = Path(sb)
+    roots = []
+    for cand in (sb / "store", sb):
+        if cand != sb:
+            if cand.is_symlink():
+                if notes is not None:
+                    notes.append(f"{cand.name}: refused a symlinked staging directory")
+                continue
+            if cand.exists() and not cand.is_dir():
+                if notes is not None:
+                    notes.append(f"{cand.name}: refused a staging entry that is not a directory")
+                continue
+        roots.append(cand)
+    return roots
+
+
 def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     """Publish a completed `add-venue` sandbox into the shared store.
 
@@ -2146,9 +2181,9 @@ def publish_add_venue_staging(sb: Path, dest: Path, vid: str) -> dict:
     profile, the venue's README row, and the `.official`/`.manuscripts` corpora
     into `dest`, then the caller validates and derives the template pack.
     """
-    roots = [sb / "store", sb]
     out = {"profile": None, "readme": "unchanged", "official_files": 0,
            "manuscript_files": 0, "sandbox": str(sb), "notes": []}
+    roots = _add_venue_staged_roots(sb, out["notes"])
     # The profile/README writes below have no parent-link guard of their own;
     # `_merge_tree` refuses one for the corpora. Apply the same containment
     # rule once here so a symlinked store component cannot redirect the
@@ -2855,7 +2890,8 @@ def cmd_add_venue(args) -> None:
     # VALIDATE BEFORE PUBLISH: a bad agent-written profile must never replace
     # the store's copy (the shipped default is read at import, so publishing an
     # invalid one could brick every later command, including the repair tools).
-    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}" for r in (sb / "store", sb)
+    staged_profile = next((r / f"{vid}{VENUE_PROFILE_SUFFIX}"
+                           for r in _add_venue_staged_roots(sb)
                            if (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_file()
                            and not (r / f"{vid}{VENUE_PROFILE_SUFFIX}").is_symlink()), None)
     if staged_profile is not None:
@@ -3790,7 +3826,11 @@ def no_progress_measure(row: dict):
     med, mean, iqr = row.get("median"), row.get("mean"), row.get("iqr")
     census = row.get("defect_prefix_census")
     if census is None:
-        census = (int(row.get("defect_prefix_total") or 0),)
+        # A missing ordered census is MISSING EVIDENCE, never zero: substituting
+        # `defect_prefix_total` (or 0) made an unmeasured row the cleanest
+        # possible key and silently disabled `--stop-after-no-progress` (F009).
+        # Use the SAME sentinel `champion_sort_key()` uses.
+        census = (10 ** 9,)
     return (
         tuple(int(x) for x in census),
         -(med if med is not None else -99.0),

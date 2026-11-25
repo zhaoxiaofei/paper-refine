@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/23 of the pipeline -- executed by the
+# Part 06/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -85,6 +85,13 @@ def _signal_names_this_run(data, rec: dict, name: str) -> bool:
         if rid is not None:
             return rid == rec.get("id")
         if tid is not None:
+            # The token is the value the judge was actually issued; compare it
+            # FIRST. A sheet naming the raw version id is still this run's (the
+            # judge-sheet validator warns about the contract but accepts it), so
+            # that spelling stays accepted as the fallback.
+            token = rec.get("judge_target_token")
+            if token and tid == token:
+                return True
             return not rec.get("target_id") or tid == rec.get("target_id")
         return False
     elif data.get("stage") != rec.get("kind"):
@@ -1146,7 +1153,10 @@ _DISCOVERY_NEGATED_RE = re.compile(
 def _discovery_decision_cell(line: str, pid: str) -> str:
     """The text after `pid` in its table row, or the rest of a prose line."""
     if "|" in line:
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        # Split on UNESCAPED pipes: the plain `split("|")` turned an escaped
+        # `\|` inside an evidence cell into a column boundary, shifting the
+        # decision column and crediting a decision word to the wrong cell (F086).
+        cells = _table_line_cells(line)
         for i, cell in enumerate(cells):
             # The id is matched as a WHOLE token: a substring test let F-1
             # consume F-10's row/cell (R05).
@@ -1170,8 +1180,10 @@ def _discovery_decision_cell(line: str, pid: str) -> str:
                 _cand_ids = set(re.findall(r"\b(?:X|F|AU|R)-\d+\b", cand))
                 if _cand_ids and pid not in _cand_ids:
                     continue
-                if _DISCOVERY_DECISION_START_RE.match(cand) \
-                        or _DISCOVERY_DECISIONS_RE.search(cand):
+                # The decision cell must START with the token: a decision word
+                # ANYWHERE in a later evidence/note cell (`the donor DROPPED this
+                # row`) is not this row's disposition (F086).
+                if _DISCOVERY_DECISION_START_RE.match(cand):
                     return cand
             return ""
         return ""
@@ -2084,6 +2096,7 @@ _COVERAGE_NOWORK_RE = re.compile(
 _COVERAGE_NOWORK_TOKEN_RE = re.compile(
     r"(?i)\b(?:pending|not\s+attempted|not\s+done|no\s+work\s+(?:was\s+)?done|"
     r"no\s+analysis\s+(?:was\s+)?performed|nothing\s+(?:was\s+)?(?:done|checked)|"
+    r"nothing\s+(?:to|was)\s+report(?:ed)?|no\s+change\b|unchanged\b|"
     r"checked\s+nothing|did\s+nothing|unable\s+to\s+(?:check|verify|review))\b")
 _COVERAGE_NAMED_BASIS_RE = re.compile(
     r"(?i)(?:basis\s*:|unable\s*(?:--|—|–)"
@@ -2288,6 +2301,50 @@ def visual_tools_available() -> bool:
 
 
 RENDER_EVIDENCE_EXTS = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff")
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_is_a_real_image(p: Path) -> bool:
+    """True only for a PNG carrying a positive-size IHDR and image data.
+
+    The 8-byte signature is not a page: a stage that never rendered the DOCX can
+    write the magic and satisfy the visual gate with it (F084). The chunk walk
+    is the standard-library equivalent of a decode (the pipeline ships no PIL):
+    a real render has an IHDR with non-zero dimensions and at least one IDAT
+    chunk with a payload.
+    """
+    try:
+        with p.open("rb") as fh:
+            if fh.read(8) != _PNG_SIGNATURE:
+                return False
+            seen_ihdr = False
+            for _ in range(10000):
+                hdr = fh.read(8)
+                if len(hdr) < 8:
+                    return False
+                length = int.from_bytes(hdr[:4], "big")
+                kind = hdr[4:8]
+                if kind == b"IHDR":
+                    if length != 13:
+                        return False
+                    data = fh.read(13)
+                    if len(data) < 13:
+                        return False
+                    width = int.from_bytes(data[:4], "big")
+                    height = int.from_bytes(data[4:8], "big")
+                    if width <= 0 or height <= 0:
+                        return False
+                    seen_ihdr = True
+                    fh.read(4)                     # CRC
+                elif kind == b"IDAT":
+                    return seen_ihdr and length > 0
+                elif kind == b"IEND":
+                    return False
+                else:
+                    fh.seek(length + 4, os.SEEK_CUR)   # payload + CRC
+            return False
+    except OSError:
+        return False
 
 
 def _render_evidence_is_real(p: Path) -> bool:
@@ -2306,11 +2363,14 @@ def _render_evidence_is_real(p: Path) -> bool:
     suf = p.suffix.lower()
     if suf == ".pdf":
         # The header alone is not a render: a 9-byte `%PDF-1.7` file has no
-        # `%%EOF` trailer. Use the same complete-signature test as the
-        # renderer/cache path.
-        return pdf_signature_problem(p) == ""
+        # `%%EOF` trailer. Use the same complete-render test as the
+        # renderer/cache path: a 15-byte `%PDF-1.4\n%%EOF\n` stub carries both
+        # SIGNATURE markers and no page, and used to satisfy the visual gate
+        # (F084).
+        return (pdf_signature_problem(p) == ""
+                and _render_output_body_problem(p) == "")
     if suf == ".png":
-        return head.startswith(b"\x89PNG\r\n\x1a\n")
+        return _png_is_a_real_image(p)
     if suf in (".jpg", ".jpeg"):
         return head.startswith(b"\xff\xd8\xff")
     if suf in (".tif", ".tiff"):
@@ -2667,602 +2727,6 @@ def _toml_inline_table_values(raw: str):
             return None
     return out
 
-
-
-def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
-                        timeout: float = 300) -> dict:
-    """Drive one configured MCP stdio server for ONE tool call, then stop it.
-
-    Minimal newline-delimited JSON-RPC: `initialize` ->
-    `notifications/initialized` -> `tools/call`. The orchestrator seeds the
-    venue-template renders itself, so it drives the operator's docx-converter
-    MCP tool directly (Microsoft Word through PowerShell interop) instead of
-    silently falling back to a lower-fidelity shim. This is the ORCHESTRATOR's
-    own render chain; the agent prompts put `docx2pdf.sh` first.
-    """
-    argv = [str(spec.get("command") or ""), *[str(a) for a in spec.get("args") or []]]
-    if not argv[0]:
-        return {"ok": False, "error": "the MCP server entry names no command"}
-    launch_env = None
-    if spec.get("env"):
-        launch_env = dict(os.environ, **{str(k): str(v) for k, v in spec["env"].items()})
-    launch_cwd = spec.get("cwd") or None
-    try:
-        # Its OWN process group: a timeout must kill the whole chain
-        # (bash -> PowerShell -> Word), not only the node wrapper (F29).
-        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, bufsize=1,
-                                encoding="utf-8", errors="replace",
-                                env=launch_env, cwd=launch_cwd,
-                                **_render_popen_kwargs())
-    except OSError as e:
-        return {"ok": False, "error": f"the MCP server would not start: {e}"}
-    # A misbehaving MCP server must not grow memory without bound: queue only a
-    # bounded number of lines/bytes and record a flood instead of blocking the
-    # producer or allocating until OOM (the 2026-10-28 audit's F80).
-    MAX_MCP_LINES = 4096
-    MAX_MCP_LINE_BYTES = 1 << 20
-    MAX_MCP_QUEUED_BYTES = 8 << 20      # TOTAL bytes waiting in the queue
-    MAX_MCP_STDERR_KEEP = 4096          # per-line tail kept for the error report
-    lines = queue.Queue(maxsize=MAX_MCP_LINES)
-    queued_bytes = [0]
-    queue_lock = threading.Lock()
-    flooded = threading.Event()
-    stderr_flooded = threading.Event()
-    err_tail = deque(maxlen=6)
-
-    def pump(stream) -> None:
-        try:
-            while True:
-                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
-                if not line:
-                    break
-                if len(line) > MAX_MCP_LINE_BYTES:
-                    flooded.set()
-                    continue
-                with queue_lock:
-                    if queued_bytes[0] + len(line) > MAX_MCP_QUEUED_BYTES:
-                        flooded.set()
-                        continue
-                    try:
-                        lines.put_nowait(line)
-                    except queue.Full:
-                        flooded.set()
-                    else:
-                        queued_bytes[0] += len(line)
-        finally:
-            try:
-                lines.put_nowait(None)
-            except queue.Full:
-                pass
-
-    def pump_err(stream) -> None:
-        try:
-            while True:
-                line = stream.readline(MAX_MCP_LINE_BYTES + 1)
-                if not line:
-                    break
-                if len(line) > MAX_MCP_LINE_BYTES:
-                    stderr_flooded.set()
-                    continue
-                err_tail.append(line[-MAX_MCP_STDERR_KEEP:])
-        except (OSError, ValueError):
-            pass
-
-    threading.Thread(target=pump, args=(proc.stdout,), daemon=True).start()
-    threading.Thread(target=pump_err, args=(proc.stderr,), daemon=True).start()
-
-    def stop_tree() -> None:
-        """Kill the server AND its grandchildren (F29)."""
-        if os.name == "nt":
-            if proc.poll() is None:
-                with contextlib.suppress(OSError, subprocess.SubprocessError):
-                    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                                   capture_output=True, timeout=30)
-                with contextlib.suppress(OSError):
-                    proc.kill()
-        else:
-            # killpg by the WRAPPER's pid works even after the wrapper exited:
-            # start_new_session made that pid the group id.
-            with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
-                os.killpg(proc.pid, signal.SIGKILL)
-            with contextlib.suppress(OSError):
-                proc.kill()
-
-    def failure(prefix: str) -> dict:
-        """`prefix` plus what the SERVER itself said, when saying nothing.
-
-        The handshake used to discard the server's stderr, so a server that
-        died on startup (a missing npm dependency -- the 2026-10-14 state of
-        the docx-compare/docx-converter copies) surfaced as the bare "did not
-        answer initialize()". One bounded wait drains the pipe, and the tail
-        travels into the manifest, so the operator sees the real error.
-        """
-        # Stop the tree BEFORE the 2-second drain: waiting first let a
-        # grandchild (bash -> PowerShell -> Word) keep running and writing for
-        # the whole diagnostic window (F29).
-        stop_tree()
-        with contextlib.suppress(subprocess.TimeoutExpired):
-            proc.wait(timeout=2)
-        time.sleep(0.05)
-        text = "".join(err_tail).strip().replace("\n", " | ")
-        bits = [prefix]
-        if proc.returncode is not None:
-            bits.append(f"the server exited with code {proc.returncode}")
-        if text:
-            bits.append(f"stderr: {text[-300:]}")
-        if flooded.is_set():
-            bits.append("the server flooded its stdout; excess output was dropped")
-        if stderr_flooded.is_set():
-            bits.append("the server flooded its stderr; excess output was dropped")
-        return {"ok": False, "error": "; ".join(bits)}
-
-    def send(obj: dict) -> None:
-        proc.stdin.write(json.dumps(obj) + "\n")
-        proc.stdin.flush()
-
-    def wait_for(rid: int, deadline: float):
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            try:
-                line = lines.get(timeout=min(remaining, 0.5))
-            except queue.Empty:
-                continue
-            if line is None:
-                return None
-            with queue_lock:
-                if queued_bytes[0]:
-                    queued_bytes[0] = max(0, queued_bytes[0] - len(line))
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                msg = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(msg, dict) and msg.get("id") == rid:
-                return msg
-
-    try:
-        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
-              "params": {"protocolVersion": "2025-06-18", "capabilities": {},
-                         "clientInfo": {"name": "paper_pipeline", "version": VERSION}}})
-        init = wait_for(1, time.monotonic() + min(float(timeout), 60.0))
-        if init is None:
-            return failure("the MCP server did not answer initialize()")
-        if init.get("error"):
-            return {"ok": False, "error": f"initialize() failed: {init['error']}"}
-        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
-              "params": {"name": tool, "arguments": arguments}})
-        rep = wait_for(2, time.monotonic() + float(timeout))
-        if rep is None:
-            return failure(f"the MCP tool {tool} did not answer within {int(timeout)}s")
-        if rep.get("error"):
-            return {"ok": False, "error": f"the MCP tool {tool} failed: {rep['error']}"}
-        out = {"ok": True, "result": rep.get("result") or {}}
-        flood_warnings = []
-        if flooded.is_set():
-            flood_warnings.append("the server flooded its stdout; excess output was dropped")
-        if stderr_flooded.is_set():
-            flood_warnings.append("the server flooded its stderr; excess output was dropped")
-        if flood_warnings:
-            out["warnings"] = flood_warnings
-        return out
-    except (OSError, ValueError) as e:                                  # noqa: BLE001
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-    finally:
-        with contextlib.suppress(OSError):
-            proc.stdin.close()
-        stop_tree()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-
-def mcp_convert_docx_to_pdf(spec: dict, docx: Path, timeout: float = 300) -> dict:
-    """Convert one DOCX through the operator's docx-converter MCP tool.
-
-    The tool writes `<stem>.pdf` NEXT TO the file it is handed, so callers pass
-    a disposable copy and read-only inputs never change.
-    """
-    rep = mcp_stdio_tool_call(spec, DOCX_MCP_TOOL, {"docxPath": str(docx)}, timeout=timeout)
-    if not rep.get("ok"):
-        return rep
-    result = rep.get("result") or {}
-    if result.get("isError"):
-        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
-                        if isinstance(c, dict))
-        return {"ok": False, "error": f"the MCP tool reported an error: {text[:200]}"}
-    pdf = Path(docx).with_suffix(".pdf")
-    if not pdf.is_file() or pdf.stat().st_size == 0:
-        return {"ok": False,
-                "error": f"the MCP tool returned success but wrote no PDF next to {Path(docx).name}"}
-    return {"ok": True, "pdf": pdf}
-
-
-def docx_compare_mcp_spec() -> dict:
-    """The configured `docx-compare` MCP server entry, {} when it is unusable.
-
-    Being configured is not enough: the entry has to name a command that is
-    still on this machine (the same probe `mcp_server_configured` applies). An
-    empty dict sends the redline chain to its next backend and is reported in
-    the manifest, so a missing server is never mistaken for a failed compare.
-    """
-    if not mcp_server_configured(DOCX_COMPARE_MCP_SERVER):
-        return {}
-    spec = mcp_server_spec(DOCX_COMPARE_MCP_SERVER)
-    cmd = str(spec.get("command") or "")
-    if not cmd:
-        return {}
-    # `~` IS expanded here, like the sibling probe in `mcp_server_configured`:
-    # a home-relative command used to read as "not installed" and silently
-    # vanish from the redline chain.
-    present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
-               else bool(shutil.which(cmd)))
-    return spec if present else {}
-
-
-def mcp_compare_docx(spec: dict, base: Path, revised: Path, out: Path,
-                     timeout: float = 900) -> dict:
-    """Write a Word-native tracked-changes redline through the compare MCP tool.
-
-    The tool drives `docxcompare.sh` -> PowerShell -> `Word.Application
-    .CompareDocuments`; it is handed the real base/revised paths and an explicit
-    output path (`<pipeline-managed auxiliary>.docx`), never an input path as its
-    output. Success is "the tool answered AND `out` is a readable OOXML package"
-    -- the same bar every other redline backend is held to.
-    """
-    rep = mcp_stdio_tool_call(spec, DOCX_COMPARE_MCP_TOOL,
-                              {"originalPath": str(base), "revisedPath": str(revised),
-                               "outputPath": str(out)}, timeout=timeout)
-    if not rep.get("ok"):
-        return {"ok": False, "error": rep.get("error")}
-    result = rep.get("result") or {}
-    if result.get("isError"):
-        text = " ".join(str(c.get("text") or "") for c in result.get("content") or []
-                        if isinstance(c, dict))
-        return {"ok": False, "error": f"the MCP tool reported an error: {text[:300]}"}
-    if not out.is_file() or out.stat().st_size == 0:
-        return {"ok": False,
-                "error": f"the MCP tool returned success but wrote no output at {out}"}
-    return {"ok": True}
-
-
-def visual_renderer_choices() -> list:
-    """Every usable DOCX->PDF renderer, in the ORCHESTRATOR's own order.
-
-    The operator's docx-converter MCP tool comes FIRST (Microsoft Word through
-    PowerShell interop, the highest-fidelity renderer); `docx2pdf.sh` -- the
-    script that MCP tool drives internally, and the converter the agent prompts
-    tell an agent to run first -- is the fallback when the server is not
-    installed or cannot start, and LibreOffice is the last resort.
-
-    This is the orchestrator's render chain (venue-template renders, PDF
-    staging), not the agents' route order: the prompts put `docx2pdf.sh` first.
-    """
-    out = []
-    if mcp_server_configured(DOCX_MCP_SERVER):
-        spec = mcp_server_spec(DOCX_MCP_SERVER)
-        cmd = str(spec.get("command") or "")
-        present = (Path(os.path.expanduser(cmd)).exists() if cmd.startswith(("/", "~"))
-                   else bool(shutil.which(cmd)))
-        if cmd and present:
-            out.append((f"mcp:{DOCX_MCP_SERVER}", spec))
-    here = Path(__file__).resolve().parent
-    for cand in (here / "docx2pdf.sh", shutil.which("docx2pdf.sh")):
-        if cand and Path(cand).is_file() and os.access(str(cand), os.X_OK):
-            out.append(("word", Path(cand)))
-            break
-    for exe in ("soffice", "libreoffice"):
-        p = shutil.which(exe)
-        if p:
-            out.append(("libreoffice", Path(p)))
-            break
-    return out
-
-
-def visual_renderer_choice() -> tuple:
-    """(name, payload) for the BEST renderer: MCP first, then Word, then LibreOffice."""
-    choices = visual_renderer_choices()
-    return choices[0] if choices else ("none", None)
-
-
-def _pdf_page_count(pdf: Path) -> int:
-    exe = shutil.which("pdfinfo")
-    if exe:
-        try:
-            out = subprocess.run([exe, str(pdf)], capture_output=True, timeout=60).stdout
-            m = re.search(rb"^Pages:\s*(\d+)", out or b"", re.M)
-            if m:
-                return int(m.group(1))
-        except (OSError, subprocess.SubprocessError):
-            pass
-    return 0
-
-
-def _child_output(raw) -> str:
-    """A child process's stdout/stderr as text, never fatal on a non-UTF-8 locale.
-
-    The renderers this pipeline drives are Windows-interop shims; their
-    diagnostics arrive in the console's own code page, and decoding those as
-    strict UTF-8 must not turn a rendered PDF into a failed session.
-    """
-    if isinstance(raw, bytes):
-        return raw.decode("utf-8", "replace")
-    return raw or ""
-
-
-def _page_png_names(out_dir: Path, stem: str) -> list:
-    """The page PNGs pdftoppm wrote for `stem`, in PAGE order.
-
-    `stem` is matched literally (a stem like `Papers[1]` is not a glob
-    character class), and the trailing page number sorts numerically so
-    page-10 follows page-2.
-    """
-    def key(name: str):
-        m = re.search(r"-(\d+)\.png$", name)
-        return (int(m.group(1)) if m else 10 ** 9, name)
-    # EXACT `stem-<page>.png`: the old prefix test also kept another document's
-    # pages when `main.tex` and `main.docx` shared an output directory
-    # (`main-docx-1.png`), mixing two documents into one visual pass.
-    pat = re.compile(r"^" + re.escape(stem) + r"-\d+\.png$", re.I)
-    return sorted((p.name for p in Path(out_dir).iterdir()
-                   if p.is_file() and pat.match(p.name)), key=key)
-
-
-def _render_popen_kwargs() -> dict:
-    """Run the renderer in its own process group (timeout must kill the tree)."""
-    if os.name == "nt":
-        return {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
-    return {"start_new_session": True}
-
-
-def _kill_render_tree(proc) -> None:
-    """Kill a timed-out Word/LibreOffice renderer AND its grandchildren."""
-    if os.name == "nt":
-        with contextlib.suppress(OSError, subprocess.SubprocessError):
-            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                           capture_output=True, timeout=30)
-    else:
-        with contextlib.suppress(OSError, ProcessLookupError, PermissionError):
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    with contextlib.suppress(OSError):
-        proc.kill()
-
-
-def _run_render_subprocess(argv, timeout, cwd=None):
-    """`subprocess.run` with a timeout that kills the renderer's whole tree.
-
-    stdout/stderr go to TEMPORARY FILES and are read back only up to
-    MAX_TOOL_OUTPUT_BYTES: the renderer is driven by an untrusted package, so a
-    flood must fail the render instead of allocating without bound (F25).
-    """
-    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-        proc = subprocess.Popen(
-            [str(a) for a in argv], stdout=out_f, stderr=err_f, stdin=subprocess.DEVNULL,
-            cwd=cwd, **_render_popen_kwargs())
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            _kill_render_tree(proc)
-            with contextlib.suppress(subprocess.TimeoutExpired):
-                proc.wait(timeout=30)              # reap; never leave a zombie
-            raise
-        out_f.seek(0, os.SEEK_END)
-        err_f.seek(0, os.SEEK_END)
-        out_size, err_size = out_f.tell(), err_f.tell()
-        if out_size > MAX_TOOL_OUTPUT_BYTES or err_size > MAX_TOOL_OUTPUT_BYTES:
-            raise ToolOutputOverBudget(
-                f"renderer output over {MAX_TOOL_OUTPUT_BYTES} bytes "
-                f"(stdout={out_size}, stderr={err_size})")
-        out_f.seek(0)
-        err_f.seek(0)
-        out = out_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
-        err = err_f.read(MAX_TOOL_OUTPUT_BYTES + 1).decode("utf-8", "replace")
-    return subprocess.CompletedProcess(argv, proc.returncode, out, err)
-
-
-def _render_output_body_problem(path: Path) -> str:
-    """'' when a renderer's PDF carries content between header and trailer.
-
-    A signature-only stub (`%PDF-1.4\n%%EOF\n`) has both markers and no body;
-    it is not a render even though it is, structurally, a "complete signature".
-    """
-    try:
-        size = path.stat().st_size
-        # A bounded HEAD supplies the body, a bounded TAIL the trailer: a valid
-        # PDF over 4 MiB keeps its %%EOF at the end (F098).
-        limit = min(size, 4 * 1024 * 1024)
-        tail_limit = min(size, 64 * 1024)
-        with path.open("rb") as fh:
-            data = fh.read(limit)
-            if size > limit:
-                fh.seek(max(0, size - tail_limit)); tail = fh.read(tail_limit)
-            else:
-                tail = data
-    except OSError as e:
-        return f"{type(e).__name__}: {e}"
-    _nl = data.find(b"\n")
-    _after = data[_nl + 1:] if _nl >= 0 else b""
-    # For a small file `tail` IS `data`, so measure the trailer in `_after`.
-    _src = _after if size <= limit else tail
-    _eof = _src.rfind(b"%%EOF")
-    if _eof < 0:
-        return "no %%EOF trailer in the PDF body"
-    _before = _after[:_eof] if size <= limit else _after
-    if size > limit and not _before.strip():
-        _before = tail[:_eof]
-    if not _before.strip():
-        return "no PDF body between the %PDF- header and the %%EOF trailer"
-    return ""
-
-
-def pdf_signature_problem(path: Path) -> str:
-    """'' when `path` looks like a complete PDF, else the reason it does not.
-
-    A non-empty output file is not a render. `docx2pdf.sh` has always checked
-    the `%PDF-` header and the `%%EOF` trailer; the in-process renderer and the
-    persistent-PDF cache did not, so a converter that wrote one garbage byte
-    and exited 0 was recorded `ok`, and a later run reused the same bytes from
-    the cache (PR151-164). The trailer must be near the END, not merely
-    somewhere in the bytes: a truncated file whose text stream contains the
-    marker must not pass (the 2026-10-28 audit's F64 made the same distinction
-    for the shell converter).
-    """
-    try:
-        size = path.stat().st_size
-        if size <= 0:
-            return "the file is empty"
-        with path.open("rb") as fh:
-            head = fh.read(1024)
-            if not head.startswith(b"%PDF-"):
-                # The header is the FILE MAGIC at offset zero. `in the first
-                # 1024 bytes` accepted a text file with the marker somewhere
-                # near the top as a "PDF" (F-074).
-                return "no %PDF- header at the start of the file"
-            tail_len = min(2048, size)
-            fh.seek(-tail_len, os.SEEK_END)
-            if b"%%EOF" not in fh.read(tail_len):
-                return ("no %%EOF trailer in the last 2048 bytes "
-                        "(the file is truncated or not a PDF)")
-    except OSError as e:
-        return f"{type(e).__name__}: {e}"
-    return ""
-
-
-def render_docx_visual(docx: Path, out_dir: Path, renderer=None,
-                       timeout: float = 900, page_images: bool = True) -> dict:
-    """Render ONE DOCX to PDF + page PNGs under `out_dir`.
-
-    `renderer` pins ONE renderer (tests, retries); None tries the whole choice
-    list in order -- the docx-converter MCP tool first, then docx2pdf.sh, then
-    LibreOffice -- because pagination, fonts and headers/footers differ between
-    Word and LibreOffice. The renderer that actually produced the PDF, and any
-    lower-fidelity fallbacks, are recorded so the agents and the decision report
-    can state them.
-
-    `page_images=False` skips the page-PNG pass (the persistent PDF store of
-    `run_pdf_conversion()` needs the PDF only; the agents' visual passes keep
-    the default).
-    """
-    if renderer is None:
-        choices = visual_renderer_choices()
-        if not choices:
-            return {"ok": False, "renderer": "none",
-                    "error": "no DOCX->PDF renderer is installed (docx-converter MCP tool, "
-                             "docx2pdf.sh or LibreOffice)"}
-        failures = []
-        for cand in choices:
-            # The fallback loop must carry the caller's policy: dropping them
-            # here silently restored the 900 s default and re-enabled the page
-            # PNGs that `page_images=False` exists to skip.
-            res = render_docx_visual(docx, out_dir, cand, timeout=timeout,
-                                     page_images=page_images)
-            if res.get("ok"):
-                if failures:
-                    res["fallbacks"] = failures
-                return res
-            failures.append({"renderer": cand[0], "error": res.get("error")})
-        return {"ok": False, "renderer": choices[0][0], "attempts": failures,
-                "error": "no renderer produced a PDF: "
-                         + "; ".join(f"{f['renderer']}: {f['error']}" for f in failures)[:300]}
-    name, exe = renderer
-    out_dir.mkdir(parents=True, exist_ok=True)
-    if name == "none" or exe is None:
-        return {"ok": False, "renderer": "none", "error": "no DOCX->PDF renderer on PATH"}
-    tmp = Path(tempfile.mkdtemp(prefix="vrender_", dir=str(out_dir)))
-    try:
-        src = tmp / docx.name
-        shutil.copy2(docx, src)
-        proc = None
-        if name.startswith("mcp:"):
-            conv = mcp_convert_docx_to_pdf(exe, src, timeout=timeout)
-            if not conv.get("ok"):
-                return {"ok": False, "renderer": name, "error": conv.get("error")}
-            pdf = Path(conv["pdf"])
-        elif name == "word":
-            try:
-                proc = _run_render_subprocess([str(exe), str(src)], timeout=timeout,
-                                              cwd=str(tmp))
-            except ToolOutputOverBudget as exc:
-                return {"ok": False, "renderer": name, "error": str(exc)}
-            pdf = src.with_suffix(".pdf")
-        else:
-            profile = tmp / "lo_profile"
-            try:
-                proc = _run_render_subprocess(
-                    [str(exe), "--headless",
-                     f"-env:UserInstallation=file://{profile}",
-                     "--convert-to", "pdf", "--outdir", str(tmp), str(src)],
-                    timeout=timeout)
-            except ToolOutputOverBudget as exc:
-                return {"ok": False, "renderer": name, "error": str(exc)}
-            pdf = tmp / (src.stem + ".pdf")
-        if not pdf.is_file() or pdf.stat().st_size == 0:
-            detail = (_child_output(getattr(proc, "stderr", None))
-                      + _child_output(getattr(proc, "stdout", None))) \
-                .strip().replace("\n", " ")[:200]
-            return {"ok": False, "renderer": name,
-                    "error": f"the renderer produced no PDF: {detail}"}
-        # A non-empty file is not a render. Validate the signature BEFORE
-        # moving it into place (and before the page-image pass), so a broken
-        # converter cannot be recorded `ok` and cached for the next run.
-        _sig = pdf_signature_problem(pdf)
-        if _sig:
-            detail = (_child_output(getattr(proc, "stderr", None))
-                      + _child_output(getattr(proc, "stdout", None))) \
-                .strip().replace("\n", " ")[:200]
-            return {"ok": False, "renderer": name,
-                    "error": f"the renderer produced a non-PDF file ({_sig})"
-                             + (f": {detail}" if detail else "")}
-        # A 15-byte `%PDF-1.4\n%%EOF\n` passes the two SIGNATURE markers but
-        # renders nothing: it was recorded as `ok: True, pages: 0`, so a
-        # converter that wrote a header and a trailer satisfied the render gate
-        # (F31). A real render always writes content between them. The check is
-        # applied to the renderer's OUTPUT only; `pdf_signature_problem` keeps
-        # its documented signature contract for evidence/cache readers.
-        _body = _render_output_body_problem(pdf)
-        if _body:
-            detail = (_child_output(getattr(proc, "stderr", None))
-                      + _child_output(getattr(proc, "stdout", None))) \
-                .strip().replace("\n", " ")[:200]
-            return {"ok": False, "renderer": name,
-                    "error": f"the renderer produced a non-render ({_body})"
-                             + (f": {detail}" if detail else "")}
-        final_pdf = out_dir / (docx.stem + ".pdf")
-        shutil.move(str(pdf), str(final_pdf))
-        pages = _pdf_page_count(final_pdf)
-        pngs = []
-        warnings = []
-        if page_images and shutil.which("pdftoppm"):
-            prefix = out_dir / docx.stem
-            try:
-                subprocess.run(["pdftoppm", "-r", str(VISUAL_PAGE_DPI), "-png",
-                                str(final_pdf), str(prefix)],
-                               capture_output=True, timeout=600)
-            except (OSError, subprocess.SubprocessError) as e:      # noqa: BLE001
-                # The PDF has already been moved into place: a page-image
-                # timeout must not turn a successful render into a failure and
-                # send the chain to a lower-fidelity renderer.
-                warnings.append(f"page images not produced ({type(e).__name__}: {e})")
-            # Page numbers sort numerically (page-10 after page-2), and the
-            # stem is matched literally: a stem like `Papers[1]` made the old
-            # glob a character class and returned zero pages.
-            pngs = _page_png_names(out_dir, docx.stem)
-            pages = pages or len(pngs)
-        result = {"ok": True, "renderer": name, "pdf": final_pdf.name,
-                  "pages": pages or 0, "pngs": pngs}
-        if warnings:
-            result["warnings"] = warnings
-        return result
-    except (OSError, subprocess.SubprocessError) as e:                  # noqa: BLE001
-        return {"ok": False, "renderer": name, "error": f"{type(e).__name__}: {e}"}
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _cached_visual_render(cache: Path, choice: str) -> tuple:
@@ -3793,9 +3257,22 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
         r"next[\s-]+round|future[\s-]+round|later[\s-]+round|did\s+nothing|"
         r"nothing\s+was\s+done|no\s+action|will\s+be\s+(?:done|addressed|"
         r"re-?probed|checked)|not\s+addressed|left\s+undone|todo|tbd)\b")
+    def _line_around(blob: str, start: int, end: int) -> str:
+        """The WHOLE line the id occurs on.
+
+        A fixed +/-80-character window missed a status cell pushed past it by a
+        long enumeration/evidence cell: the row still said `pending` (the
+        proposal was never executed) and counted as re-probed (F087). The row
+        is the unit the status lives in, so the denial/pending test reads the
+        whole line.
+        """
+        s0 = blob.rfind("\n", 0, start) + 1
+        e0 = blob.find("\n", end)
+        return blob[s0:] if e0 < 0 else blob[s0:e0]
+
     _probe_hit = None
     for _m in _pid_re.finditer(probe_blob):
-        _window = probe_blob[max(0, _m.start() - 80):_m.end() + 80]
+        _window = _line_around(probe_blob, _m.start(), _m.end())
         if _denial_re.search(_window) or _pending_re.search(_window):
             continue          # "we did not re-probe M37" is not a re-probe
         _probe_hit = _m
@@ -3803,7 +3280,7 @@ def prior_proposal_dispositioned(pid: str, probe_blob: str, note_blob: str) -> b
     if _probe_hit is None:
         for m in re.finditer(r"(?<![A-Za-z0-9])" + re.escape(pid) + r"(?![A-Za-z0-9])",
                              note_blob):
-            window = note_blob[max(0, m.start() - 90):m.end() + 90]
+            window = _line_around(note_blob, m.start(), m.end())
             if re.search(r"\bprior\b", window.lower()) \
                     and not _denial_re.search(window) \
                     and not _pending_re.search(window):
@@ -4727,7 +4204,13 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                 if not str(f.get(key) or "").strip():
                     malformed.append(f"{fid}: no {key}")
             check_id = normalise_check_id(f.get("check"))
-            if not re.match(r"(?i)^(?:M(?:[1-9]|[12]\d|3[0-6])|J[1-5]|JF)$", check_id):
+            # Accept any adopted sweep id: the adoption machinery numbers NEW
+            # proposals from DISCOVERY_PROPOSAL_MIN (M37) and the review must
+            # then file their instances. The old M1-M36 cap made an adopted
+            # sweep's finding unfileable -- the review failed its contract or
+            # the reviewer suppressed/re-labelled the instance (F089). The
+            # proposal floor is unchanged (see parse_sweep_proposals).
+            if not re.match(r"(?i)^(?:M[1-9]\d*|J[1-5]|JF)$", check_id):
                 malformed.append(f"{fid}: check {f.get('check')!r} is not an M/J check id")
             if str(f.get("severity") or "").strip().lower() not in DISCOVERY_SEVERITIES:
                 malformed.append(f"{fid}: severity {f.get('severity')!r} is not one of "
@@ -6587,6 +6070,11 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
         # candidate, so a stage could create one and ship it unreported (F048).
         # Mirror the raw-data sibling: scan, drop, warn and FAIL.
         area = cand_dir / area_name
+        # Capture the fabricated area BEFORE removing it: an EMPTY directory (or
+        # one whose only entries were links) leaves `dropped` empty, and the old
+        # `if dropped:` reported nothing while deleting the invented input area
+        # (F088). The raw-data sibling fails on `dropped or fabricated_area`.
+        fabricated_area = area.is_symlink() or area.exists()
         dropped, failures = [], []
         if area.is_symlink() or (area.exists() and not area.is_dir()):
             try:
@@ -6626,12 +6114,13 @@ def enforce_readonly_feedback_area(ctx: Ctx, cand_dir: Path, warns: list,
                     pass
             with contextlib.suppress(OSError):
                 area.rmdir()
-        if dropped:
+        if dropped or fabricated_area:
+            _what = (f"{len(dropped)} entr(y/ies) under {area_name}/ were removed"
+                     if dropped else f"the fabricated {area_name}/ area was removed")
             warns.append(
-                f"READ-ONLY {label} review feedback: {len(dropped)} entr(y/ies) under "
-                f"{area_name}/ were removed -- the pristine original has NO feedback area, "
-                f"so the package may not create one (an input area is copied from the "
-                f"original, never authored)")
+                f"READ-ONLY {label} review feedback: {_what} -- the pristine original has "
+                f"NO feedback area, so the package may not create one (an input area is "
+                f"copied from the original, never authored)")
             failures.append(
                 f"{area_name}/ is not an input of this corpus (the pristine original has no "
                 f"{label} review-feedback area); the package may not create it")
@@ -7367,6 +6856,17 @@ COVER_LETTER_OK_CLOSE_RE = re.compile(
     r"clean\b|as[\s-]+is\b|accept(?:ed|able)?\b|keep\b|kept\b|fine\b|"
     r"no\s+(?:defect|issue)\b|unchanged\b|retain(?:ed)?\b)",
     re.I)
+# A free-form judge note may BEGIN with the rule id (`FMT-CL1 | OK -- ...`), and
+# the OK test is anchored at the start: without this normalization the natural
+# spelling never matched and the pipeline's own closure passed the judge gate
+# (F085).
+FMT_CL1_FREEFORM_LEAD_RE = re.compile(
+    r"(?i)^\s*[-*|>]?\s*(?:\|\s*)?FMT-CL1\b\s*(?:\||:|-|—|–)*\s*")
+# A line that records no consideration is not a disposition: the rule-id-first
+# spelling used to count as "considered" merely because the id appeared (F085).
+FMT_CL1_UNDISPOSED_RE = re.compile(
+    r"(?i)\b(?:not\s+(?:reviewed|considered|checked|examined|disposed)|"
+    r"no\s+consideration|nothing\s+(?:was\s+)?considered|n/?a)\b")
 
 
 def _split_table_cells(text: str) -> list:
@@ -7642,7 +7142,8 @@ _DISPOSITION_VERDICT_PREFIX_RE = re.compile(
     r"\s*[.!:,]?\s*(?:[—–-]+\s*)?")
 _DISPOSITION_FILLER_TAIL_RE = re.compile(
     r"(?i)^(?:x+|n/?a|none|nil|null|tbd|todo|yes|no|ok|okay|checked|done|"
-    r"pass|passed|tested|fine|good|clean|"
+    r"pass|passed|tested|fine|good|clean|unchanged|no\s+change|"
+    r"nothing\s+(?:to|was)\s+report(?:ed)?|"
     r"see(?:\s+(?:above|below|here|there|report|details?))?|"
     r"as\s+(?:discussed|above|before|noted|stated)|"
     r"unable\s+to\s+(?:check|verify|review|examine|inspect)|"
@@ -8083,6 +7584,15 @@ def judge_cover_letter_artifact_problems(sb: Path, target_rows: list) -> list:
     if not candidates and not undisposed:
         candidates = [ln.strip() for ln in raw.splitlines() if "FMT-CL1" in ln.upper()]
     for text in candidates:
+        text = FMT_CL1_FREEFORM_LEAD_RE.sub("", str(text or ""), count=1).strip()
+        if not text:
+            continue
+        if FMT_CL1_UNDISPOSED_RE.search(text):
+            problems.append(
+                f"{rel}: the FMT-CL1 line records no consideration of the target's cover "
+                f"letter (only a mention of the rule id): state whether the compared "
+                f"versions carry it and how it weighs in the formatting tier")
+            continue
         if not COVER_LETTER_OK_CLOSE_RE.match(text):
             continue
         if COVER_LETTER_OVERRIDE_CITE_RE.search(text) \
@@ -8267,6 +7777,43 @@ def review_seeded_row_pins(ctx: Ctx, base: Path) -> dict:
                       f"({type(e).__name__}: {e}); the M2 table's seeded rows are UNKNOWN, "
                       f"not clean"),
         })
+    # The PROVENANCE ledgers are seeded into `artifacts/` with the same
+    # `_evidence_artifact_table` shape (a final `disposition` column), so the
+    # per-row and partial-deletion gates apply to them too (F083). Their judged
+    # cells (`source`, `verification`) are NOT identity: the session fills them.
+    def _number_identity(r) -> list:
+        return [_seed_cell(v) for v in (r.get("document"), r.get("document_paragraph"),
+                                        r.get("number"), r.get("unit"))]
+
+    try:
+        mod = _format_module()
+        if mod is None:
+            raise RuntimeError("the format module is unavailable")
+        num_rows = [dict(r) for r in ((ev.get("numbers") or {}).get("rows") or [])]
+        docs = corpus_text_documents([(base, "", CORPUS_EXCLUDE_TOP)])
+        add("artifacts/M4_numbers.md", ["document", "paragraph", "number", "unit"],
+            num_rows, "M4", identity=_number_identity)
+        add("artifacts/NUMBERS_LEDGER.md", ["document", "paragraph", "number", "unit"],
+            num_rows, "NUMBERS_LEDGER", identity=_number_identity)
+        add("artifacts/IDENTIFIERS.md", ["document", "kind", "value"],
+            mod.identifier_rows(docs), "IDENTIFIERS",
+            identity=lambda r: [_seed_cell(v) for v in
+                                (r.get("document"), r.get("kind"), r.get("value"))])
+        add("artifacts/GENE_LEDGER.md", ["document", "symbol"],
+            [r for r in mod.gene_symbol_rows(docs) if r.get("verdict") == "found"],
+            "GENE_LEDGER",
+            identity=lambda r: [_seed_cell(v) for v in
+                                (r.get("document"), r.get("symbol"))])
+    except Exception as e:                                             # noqa: BLE001
+        for _rel, _label in (("artifacts/M4_numbers.md", "M4"),
+                             ("artifacts/NUMBERS_LEDGER.md", "NUMBERS_LEDGER"),
+                             ("artifacts/IDENTIFIERS.md", "IDENTIFIERS"),
+                             ("artifacts/GENE_LEDGER.md", "GENE_LEDGER")):
+            pins.setdefault(_rel, []).append({
+                "columns": [], "count": 0, "label": _label,
+                "error": (f"the {_label} seed could not be re-derived from base/ "
+                          f"({type(e).__name__}: {e}); its seeded rows are UNKNOWN, not clean"),
+            })
     return pins
 
 
@@ -8283,8 +7830,10 @@ def check_artifact_quality(ctx: Ctx, rec: dict, sb: Path, errs: list, warns: lis
     # Re-derive the M20 seed from the read-only base/ the review was given, not
     # from the session-writable scan beside it: deleting or emptying
     # `guided_review/work/FORMAT_SCAN.json` must not disable the seeded-row pin
-    # (R02). A scan that cannot run is UNKNOWN, never an empty seed.
-    m20_seed_rows = None
+    # (R02). A scan that cannot run is UNKNOWN, never a fallback to the sandbox
+    # copy: an EMPTY list is the sentinel that says "no trusted seed rows", so
+    # `artifact_quality_report` never reads the forged scan on a failure (F008).
+    m20_seed_rows = []
     m20_seed_error = ""
     base = sb / "base"
     if not base.is_dir():
@@ -8606,6 +8155,14 @@ REPAIR_EDITABLE_CELLS = ("disposition", "resolution", "verdict", "summary", "dec
 # the artifact-quality layer judges; `M1_acronyms.md` carries the M1b long-form
 # table, whose per-row disposition is what its own gate reads. Everything else
 # under guided_review/artifacts/ stays byte-identical.
+# The PROVENANCE ledgers the orchestrator seeds into `artifacts/` as decision
+# tables with a `disposition` column (`_evidence_artifact_table`): M4's number
+# ledger, the code-proved NUMBERS_LEDGER, the verified IDENTIFIERS and the
+# HGNC-resolved GENE_LEDGER. They were OUTSIDE this layer, so a review could
+# leave every disposition/source cell empty or delete the table outright and
+# still pass the artifact gate (F083).
+PROVENANCE_DECISION_ARTIFACTS = ("artifacts/M4_numbers.md", "artifacts/NUMBERS_LEDGER.md",
+                                 "artifacts/IDENTIFIERS.md", "artifacts/GENE_LEDGER.md")
 DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_words.md",
                       "artifacts/M19_length.md", "artifacts/M8_terms.md",
                       "artifacts/M24_concepts.md", "artifacts/GLOSSARY.md",
@@ -8617,7 +8174,8 @@ DECISION_ARTIFACTS = ("artifacts/M20_formatting.md", "artifacts/M18_caption_word
                       # table, because "the entry's DOI resolves to another work"
                       # is exactly the class no format check and no re-reading
                       # can see (see reference_integrity_rows).
-                      "artifacts/M2_references.md")
+                      "artifacts/M2_references.md",
+                      *PROVENANCE_DECISION_ARTIFACTS)
 REVIEW_REPAIR_TABLES = tuple(DECISION_ARTIFACTS) + ("artifacts/M1_acronyms.md",)
 # The skip list of the attempt archive is the same one: re-derivable input
 # corpora are verified by the postcheck's own input manifests, not here.

@@ -565,6 +565,18 @@ for i in "${!tool_names[@]}"; do
     # a snapshot and must survive (F060).
     for _stale in "${tool_path}"-[0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-*; do
         [ -e "$_stale" ] || continue
+        # The trailing `*` also matches an operator directory that merely
+        # STARTS with a date (`<tool>-2026-1122-notes`). Only new_version's own
+        # suffix -- a 7-hex commit, or the `nogit` fallback -- is a snapshot;
+        # everything else survives (F039).
+        _snap="${_stale#"${tool_path}"-}"
+        case "$_snap" in
+            [0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) ;;
+            [0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9]-nogit) ;;
+            *)
+                echo "kept a non-snapshot directory next to ${tool_path}: ${_stale}" >&2
+                continue ;;
+        esac
         rm -rf -- "$_stale"
     done
     cp -r -- "$tool_path" "${tool_path}-${new_version}"
@@ -823,6 +835,9 @@ if [ "$claude_enabled" = 1 ]; then
                 return 1
             fi
             chmod --reference="$cfg" "$target" 2>/dev/null || true
+            # Recorded so a failed replacement add can restore this copy
+            # instead of leaving the operator without the row (F038).
+            claude_config_backup_path="$target"
             echo "backed up: $cfg -> $target"
         }
         for i in "${!mcp_row_names[@]}"; do
@@ -848,7 +863,23 @@ if [ "$claude_enabled" = 1 ]; then
                         echo "error: could not remove the stale Claude Code MCP server $name" >&2
                         exit 1
                     fi
-                    "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"
+                    if ! "$claude_cli" mcp add --scope user "$name" -- "$command" "$script"; then
+                        # The old row was removed before its replacement was
+                        # added: restore the pre-change config instead of
+                        # leaving the operator without a working entry -- the
+                        # same recovery the Codex `stale` branch has (F124).
+                        # Without it `set -e` exited here and the backup was
+                        # never named or restored (F038).
+                        if [ -n "${claude_config_backup_path:-}" ] \
+                                && [ -f "$claude_config_backup_path" ]; then
+                            _restore_tmp="$HOME/.claude.json.restore.$$"
+                            if ( set -o noclobber; cat -- "$claude_config_backup_path" > "$_restore_tmp" ); then
+                                mv -f -- "$_restore_tmp" "$HOME/.claude.json"
+                                echo "error: restored $HOME/.claude.json from $claude_config_backup_path after a failed add" >&2
+                            fi
+                        fi
+                        exit 1
+                    fi
                     echo "repointed claude MCP server: $name -> $script"
                     ;;
                 *)

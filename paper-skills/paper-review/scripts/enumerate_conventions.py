@@ -363,12 +363,17 @@ def collect_candidates(docs, min_len=5, min_count=1):
     return cands
 
 
-def collect_hyphen_families(docs, min_len=5, min_count=2):
+def collect_hyphen_families(docs, min_len=5):
     """Surfaces that differ only by hyphens (`re-analyzed` / `reanalyzed`).
 
     Hyphenated AND plain tokens are collected under the hyphen-stripped key, so
     a corpus that mixes the two surfaces reports the family; a group whose
     surfaces are all hyphenated differently (or all plain) is not a family.
+
+    The criterion is "two distinct surfaces occur", NOT a per-surface frequency:
+    --min-count prunes the noisy candidate layer only. Gating here dropped the
+    documented `multi-omics` / `multiomics` case whenever one surface occurred
+    once, while the sweep promises every deviating occurrence is a row.
     """
     forms = defaultdict(Counter)
     examples = defaultdict(list)
@@ -387,8 +392,6 @@ def collect_hyphen_families(docs, min_len=5, min_count=2):
         if len(counter) < 2:
             continue
         if not any("-" in f for f in counter):
-            continue
-        if min(counter.values()) < min_count:
             continue
         out.append({"key": key, "forms": sorted(counter),
                     "counts": dict(counter),
@@ -410,6 +413,13 @@ def write_outputs(rows, candidates, hyphens, out_dir):
           "`OK — <the row's own bar>` / `unable — <reason>`). A variant that is "
           "not the authoritative form and is not a first use, a quoted title or a "
           "proper name is a finding (one per occurrence, never one per family).", "",
+          "**Recorded gap:** the reference list's own text is NOT enumerated. Lines "
+          "in a bibliography region (the lines under a References heading) are "
+          "blanked before collection, because a UK/US or hyphenation variant inside "
+          "a cited title or journal name is quoted text, not the author's prose, and "
+          "harmonizing it would edit a quotation (a reference-role file with no "
+          "reference heading is still read). That area is therefore a recorded gap "
+          "for this sweep, not a clean result.", "",
           "## Curated family occurrences", "",
           "| # | family | variant | document | line | excerpt | disposition |",
           "|---|---|---|---|---|---|---|"]
@@ -513,7 +523,7 @@ def main(argv=None):
     families = CURATED_FAMILIES + load_families(args.families)
     rows = collect_family_rows(docs, families)
     candidates = collect_candidates(docs, min_count=args.min_count)
-    hyphens = collect_hyphen_families(docs, min_count=args.min_count)
+    hyphens = collect_hyphen_families(docs)
     md, js, dec = write_outputs(rows, candidates, hyphens, out_dir)
     print("occurrence rows: %d (%d families)" % (len(rows), len({r["family"] for r in rows})))
     print("candidate families: %d; hyphen families: %d" % (len(candidates), len(hyphens)))

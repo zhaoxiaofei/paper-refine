@@ -51,10 +51,15 @@ FAILS = []
 #   PAPER_RENDER_SANDBOX=$PWD/tmp/render-sandbox/r1_guided_review \
 #     python .paper_test/render_stage_prompts.py .
 # and paste the hashes here in the SAME commit that changes the prompts.
+# The review/review_split_a/review_scoped hashes were regenerated with that
+# command when the four provenance decision tables (M4_numbers, NUMBERS_LEDGER,
+# IDENTIFIERS, GENE_LEDGER) joined the review's acceptance contract (F083): the
+# prompt's embedded pre-flight verdict block names each seeded table the
+# postcheck requires, so its text moved with the contract.
 GOLDEN = {
-    "review": "a532305f389c87a4",
-    "review_split_a": "0b1b1de59d9eaadf",
-    "review_scoped": "899b707d4c6f9c35",
+    "review": "57842f3dd9a3ca4b",
+    "review_split_a": "b44e54210f768755",
+    "review_scoped": "9b59d022e23ccf35",
     "cold_start_review": "8b78df5716c4577b",
     "audit": "80539d28d8a23856",
     "revise": "787089f0f95fa147",

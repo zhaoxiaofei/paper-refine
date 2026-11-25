@@ -416,8 +416,11 @@ def test_converter_safety_and_timeout_parity():
     budget_s = inspect.signature(nb.render_docx_visual).parameters["timeout"].default
     if m:
         cap_ms = int(m.group(1).replace("_", ""))
-        check("the MCP server cap is not below the orchestrator's render budget",
-              cap_ms >= int(budget_s) * 1000,
+        # F043: the server timer must fire BEFORE the caller's deadline so the
+        # server can run its own tree kill/diagnostics; a cap at or above the
+        # render budget let the client kill it first.
+        check("the MCP server cap is below the orchestrator's render budget",
+              cap_ms < int(budget_s) * 1000,
               f"server {cap_ms} ms vs render_docx_visual {budget_s} s")
     # The shell scripts bound their own Word call. The bound must sit at or
     # above the caller's budget (the converter and the redline chain both cap
@@ -464,7 +467,8 @@ def test_refusal_messages_evaluate():
         # would bind; the check is still about the template evaluating at all
         # (an adjacent-template TypeError throws before the server can refuse).
         js = ("const docxPath='/tmp/x.docx'; const abs='/tmp/x.docx'; "
-              "const spawnPath='/tmp/x.docx'; const error={message:'outside DOCX_MCP_ALLOWED_ROOTS'}; try { console.log(String("
+              "const spawnPath='/tmp/x.docx'; const finalPdf='/tmp/x.pdf'; "
+              "const error={message:'outside DOCX_MCP_ALLOWED_ROOTS'}; try { console.log(String("
               + expr + ")); } catch (e) { console.log('THROWS '+e.message); process.exit(3); }")
         proc = subprocess.run([node, "-e", js], capture_output=True, text=True)
         if proc.returncode != 0:

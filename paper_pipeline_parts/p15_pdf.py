@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 15/23 of the pipeline -- executed by the
+# Part 15/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -316,12 +316,24 @@ def convert_docx_to_pdf_persistent(docx: Path, out_dir: Path,
 
 
 def _pdf_previous_records(stored: dict) -> dict:
-    """{(label, rel): record} of a stored PDF manifest (for idempotent reuse)."""
+    """{(label, rel): record} of a stored PDF manifest (for idempotent reuse).
+
+    A hand-edited/partially-written manifest can carry any JSON shape under
+    `sets`/`documents`; the top-level guard alone still crashed the pass with
+    AttributeError. Entries of the wrong shape are unusable data, not a
+    reason to abort `track`/`decide` (F121).
+    """
     if not isinstance(stored, dict):
         return {}
     out = {}
-    for s in stored.get("sets") or []:
-        for d in s.get("documents") or []:
+    sets = stored.get("sets")
+    for s in sets if isinstance(sets, list) else []:
+        if not isinstance(s, dict):
+            continue
+        documents = s.get("documents")
+        for d in documents if isinstance(documents, list) else []:
+            if not isinstance(d, dict):
+                continue
             out[(str(s.get("label") or ""), str(d.get("rel") or ""))] = d
     return out
 
@@ -550,7 +562,9 @@ def run_pdf_conversion(ctx: Ctx, rounds=None, versions=None, include_original: b
     # Like the tracking manifest, this one ACCUMULATES: a `track --round 2`
     # refreshes round 2's rows and keeps every other recorded set (and its
     # up-to-date check, so an unchanged source is never re-rendered).
-    stored_sets = [s for s in (stored.get("sets") or []) if isinstance(s, dict)]
+    stored_value = stored.get("sets")
+    stored_sets = ([s for s in stored_value if isinstance(s, dict)]
+                   if isinstance(stored_value, list) else [])
     prev_sets = {str(s.get("label")): s for s in stored_sets}
     set_order = [str(s.get("label")) for s in stored_sets]
 

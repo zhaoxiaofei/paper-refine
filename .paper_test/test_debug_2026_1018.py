@@ -96,7 +96,7 @@ def test_visual_evidence_is_render_scratch() -> None:
     print("\n== C02: visual evidence is a rendering, not a shipped figure ==")
     root = scratch("paper_vis_1018_")
     (root / "figures").mkdir(parents=True)
-    (root / "figures" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    (root / "figures" / "fig1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
     art = root / "VISUAL_CHECK.md"
     art.write_text("Renderer: fake. All pages rendered and looked at; no defects found.\n",
                    encoding="utf-8")
@@ -109,7 +109,7 @@ def test_visual_evidence_is_render_scratch() -> None:
         check("C02 a package figure alone does NOT satisfy the gate",
               bool(errs), f"errs={errs[:1]}")
         (root / "work").mkdir()
-        (root / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        (root / "work" / "page-1.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82")
         errs, warns = [], []
         pp.check_visual_artifact(art, "the visual record", errs, warns,
                                  render_roots=[root])

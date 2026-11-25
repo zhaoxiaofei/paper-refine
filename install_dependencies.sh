@@ -322,7 +322,16 @@ fi
 if [ "$DO_NODE" = 1 ]; then
     step "Node dependencies for the shipped MCP servers"
     if ! have npm; then
-        fail_step "npm is not on PATH; cannot install the MCP server dependencies"
+        if [ "$DRY_RUN" = 1 ]; then
+            # --dry-run prints the plan and changes nothing; a missing npm is a
+            # NOTE about what a real run would need, not a failure -- the same
+            # rule the conda branch already follows for a missing conda
+            # (F147/F041). A plan-only run on a machine that has not installed
+            # Node yet used to exit 1.
+            note "plan: npm is not on PATH; a real run would fail here (install Node or pass --no-node)"
+        else
+            fail_step "npm is not on PATH; cannot install the MCP server dependencies"
+        fi
     else
         for server in mcp-docx-compare mcp-docx-converter; do
             if [ ! -f "$REPO_ROOT/$server/package.json" ]; then

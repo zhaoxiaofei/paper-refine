@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/23 of the pipeline -- executed by the
+# Part 08/24 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2278,8 +2278,12 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
         if err_total > len(err):
             dropped.append(f"stderr {err_total} chars -> {len(err)}")
         if dropped:
-            truncation = ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
-                          f"stream: " + ", ".join(dropped) + "]\n")
+            # APPEND, never assign: an attempt can both overflow the output cap
+            # and have its pipe held open by an escaped descendant, and
+            # overwriting the note above dropped the incomplete-pipe diagnosis
+            # (F010) -- the transcript then looked like an ordinary cap.
+            truncation += ("\n[OUTPUT TRUNCATED at " + f"{MAX_TOOL_OUTPUT_BYTES} chars per "
+                           f"stream: " + ", ".join(dropped) + "]\n")
     turn_cap_hit = bool(turn_counter is not None and turn_counter.hit)
     rec["turn_cap_hit"] = turn_cap_hit
     # Whether this stream carried a per-turn signal at all: a silent or

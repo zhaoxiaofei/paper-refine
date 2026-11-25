@@ -92,6 +92,27 @@ from agent_common.chat import completion_budget, finish_reason_error, message_te
 # attacker host and capture the key. Refuse every 3xx: the handler returns None,
 # urllib raises HTTPError, and `_request` reports it as a transport error.
 _NO_REDIRECT_OPENER = urllib.request.build_opener(rt._NoRedirectHandler)
+
+#: One provider response is read into memory; a misbehaving or hostile
+#: endpoint must not be able to grow that buffer without bound (F71).
+MAX_HTTP_RESPONSE_BYTES = 8 << 20
+
+
+def _read_capped(stream, limit: int = MAX_HTTP_RESPONSE_BYTES) -> bytes:
+    """Read at most ``limit`` bytes, or raise ValueError when the body is larger."""
+    chunks = []
+    total = 0
+    while True:
+        chunk = stream.read(min(1 << 16, limit + 1 - total))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+        if total > limit:
+            raise ValueError(
+                f"the provider response body is larger than {limit} bytes")
+    return b"".join(chunks)
+
 # These scripts are also loaded by absolute filename by the test runner.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 try:
@@ -285,7 +306,10 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
         return 0, None, f"invalid endpoint URL: {e}"
     try:
         with _NO_REDIRECT_OPENER.open(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", "replace")
+            try:
+                raw = _read_capped(resp).decode("utf-8", "replace")
+            except ValueError as cap_exc:
+                return 0, None, str(cap_exc)
             try:
                 return resp.status, json.loads(raw), ""
             except ValueError:
@@ -299,7 +323,9 @@ def _request(method: str, url: str, payload: dict = None, api_key: str = "",
                              f"to forward the request (and its credentials) to "
                              f"another URL")
         try:
-            raw = e.read().decode("utf-8", "replace")
+            raw = _read_capped(e).decode("utf-8", "replace")
+        except ValueError as read_exc:
+            return 0, None, str(read_exc)
         except (http.client.HTTPException, OSError) as read_exc:
             return 0, None, (f"could not read the HTTP {e.code} response body: "
                              f"{type(read_exc).__name__}: {read_exc}")
@@ -516,9 +542,10 @@ def codex_argv(cfg: dict, extra: list = None) -> list:
     """
     overrides = [
         'model_provider="qwen"',
-        f'model="{cfg["model"]}"',
-        f'model_providers.qwen.name="Qwen vLLM ({cfg["model"]})"',
-        f'model_providers.qwen.base_url="{cfg["base_url"]}"',
+        rt._codex_config("model", cfg["model"]),
+        rt._codex_config("model_providers.qwen.name",
+                         "Qwen vLLM (%s)" % cfg["model"]),
+        rt._codex_config("model_providers.qwen.base_url", cfg["base_url"]),
         'model_providers.qwen.env_key="PAPER_QWEN_API_KEY"',
         'model_providers.qwen.wire_api="responses"',
         # qwen3.8-27b is not in Codex's built-in catalog, so the provider must
@@ -617,6 +644,10 @@ def dsh_argv(cfg: dict) -> tuple:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write(dsh_patch_text(cfg))
+    except rt.ConfigError as exc:
+        # An operator-settable context/max-token combination is a clean
+        # configuration error, not a traceback out of main() (F67).
+        return [], {}, str(exc)
     except OSError as exc:
         return [], {}, f"could not write the DSH patch file: {exc}"
     env = dict(os.environ, DSH_HOME=home, PAPER_QWEN_API_KEY=cfg["api_key"])
@@ -787,7 +818,7 @@ def main(argv=None) -> int:
                    f"tool. Start vLLM with `--enable-auto-tool-choice "
                    f"--tool-call-parser <parser>` (and the model's tool template), "
                    f"or use `--harness chat` for text-only calls.")
-            if args.require_tools or cfg["check_tools"]:
+            if args.require_tools:
                 print(f"qwen: {msg}", file=sys.stderr)
                 return 2
             print(f"[qwen] WARNING: {msg}", file=sys.stderr)
