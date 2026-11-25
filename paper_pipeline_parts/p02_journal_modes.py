@@ -623,6 +623,16 @@ def _rtf_plain_text(raw: str) -> str:
                     out.append(raw[j])
                 i = j + 1
                 continue
+            if j < n and raw[j] == "*":
+                # `\*` marks an IGNORABLE destination: the rest of its group is
+                # skipped and the marker itself emits nothing. It is a control
+                # SYMBOL, not a control word, so the alphabetic scan below can
+                # never yield `word == "*"`; without this branch the marker
+                # leaked a literal `*` and an unknown destination's text
+                # (`{\*\bkmkstart x}`) was emitted as if it were reviewer prose.
+                skip = True
+                i = j + 1
+                continue
             if j < n and raw[j] == "'":
                 if not skip and j + 2 < n:
                     try:
@@ -647,7 +657,7 @@ def _rtf_plain_text(raw: str) -> str:
                     uc_skip = max(0, int(num))
                 except ValueError:
                     uc_skip = 1
-            elif word == "*" or word in _RTF_DESTINATION_GROUPS:
+            elif word in _RTF_DESTINATION_GROUPS:
                 skip = True
             elif word in ("par", "line", "sect", "page"):
                 if not skip:

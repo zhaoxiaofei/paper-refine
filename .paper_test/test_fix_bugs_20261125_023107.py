@@ -324,6 +324,18 @@ def check_f106() -> None:
     check("F106 .html yields the reviewer's prose",
           "methods are unclear" in t_htm and "Please expand." in t_htm
           and "<p>" not in t_htm and n_htm == "", f"{t_htm!r} {n_htm!r}")
+    # `\*` is an RTF control SYMBOL (an ignorable destination), not a control
+    # word. Word writes `{\*\generator ...}` into every file, and an unknown
+    # destination must not be emitted as prose: the marker is skipped and its
+    # group's text is not part of the reviewer's letter.
+    rtf2 = tmp / "letter2.rtf"
+    rtf2.write_bytes(b"{\\rtf1\\ansi{\\*\\generator Microsoft Word;}"
+                     b"{\\*\\bkmkstart hiddenmark}"
+                     b"Reviewer 3: The figures are illegible.\\par}")
+    t_rtf2, n_rtf2 = np.feedback_text_of(rtf2)
+    check("F106 an ignorable RTF destination is skipped, not emitted",
+          "figures are illegible" in t_rtf2 and "hiddenmark" not in t_rtf2
+          and "*" not in t_rtf2 and n_rtf2 == "", f"{t_rtf2!r} {n_rtf2!r}")
 
 
 def check_f067_f071() -> None:
