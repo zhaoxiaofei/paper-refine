@@ -35,6 +35,7 @@ it executes is a real Python file (each carries
 | `p23_postchecks_mcp.py` | the MCP stdio JSON-RPC client, the docx converter/comparer wrappers and the orchestrator's visual render chain (split from `p06` to keep every part under 10,000 lines) |
 | `p24_deliverable_audits.py` | the independent audit + one-pass repair of the two LLM journal deliverables that had no second reader: the generated concern ledger / `JF` finding list, and the response-to-reviewers letter + `response_map.json`; also the revision audit's concern-scoped prompt block |
 | `p25_write_quality.py` | mandatory independent audits, bounded repairs and exact-byte acceptance for response, conformity and venue-profile authors; final revision verification |
+| `p26_recovery.py` | shared five-tier diagnostic severity, recovery records and `--fail-tier`; writes `<resolved --root>/RECOVERY.md` and the incremental `.recovery/` journal (engine: `agent-common/agent_common/recovery.py`) |
 
 `ranking.py` and `decision_report.py` are **not** executed parts: the loader
 imports them on demand with `_load_pipeline_module` (`p02_journal_modes.py`

@@ -79,4 +79,114 @@ Rule 12. **`--execution-profile medium` is normatively equivalent to `high`: the
    * **Equivalence is tested, not asserted.** The suite carries the check for every stage prompt: every non-empty line of the `high` prompt is present in `medium` plus the paged file after those two permitted transformations (a join between two adjacent blocks in `high` is accepted only when both joined parts are present), the paged file invents no rule text (its only extra lines are the read-policy header, the stage label and section headings), the paged section order equals the pointer order, the fully expanded `medium` prompt (the `medium` text with each pointer replaced in place by the section it names) reproduces the `high` prompt's rule sequence — the same rules in the same relative order, with each paged section at its pointer's position — the profile-only blocks are the known constants plus the pointers, and the profile text carries no false run property and declares its subordination. A change that breaks the check is a defect in the change, not a test to update.
    * **What is not required, and what is not weakened.** Byte equality of the two prompts is NOT required: a pointer, a heading and the read policy are the profile's own text, and paging is the point. `high`'s byte-identity with the pre-profile pipeline stays a separate guarantee pinned by its goldens and by Rule 11's frozen copy. This rule states the normative half of Rule 8's PAGED/DROPPED paragraph -- paging is not a narrowing -- and adds the other half: a profile is not a licence to add a rule either.
 
+## Diagnostic severity, recovery and `--fail-tier`
+
+This is the diagnostic policy for every application warning, error and other
+diagnostic produced by `paper_pipeline.py`. It does not replace the role,
+audit, ranking or certification rules above; it governs what happens when a
+warning or error occurs while a command runs.
+
+### Tiers and codes
+
+Every diagnostic carries one of the five ordered tiers — `DEBUG` (0), `INFO`
+(1), `WARNING` (2), `ERROR` (3), `CRITICAL` (4) — a stable code and the affected
+operation, and renders as `TIER-<NAME>-<CODE>: <message>`
+(`TIER-ERROR-INPUT_UNREADABLE: Could not read the requested input.`). Severity
+describes impact, never recoverability: **every tier has an implemented
+recovery routine and no tier is inherently unrecoverable.** The catalogue and
+the manuscript-specific recovery actions live in
+`paper_pipeline_parts/p26_recovery.py` (`RECOVERY_CATEGORIES`); the taxonomy,
+record schema, bounded-retry helper, journal and markdown renderer are the
+shared `agent-common/agent_common/recovery.py` module, also used by
+`generic-debug-pipeline`. The module is a frozen asset: it is listed in
+`PIPELINE_REQUIRED_ASSET_FILES` and copied into every new root under Rule 11.
+
+### Failure policy
+
+`--fail-tier` accepts case-insensitive names or integer ranks 0-4 on the
+`paper_pipeline.py` executable and every subcommand (before or after the
+command name). Invalid values are an argparse usage error (exit 2); an
+explicit invalid value is never replaced by another threshold. The default is
+`CRITICAL`, which no diagnostic exceeds, so the default configuration always
+continues and every diagnostic follows recovery.
+
+The comparison is strict: `diagnostic_rank > configured_fail_tier_rank`.
+
+* Strictly above the threshold: emit and record the diagnostic, preserve the
+  available outputs and audit records, print the failure message (code,
+  severity, configured threshold, affected operation) and stop with exit
+  code 6.
+* At or below the threshold, including equality: invoke recovery and continue.
+* `--fail-tier CRITICAL` is the documented always-continue configuration.
+
+Evaluation happens when each diagnostic is emitted, including transient
+failures; it is not deferred until retries are exhausted, and severity is
+never downgraded to dodge the policy.
+
+### Recovery coverage
+
+Bounded retries, lenient/alternative input decoding, fallback outputs,
+skipping an affected item, clearly marked partial results, disabling an
+optional capability, preserving intermediate work, and a documented paused
+state are used. Every category records its attempt limit, fallback, effect on
+the manuscript outputs and behaviour after exhaustion. Exhaustion never
+terminates an always-continue run: the affected work is marked incomplete or
+blocked, completed rounds and pinned outputs are preserved, and independent
+work continues. When no work can proceed the run records a blocked/paused
+state without busy-looping. Skipped, substituted, omitted or incomplete
+manuscript content is labelled as such; a skipped integrity check is never
+reported as verified.
+
+An unexpected exception at the command boundary is recorded as a CRITICAL
+diagnostic with a recovery record (preserve intermediate work and the journal,
+mark the affected outputs incomplete, require human review), then reported;
+a `die()` refusal is recorded with its message as `COMMAND_REFUSED`; a
+command that completed but stopped on a non-certified verdict (for example
+decide exit 4/5) is recorded as `RUN_VERDICT`. `SAFETY_GUARD_TRIPPED` is
+reserved for an explicit safety guard.
+
+### Audit destination
+
+Each invocation's recovery records are written incrementally to
+`<resolved --root>/.recovery/recovery.jsonl`, with `<resolved --root>/.recovery/run.json`
+distinguishing an `in_progress` run from a finalized one. The human-readable
+report is:
+
+```
+<resolved --root>/RECOVERY.md
+```
+
+`--root` uses exactly the commands' own resolution (`Path(args.root).resolve()`).
+The report is placed directly in that root, never in `reports/` or a stage
+directory. When the root already exists the journal and report are written
+there from the start; `setup` binds after it creates the root. The root is
+never created merely to hold a report: a mistyped `--root` stays missing and
+the report goes to the documented fallback
+(`$PAPER_RECOVERY_FALLBACK_DIR`, then `~/.cache/paper-refine/recovery`, then a
+temporary directory), whose location
+is printed.
+
+Previous history is preserved: each run's section is delimited by
+`<!-- recovery-run:<id> -->` markers, a later run replaces only its own
+section, and a previous `IN PROGRESS` section becomes `INTERRUPTED`. Each
+section records the run identifier, timestamps, command, configuration
+(`--fail-tier`, root, exit status), status, a summary of outcomes, affected
+outputs, review needs and the detailed events. A run with no recovery states
+that explicitly; it never implies that every check ran. The report location is
+printed in the final console summary as `[recovery] report: <path>`.
+
+Read-only commands (`status`, `trend`, `agents`, `selfcheck`) create no
+session and write nothing into the root they inspect. Directory-creation and
+report-writing failures have their own recovery (`REPORT_WRITE_FAILED`,
+`ROOT_UNUSABLE`) and obey the same failure policy; pending records stay in the
+fallback and the location is reported.
+
+### Future changes
+
+Every new diagnostic and every new entry point must choose a tier, a stable
+code and a recovery routine from this policy, and must honour `--fail-tier`.
+A new diagnostic-driven `sys.exit`/`raise SystemExit` outside the shared policy
+is a bug. Recovery-result reporting must not recursively emit diagnostics or
+recover in an unbounded loop.
+
 Last rule. **On a contradiction, the earlier text wins.** If two rules contradict each other, the rule that appears first in this file — the lower number — prevails, and the later rule is read as narrowed to what the earlier one allows. If two sentences contradict each other — in one rule or in two — the sentence that appears first prevails, and the later sentence is read as narrowed to what the earlier one allows. A contradiction remains a defect in this file, to be repaired by editing; precedence is the default reading until the repair is made.

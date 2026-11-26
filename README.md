@@ -98,6 +98,10 @@ python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_roun
 #    pick one of the four modes):
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
         --revision-mode transfer --journal "Frontiers in Immunology"
+#    diagnostics: the default --fail-tier CRITICAL is always-continue and the
+#    recovery report is <root>/RECOVERY.md; this lower threshold stops on an
+#    ERROR after preserving its recovery record:
+python paper_pipeline.py run --root ./paper_rounds --fail-tier error
 #    ... or start a NEW submission: conform to the venue's template (or its
 #    guidelines -> academic convention) before round 1, with no feedback:
 python paper_pipeline.py setup --source /path/to/non_revised --root ./paper_rounds \
@@ -343,6 +347,7 @@ evidence pack.
 | `--no-wait` (`run`, manual mode) | print every currently-runnable prompt at once instead of waiting for each dependency |
 | `--require-clean-captions` (`decide`) | print the suggested-length caption report; kept for CLI compatibility — caption length is advisory, so it never exits non-zero (use exit 4/5 for real problems) |
 | `--skip-hash` (every command except `selfcheck` and `adopt-sweep`) | skip the integrity VERIFICATION passes for this invocation (digests are still recorded; every report says they were skipped) |
+| `--fail-tier TIER` (every command) | diagnostic failure policy: a case-insensitive tier name or rank 0-4. A diagnostic strictly above the tier stops the command after its recovery record is preserved (exit 6); at or below it recovery continues. Default `CRITICAL` = always-continue. Invalid values are a usage error. Recovery records are in `<resolved --root>/RECOVERY.md` |
 
 ## Exit codes
 
@@ -354,6 +359,93 @@ evidence pack.
 | 3 | a round is incomplete (progress saved; resume with `run`); with `--tolerate-fail` a stage that exhausted its retries and had a usable trial is a `TOLERATED_FAIL` warning and `run` exits 0 instead |
 | 4 | a valid stopping point that is not a certified answer: `decide --require-complete` on a provisional decision, or `redline` with failed renders (when a tool was used) |
 | 5 | `decide` found integrity problems, (with `--format-gate`) high-severity formatting problems, or (with `--require-ready`) package-level readiness findings |
+| 6 | a diagnostic was strictly above the configured `--fail-tier`; the recovery record and any available outputs were preserved before the deliberate stop |
+
+## Diagnostic severity, recovery and `--fail-tier`
+
+Warnings, errors and every other diagnostic follow one shared policy in both this repository and
+`generic-debug-pipeline`. Each diagnostic has one of five ordered tiers, a stable code and the
+affected operation, and renders as `TIER-<NAME>-<CODE>: <message>`:
+
+| Rank | Tier | Typical use |
+| --- | --- | --- |
+| 0 | `DEBUG` | fine-grained detail |
+| 1 | `INFO` | record-and-continue notes (skipped optional checks) |
+| 2 | `WARNING` | bounded retry, fallback, or an optional capability disabled |
+| 3 | `ERROR` | a requested operation failed; recovery states its consequence |
+| 4 | `CRITICAL` | unexpected exception or safety guard; preserve work and pause |
+
+Severity describes impact, never recoverability: **every tier has an implemented recovery routine
+and no tier is inherently unrecoverable.** Bounded retries, lenient or alternative inputs,
+fallback outputs, skipped items, clearly marked partial results, disabled optional capabilities,
+preserved intermediate work and a documented blocked/paused state are used. Exhausting recovery
+never terminates an always-continue run: completed rounds and pinned outputs are preserved, the
+affected work is marked incomplete or blocked, and independent work continues without
+busy-looping. Skipped, substituted, omitted or incomplete manuscript content is labelled as such;
+a skipped integrity check is never reported as verified.
+
+`--fail-tier` is accepted by the executable and every subcommand, before or after the command
+name. It takes case-insensitive names (`debug`/`info`/`warning`/`error`/`critical`) or integer
+ranks `0`-`4`. Invalid values are a usage error (exit 2) and are never replaced by another
+threshold. The default is `CRITICAL`; no diagnostic exceeds it, so the default configuration is
+`always-continue`. The comparison is strict:
+
+```
+diagnostic_rank > configured_fail_tier_rank
+```
+
+* **Above the threshold**: record the diagnostic and its recovery, preserve available outputs and
+  audit records, print a failure message naming the code, severity, threshold and affected
+  operation, and stop with exit code 6.
+* **At or below the threshold**, including equality: invoke recovery and continue.
+* `--fail-tier CRITICAL` is the explicit spelling of always-continue.
+
+For example, `--fail-tier WARNING` stops on `ERROR`/`CRITICAL`, `--fail-tier ERROR` stops only on
+`CRITICAL`, and the default never stops for a diagnostic. Thresholds are evaluated when each
+diagnostic is emitted, including transient failures, not after retries are exhausted.
+
+The diagnostic categories and their recovery routines are:
+
+| code | tier | recovery |
+| --- | --- | --- |
+| `CHECKS_SKIPPED` | INFO | record the skipped verification, mark the output as reported-only, continue |
+| `RUN_NOTE` | INFO | record and continue |
+| `PARTIAL_RESULT` | WARNING | keep the verified subset, mark the run/output `PARTIAL`, list omissions and review needs |
+| `RETRY_ATTEMPT` | WARNING | retry within the bounded budget; previous attempt artifacts are preserved |
+| `OPTIONAL_CAPABILITY_DISABLED` | WARNING | disable only the optional capability, record the limitation, continue |
+| `RETRY_EXHAUSTED` | ERROR | preserve all attempts, leave the round incomplete, continue only independent work |
+| `INPUT_UNREADABLE` | ERROR | retry through the lenient decoder; on exhaustion skip the input and record the omission |
+| `OUTPUT_WRITE_FAILED` | ERROR | retry the atomic write, then the documented fallback; keep the earlier output and mark this run's output incomplete |
+| `ROOT_UNUSABLE` | ERROR | never create/modify the root; write the report to the fallback and report its location |
+| `REPORT_WRITE_FAILED` | WARNING | retain the journal and write `RECOVERY.md` to the fallback; report the location |
+| `COMMAND_REFUSED` | ERROR | refuse the request, leave outputs unchanged, record the reason for review |
+| `RUN_VERDICT` | WARNING | the command wrote its outputs but stopped on a non-certified verdict (for example decide exit 4/5); keep the outputs and require a follow-up |
+| `UNEXPECTED_EXCEPTION` | CRITICAL | preserve intermediate work and the journal, mark outputs incomplete, require review |
+| `SAFETY_GUARD_TRIPPED` | CRITICAL | refuse the unsafe action, preserve existing outputs, pause for human intervention |
+
+### The recovery report: `<resolved --root>/RECOVERY.md`
+
+Recovery records are written incrementally to `<resolved --root>/.recovery/recovery.jsonl`;
+`<resolved --root>/.recovery/run.json` marks a run `in_progress` until it is finalized. The
+human-readable report is placed **directly in the output root** as
+`<resolved --root>/RECOVERY.md`. `--root` uses the commands' own resolution
+(`Path(args.root).resolve()`).
+
+The report preserves previous history: each run is a delimited section with its run id,
+timestamps, command, configuration (`--fail-tier`, root, exit status), status, a concise summary
+of outcomes, affected outputs, review needs and a detailed event list (what failed, recovery
+action and attempt count, fallback/substitutions/omissions, validation, remaining uncertainty).
+A later run adds its own section and leaves earlier ones intact; a section left `IN PROGRESS` by
+an interrupted run becomes `INTERRUPTED`. A run with no recovery says so explicitly, and that
+statement is not a claim that every check ran. The report location is printed in the final
+console summary as `[recovery] report: <path>`.
+
+A mistyped `--root` is never created just to hold a report. When the root is unavailable the
+report goes to the documented fallback (`$PAPER_RECOVERY_FALLBACK_DIR`, then
+`~/.cache/paper-refine/recovery`, then a temporary directory) and its
+location is printed. Read-only commands (`status`, `trend`, `agents`, `selfcheck`) create no
+recovery session and write nothing into the root they inspect. Directory-creation and
+report-writing failures have their own recovery and follow the same failure policy.
 
 ## Operational notes
 

@@ -511,6 +511,7 @@ PIPELINE_REQUIRED_PARTS = (
     "paper_pipeline_parts/p23_postchecks_mcp.py",
     "paper_pipeline_parts/p24_deliverable_audits.py",
     "paper_pipeline_parts/p25_write_quality.py",
+    "paper_pipeline_parts/p26_recovery.py",
     # The FORMATTER's ordered parts are a separate tree with the same
     # all-or-nothing requirement: `paper_docx_format.py` executes whatever
     # `p[0-9][0-9]_*.py` it finds and has no completeness check of its own, so a
@@ -535,6 +536,7 @@ PIPELINE_REQUIRED_ASSET_FILES = (
     "agent-common/agent_common/llm_policy.json",
     "agent-common/agent_common/model_catalog.json",
     "agent-common/agent_common/dsh_events.py",
+    "agent-common/agent_common/recovery.py",
     "paper_pipeline_parts/ranking.py",
     "paper_pipeline_parts/decision_report.py",
     MANUSCRIPT_WORDS_FILE,

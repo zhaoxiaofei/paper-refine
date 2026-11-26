@@ -819,6 +819,11 @@ DIRECTORY LAYOUT CREATED UNDER --root
                                     pipeline produced is ever deleted)
     reports/                        round*.json, decision.json,
                                     DECISION_REPORT.md, raw_scores.csv
+    RECOVERY.md                     per-run recovery records, history preserved
+                                    (diagnostics, recovery actions, omissions
+                                    and human-review needs; see --fail-tier)
+    .recovery/                      incremental recovery journal and run
+                                    status for the same records
     state.json                      crash-safe run/round registry
     pipeline_config.json            knobs as set at setup
 """

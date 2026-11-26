@@ -4640,8 +4640,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                       f"saved. Resume with `run --root {ctx.root}` or reset one run with "
                       f"`retry --run <ID>`.")
                 if _invocation_may_exit_zero(ctx, [1]):
+                    record_incomplete_round(
+                        ctx, [1], tolerated=True,
+                        detail="the invocation tolerated a failed first round trial",
+                    )
                     print(f"[run] {_tolerated_invocation_note(ctx, [1])}.")
                     return
+                record_incomplete_round(
+                    ctx, [1], detail="the first round did not finish after its bounded retries",
+                )
                 sys.exit(3)
         if only is not None:
             # The response letter/audit/repair run in the FINALIZATION phase, not
@@ -4668,8 +4675,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                   f"response/submission stage did not finish; re-run `run` (or "
                   f"`retry --run {rid_response(1)}`) to finish it.")
             if _invocation_may_exit_zero(ctx):
+                record_incomplete_round(
+                    ctx, [], tolerated=True,
+                    detail="the invocation tolerated a failed journal-finalization trial",
+                )
                 print(f"[run] {_tolerated_invocation_note(ctx)}.")
                 return
+            record_incomplete_round(
+                ctx, [], detail="the journal finalization did not finish",
+            )
             sys.exit(3)
         summarize(ctx)
         return
@@ -4718,9 +4732,17 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                   f"`run --root {ctx.root}` (a fresh invocation grants every failed run a "
                   f"fresh retry budget) or reset a single run with `retry --run <ID>`.")
             if _invocation_may_exit_zero(ctx, [r]):
+                record_incomplete_round(
+                    ctx, [r], tolerated=True,
+                    detail="the invocation tolerated a failed round %d trial" % r,
+                )
                 print(f"[run] {_tolerated_invocation_note(ctx, [r])}. "
                       f"Nothing after it was driven.")
                 break
+            record_incomplete_round(
+                ctx, [r],
+                detail="round %d did not finish after its bounded retries" % r,
+            )
             sys.exit(3)
         # C28: the pre-registered no-progress stop. A round whose champion is its
         # own base (A1) demonstrably improved nothing, and under this measurement
@@ -4786,8 +4808,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                 print(f"[run] the rounds are complete, but the journal finalization did not "
                       f"finish; re-run `run` (or `retry --run {rid_response(R)}`) to finish it.")
                 if _invocation_may_exit_zero(ctx):
+                    record_incomplete_round(
+                        ctx, [], tolerated=True,
+                        detail="the invocation tolerated a failed journal-finalization trial",
+                    )
                     print(f"[run] {_tolerated_invocation_note(ctx)}.")
                 else:
+                    record_incomplete_round(
+                        ctx, [], detail="the journal finalization did not finish",
+                    )
                     sys.exit(3)
         else:
             print(f"[run] journal mode {journal_mode_of(ctx)!r}: the response letter and the "
@@ -4864,8 +4893,12 @@ def summarize(ctx: Ctx) -> None:
         print("[summary] " + " | ".join(rlines))
 
 
-def cmd_run_decide(args) -> None:
+def cmd_run_decide(args) -> bool:
     """`run`, then `decide`, in series, honouring decide's flags.
+
+    Returns True only when the run phase completed every configured round (and,
+    when it ran, the decide phase was reached); a partial/paused run returns
+    False so the recovery report does not present it as a completed invocation.
 
     `run` holds the root lock for its whole phase and releases it when it
     returns; `decide` then takes the lock for its own writes (reports,
@@ -4886,15 +4919,16 @@ def cmd_run_decide(args) -> None:
         # it keeps the decide phase.
         print("[run-decide] --only selection: the decide phase is not started; run "
               "`decide` once the selected work is complete")
-        return
+        return bool(_complete)
     if not _complete:
         # A manual run PAUSES after printing its prompts; the run phase returned
         # without an error, but no round is complete. Deciding now wrote a
         # decision.json/readme for bytes no panel ever judged.
         print("[run-decide] the run is not complete (manual pause or pending rounds): the decide "
               "phase is not started. Resume with `run` and decide once every round is done.")
-        return
+        return False
     note = configure_hash_cache_for_command("decide", getattr(args, "root", None))
     if note:
         print(f"[run-decide] note: {note}")
     cmd_decide(args)
+    return True

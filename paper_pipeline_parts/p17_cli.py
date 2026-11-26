@@ -5,11 +5,16 @@
 # the single-file source.
 from __future__ import annotations
 
+import traceback
+
 # =====================================================================
 # CLI
 # =====================================================================
 
 USAGE_EXAMPLES = """usage:
+  (every command) [--fail-tier debug|info|warning|error|critical|0..4]
+          diagnostic stop threshold (default CRITICAL = always continue); the
+          recovery report is <resolved --root>/RECOVERY.md
   setup   --source <dir> [--root <dir>] [--rounds 3] [--judges 2] [--review-scope full,full,full]
           [--rewrites M] [--revises N] [--integrators MASK[,MASK…]]
           [--caption-limit N] [--venue ID] [--journal NAME] [--article-type ID]
@@ -564,11 +569,21 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"%(prog)s {VERSION}",
                    help="print the pipeline version and exit")
+    # Shared diagnostic failure policy. On the root parser the default is
+    # suppressed so the subcommand's default (CRITICAL) applies; an explicit
+    # value before the command name still wins.
+    p.add_argument("--fail-tier", type=recovery_fail_tier_arg,
+                   default=argparse.SUPPRESS, metavar="TIER",
+                   help=_shared.fail_tier_help()
+                   + " Accepted before or after the command name.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", default=DEFAULTS["root"],
                         help=f"pipeline root directory (default: {DEFAULTS['root']})")
+    common.add_argument("--fail-tier", type=recovery_fail_tier_arg,
+                        default=_shared.DEFAULT_FAIL_TIER, metavar="TIER",
+                        help=_shared.fail_tier_help())
     common.add_argument("--strict-venue", action="store_true",
                         help="refuse to run when the root's venue/journal configuration is "
                              "missing or inconsistent (default: report it and continue). An "
@@ -1338,6 +1353,9 @@ def build_parser() -> argparse.ArgumentParser:
                      help="the run id the marker must name (default: the sandbox's own name)")
     psc.add_argument("--round", type=int, default=0,
                      help="the round the marker must name (0 = do not check the round)")
+    psc.add_argument("--fail-tier", type=recovery_fail_tier_arg,
+                     default=_shared.DEFAULT_FAIL_TIER, metavar="TIER",
+                     help=_shared.fail_tier_help())
     psc.set_defaults(func=cmd_selfcheck)
 
     psw2 = sub.add_parser("adopt-sweep",
@@ -1352,6 +1370,9 @@ def build_parser() -> argparse.ArgumentParser:
                            "sweeps.md beside this script)")
     psw2.add_argument("--yes", action="store_true",
                       help="append the validated proposal(s); without it this is a dry run")
+    psw2.add_argument("--fail-tier", type=recovery_fail_tier_arg,
+                      default=_shared.DEFAULT_FAIL_TIER, metavar="TIER",
+                      help=_shared.fail_tier_help())
     psw2.set_defaults(func=cmd_adopt_sweep, root=None)
 
     pag = sub.add_parser("agents", parents=[common],
@@ -1759,14 +1780,161 @@ def main() -> None:
         # the JSON document of every `--json` command, so a consumer's json.load
         # failed on a valid flag combination (F020). stderr keeps it visible.
         print(f"[{args.cmd}] WARNING: {skip_note}", file=sys.stderr)
+    # Recovery session: one journal per invocation, one RECOVERY.md section
+    # in the resolved --root. Read-only commands intentionally get no session.
+    # `LAST_REFUSAL` is process-global; clear it so an embedded/repeated main()
+    # cannot attribute an earlier command's refusal to this one.
+    globals()["LAST_REFUSAL"] = None
     try:
-        args.func(args)
+        recovery_session = begin_recovery(args)
+    except Exception as exc:  # a recovery-start failure must not hide the command
+        print(
+            "[recovery] could not start the recovery journal: %s: %s"
+            % (type(exc).__name__, exc),
+            file=sys.stderr,
+        )
+        recovery_session = None
+    recovery_status = "in_progress"
+    recovery_code = None
+    try:
+        result = args.func(args)
+        # `run` returns True only when every configured round is complete; a
+        # False is an honest partial result, not a clean completion.
+        if result is False:
+            recovery_status = "partial (not every configured round is complete)"
+            already_recorded = bool(
+                recovery_session is not None
+                and any(
+                    item.code in ("PARTIAL_RESULT", "RETRY_EXHAUSTED")
+                    for item in recovery_session.controller.records
+                )
+            )
+            if recovery_session is not None and not already_recorded:
+                try:
+                    record_recovery(
+                        "PARTIAL_RESULT",
+                        "%s" % getattr(args, "cmd", "run"),
+                        "the run finished with one or more configured rounds incomplete",
+                        recovery_action="keep every completed round and its pinned outputs; "
+                        "record the unfinished rounds and resume them explicitly",
+                        outcome="degraded",
+                        omissions=["one or more configured rounds are not complete"],
+                        affected_outputs=[str(recovery_session.root)],
+                        validation="the completed rounds' own records are authoritative; this "
+                        "run did not validate the unfinished rounds",
+                        remaining_uncertainty="what the unfinished rounds would have produced",
+                        human_review=True,
+                        output_effects="the root contains every completed round's outputs; the "
+                        "manuscript is not the final answer for this configuration",
+                        failure="the run did not finish every configured round",
+                    )
+                except _shared.ThresholdExceeded as exc:
+                    print(f"failure: {exc}", file=sys.stderr)
+                    recovery_status = "terminated"
+                    recovery_code = exc.exit_code
+                    sys.exit(exc.exit_code)
+        else:
+            recovery_status = "completed"
+    except _shared.ThresholdExceeded as exc:
+        # emit() already persisted the diagnostic, its recovery record, and the
+        # in-progress report; this is the deliberate threshold stop.
+        print(
+            "failure: %s\nA lower --fail-tier deliberately stops the run; the default "
+            "CRITICAL continues through every diagnostic. Recovery records were preserved."
+            % exc,
+            file=sys.stderr,
+        )
+        recovery_status = "terminated"
+        recovery_code = exc.exit_code
+        sys.exit(exc.exit_code)
     except KeyboardInterrupt:
         # Ctrl-C is an operator action, not a crash. The owning command saves
         # its checkpoint before re-raising (see run_phase/drive_round), and the
         # signal handler has already terminated the agent process groups; exit
         # with the shell's interrupt status instead of a traceback.
+        recovery_status = "interrupted (operator)"
+        recovery_code = 130
         sys.exit(130)
+    except SystemExit as exc:
+        # A refusal surfaced through die() still carries a message; record it
+        # before the original exit status is preserved.
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        recovery_code = code
+        if code:
+            if code == 130:
+                # A signal path may call sys.exit(130) directly; that is an
+                # operator interrupt, not a diagnostic refusal.
+                recovery_status = "interrupted (operator)"
+                raise
+            refusal = globals().get("LAST_REFUSAL") or {}
+            if not refusal and code == 3:
+                # Exit 3 is the run's own "incomplete round" verdict; the
+                # incomplete-round recovery event was already recorded where
+                # the verdict was produced. Do not duplicate it as a refusal.
+                recovery_status = "failed"
+                raise
+            try:
+                if refusal.get("message"):
+                    note_command_refusal(refusal["message"], code)
+                elif code in (4, 5):
+                    # Decide/redline/track verdicts: the command finished and
+                    # wrote outputs, but the result is not certified.
+                    note_run_verdict(str(getattr(args, "cmd", "command")), code)
+                else:
+                    note_command_refusal(
+                        "the command stopped with exit status %s" % code, code
+                    )
+            except _shared.ThresholdExceeded as threshold:
+                print(f"failure: {threshold}", file=sys.stderr)
+                recovery_status = "terminated"
+                recovery_code = threshold.exit_code
+                raise SystemExit(threshold.exit_code)
+            except Exception:
+                pass
+            recovery_status = "blocked"
+        else:
+            recovery_status = "completed"
+        raise
+    except Exception as exc:
+        # Unexpected exception at the command boundary: preserve intermediate
+        # work and the journal, mark the run failed, and report the traceback.
+        try:
+            record_recovery(
+                "UNEXPECTED_EXCEPTION",
+                str(getattr(args, "cmd", "command")),
+                "unexpected %s: %s"
+                % (type(exc).__name__, _shared.redact_text(str(exc))),
+                recovery_action="preserve intermediate work and the incremental journal, "
+                "mark the affected stage and outputs incomplete, and require human review",
+                outcome="failed",
+                human_review=True,
+                affected_outputs=[str(recovery_session.root)] if recovery_session else [],
+                output_effects="the command stopped at this boundary; earlier outputs were "
+                "preserved and later work did not run",
+                failure="%s: %s"
+                % (type(exc).__name__, _shared.redact_text(str(exc))),
+            )
+        except _shared.ThresholdExceeded as threshold:
+            print(f"failure: {threshold}", file=sys.stderr)
+            recovery_status = "terminated"
+            recovery_code = threshold.exit_code
+            raise SystemExit(threshold.exit_code)
+        except Exception:
+            pass
+        recovery_status = "failed"
+        recovery_code = 1
+        traceback.print_exc()
+        raise
+    finally:
+        try:
+            finish_recovery(
+                recovery_status,
+                exit_code=recovery_code,
+                quiet=bool(getattr(args, "json", False)),
+            )
+        except Exception:
+            # Reporting must never replace the command's own result.
+            pass
 
 
 # --- trend/agents reporting views (moved here from p12 to keep every part

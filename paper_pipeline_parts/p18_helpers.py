@@ -2563,7 +2563,18 @@ def pid_alive(pid: int) -> bool:
     return True
 
 
+#: Set by die() and read by main(); initialized here so a direct call in a
+#: fresh module has a defined global rather than relying on p26's import order.
+LAST_REFUSAL = None
+
+
 def die(msg: str, code: int = 1):
+    # Keep the refusal message for the recovery journal: `sys.exit` alone
+    # carries no message, and a human reviewing a blocked run needs to know
+    # what was refused and why. The recovery part reads this global; it is a
+    # no-op when no session is configured.
+    global LAST_REFUSAL
+    LAST_REFUSAL = {"message": str(msg), "code": int(code)}
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(code)
 
