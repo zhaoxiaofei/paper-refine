@@ -621,17 +621,33 @@ def _track_one_entry(ctx: Ctx, entry: dict, *, out_key: str, r: int, vid: str,
                 print(f"  [track] {out_key}: {pair['cand_rel']} <- {token} {result}")
 
 
+def entry_unreadable_files(entry: dict) -> int:
+    """Unreadable base/candidate documents recorded as skipped, never compared.
+
+    `_track_one_entry` keeps them in `entry["skipped"]` (they have no
+    comparison row), so a preservation check that counted only
+    `entry["comparisons"]` reported success while no tracked copy existed
+    (F89-20261126). They are FAILURES for the stage hook's purpose.
+    """
+    return sum(1 for s in (entry or {}).get("skipped") or []
+               if isinstance(s, dict)
+               and str(s.get("reason") or "").startswith("unreadable trackable file"))
+
+
 def _close_tracking_entry(entry: dict) -> None:
     """Fill in the status line of one tracking entry."""
     written = sum(1 for c in entry["comparisons"] if c.get("ok") and c.get("tool"))
     fallbacks = sum(1 for c in entry["comparisons"] if c.get("ok") and not c.get("tool"))
     skipped = sum(1 for c in entry["comparisons"] if c.get("skipped"))
-    failed = sum(1 for c in entry["comparisons"] if not c.get("ok") and not c.get("skipped"))
+    unreadable = entry_unreadable_files(entry)
+    failed = (sum(1 for c in entry["comparisons"]
+                  if not c.get("ok") and not c.get("skipped")) + unreadable)
     entry["status"] = ((f"{written} tracked copy(ies) written"
                         + (f", {fallbacks} logging fallback(s)" if fallbacks else "")
                         + (f", {skipped} skipped (tool=none)" if skipped else "")
                         + (f", {failed} FAILED" if failed else ""))
-                       if entry["comparisons"] else "no trackable document pairs")
+                       if (entry["comparisons"] or unreadable)
+                       else "no trackable document pairs")
 
 
 def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "auto",
@@ -781,12 +797,18 @@ def run_difference_tracking(ctx: Ctx, rounds=None, versions=None, tool: str = "a
 
 
 def tracking_entry_counts(entry: dict) -> tuple:
-    """(tracked, fallbacks, skipped, failed) rows of one manifest entry."""
+    """(tracked, fallbacks, skipped, failed) rows of one manifest entry.
+
+    An unreadable base/candidate document is a FAILED preservation check: it
+    has no comparison row but no tracked copy exists either, so counting only
+    `comparisons` let `track_after_stage` report success (F89-20261126).
+    """
     rows = [c for c in (entry or {}).get("comparisons") or []]
     tracked = sum(1 for c in rows if c.get("ok") and c.get("tool"))
     fallbacks = sum(1 for c in rows if c.get("ok") and not c.get("tool"))
     skipped = sum(1 for c in rows if c.get("skipped"))
-    failed = sum(1 for c in rows if not c.get("ok") and not c.get("skipped"))
+    failed = (sum(1 for c in rows if not c.get("ok") and not c.get("skipped"))
+              + entry_unreadable_files(entry))
     return tracked, fallbacks, skipped, failed
 
 

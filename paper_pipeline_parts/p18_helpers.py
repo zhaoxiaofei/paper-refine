@@ -3605,11 +3605,18 @@ def _json_from_text(text: str, lenient: bool):
         # A short trailing EXAMPLE annotation does not make the value before it
         # a prose fragment: `{"a":1}\nNote: schema example is {…}` keeps the
         # document at the start (F30). Long arbitrary prose still disqualifies
-        # it (a document buried in text is ambiguous).
+        # it (a document buried in text is ambiguous) -- including a JSON
+        # fragment buried in a long preamble whose short tail merely says
+        # "sample" (F16-20261126): the lead prose is measured too, so the
+        # annotation exemption cannot rescue a value the surrounding prose
+        # dwarfs.
         _tail_note = tail if len(tail) < 120 else ""
+        _lead_prose = max(0, i - sum(
+            max(0, min(e, i) - s) for s, e, _o in found
+            if (s, e) != (i, end) and e <= i))
         _example_note = bool(re.search(
             r"(?i)(?:\b(?:example|schema|sample|for\s+instance)\b|"
-            r"\be\.g\.(?=\s|$))", _tail_note))
+            r"\be\.g\.(?=\s|$))", _tail_note)) and _lead_prose <= 120
         if not fenced and prose > 2 * json_len and not _example_note:
             rejected.append((i, end))
             continue
@@ -3661,6 +3668,127 @@ def _json_from_text(text: str, lenient: bool):
                 return best
             return None
     return best
+
+
+_BASIS_TOKEN_RE = re.compile(
+    r"(?<![\w./~-])((?:https?://|doi:)\S+|"
+    r"(?:~?/)?(?:[\w.~-]+/)+[\w.~-]+|"
+    r"[\w.~-]+\.[A-Za-z0-9]{1,8})(?::(\d+)(?:-(\d+))?)?")
+# A no-separator token can be prose rather than a path: `e.g.`/`i.e.` are
+# abbreviations, `3.12`/`v1.2` are version numbers, `Fig.3` is a cross
+# reference. None is an artifact, so resolving them made a mandatory gate
+# reject a correct basis (R07-20261126). A token with a path separator is
+# never skipped.
+_BASIS_NON_ARTIFACT_RE = re.compile(
+    r"(?i)(?:v?\d+(?:\.\d+)+|[a-z](?:\.[a-z])+|[a-z]{1,4}\.\d+)")
+
+
+def _basis_token_problem(token, start, end, sandbox, base_dir=None) -> str:
+    """Why one `clean -- basis:` path/line token does not resolve, or ""."""
+    raw = str(token or "").strip("`'\"()[].,;")
+    if not raw:
+        return ""
+    low = raw.lower()
+    if low.startswith(("http:", "https:", "doi:")):
+        return ""
+    if "/" not in raw and _BASIS_NON_ARTIFACT_RE.fullmatch(raw):
+        return ""
+    path_part = raw
+    if Path(path_part).is_absolute() or path_part.startswith("~"):
+        return f"{raw!r} is an absolute path outside the stage sandbox"
+    if ".." in Path(path_part).parts:
+        return f"{raw!r} escapes the stage sandbox"
+    roots = []
+    if base_dir is not None:
+        roots.append(Path(base_dir) / path_part)
+    roots += [Path(sandbox) / path_part,
+              Path(sandbox) / GUIDED_REVIEW_DIR / path_part,
+              Path(sandbox) / GUIDED_REVIEW_DIR / "artifacts" / path_part,
+              Path(sandbox) / "base" / path_part]
+    target = next((p for p in roots if p.is_file()), None)
+    if target is None:
+        return f"{raw!r} names no existing file in this sandbox"
+    if start:
+        text = read_text_bounded(target)
+        if text is None:
+            return f"{raw!r} names an unreadable/oversize file"
+        line_count = len(text.splitlines())
+        first, last = int(start), int(end or start)
+        if first < 1 or last < first or last > line_count:
+            return f"{raw!r} is outside {target.name} ({line_count} line(s))"
+    return ""
+
+
+def _coverage_basis_locator_problems(disp, detail, sandbox, base_dir=None,
+                                     strict: bool = False) -> list:
+    """Resolve a `clean -- basis:` path/line token against the stage sandbox.
+
+    The shape gates accepted `clean -- basis: guided_review/artifacts/
+    DOES_NOT_EXIST.md`, `/etc/passwd` or `main.md:99999`: the basis is the
+    artifact the session actually re-derived, so a fabricated or out-of-package
+    locator must not close a check (F88-20261126). ``strict`` resolves every
+    path-like token (the audit's own coverage table); the non-strict review
+    pass resolves the unambiguous ones (absolute, escaping, or `:line`) and
+    leaves a bare prose artifact name to the shape gate.
+    """
+    text = f"{disp or ''} {detail or ''}"
+    if not re.match(r"(?i)^\s*clean\b", str(disp or "").strip()):
+        return []
+    problems = []
+    for m in _BASIS_TOKEN_RE.finditer(text):
+        token = m.group(1)
+        has_line = m.group(2) is not None
+        if not strict and not has_line and not (
+                Path(token).is_absolute() or ".." in Path(token).parts):
+            continue
+        problem = _basis_token_problem(token, m.group(2), m.group(3),
+                                       sandbox, base_dir=base_dir)
+        if problem:
+            problems.append(problem)
+    return problems
+
+
+def _template_comparison_missing(docs, text) -> list:
+    """Templates the artifact fails to compare (name and/or page count).
+
+    The page count is part of the template's own comparison, not necessarily
+    the same source line: a compliant artifact may name `tpl.docx` on one line
+    and `3 pages` on the next. Read the surrounding block (blank-line
+    separated), still filtering a denial sentence (F103) -- the old code
+    searched only the name line and failed a valid two-line entry
+    (F76-20261126).
+    """
+    missing = []
+    _denial = re.compile(
+        r"(?i)\b(?:not|never|no|without)\b[^.;\n]{0,40}"
+        r"\b(?:compared|verified|checked|inspected|reviewed)\b")
+    _blocks = [b for b in re.split(r"\n[ \t]*\n", text or "")
+               if b and b.strip()]
+    for d in docs:
+        name = str(d.get("source") or "").lower()
+        pages = str(d.get("pages") or "")
+        # The artifact must COMPARE the template, not merely mention it inside
+        # a denial: `main.docx: 3 pages were NOT visually compared to the
+        # template` used to satisfy every substring test (F103). The denial is
+        # applied to the template's OWN line: one block often lists every
+        # template, so a denial for another template must not hide this one's
+        # positive line (R05-20261126).
+        blocks = [b for b in _blocks if name and name in b]
+        positive = [ln for b in blocks for ln in b.splitlines()
+                    if name and name in ln and not _denial.search(ln)]
+        if name and not positive:
+            missing.append(name)
+        elif pages:
+            # The page count need not share the name's line (F76), but it must
+            # not come from a line that denies the comparison (F103/R05).
+            counted = "\n".join(
+                ln for b in blocks for ln in b.splitlines()
+                if not _denial.search(ln))
+            if not re.search(
+                    rf"\b{re.escape(pages)}[\s-]+pages?\b",
+                    counted or (text or ""), re.I):
+                missing.append(f"{name} ({pages} page(s))")
+    return missing
 
 
 # ---- shared postcheck gate helpers (fix-bugs wave 1; moved here to keep
@@ -3715,10 +3843,22 @@ _REASON_GENERIC_WORDS = frozenset("""
 # `no problems found` / `no issues detected` are pure result closures: the
 # `found` token was the only substantive-looking word, but it names no
 # artifact or check. `examined, nothing found` stays a legitimate clean basis
-# (it states the work that was done; the `clean` contract spells it out).
+# (it states the work that was done; the `clean` contract spells it out), but a
+# bare `nothing found` states no work at all and is the same closure (F18-20261126).
+# The passive forms (`no problems were found`) and the `nothing ...` family were
+# accepted before because `found` alone was treated as substantive.
 _GENERIC_RESULT_PHRASE_RE = re.compile(
     r"(?i)\b(?:no|zero)\s+(?:problems?|issues?|errors?|defects?|findings?)\s+"
+    r"(?:(?:were|are|was|is|have\s+been|has\s+been)\s+)?"
+    r"(?:found|detected|seen|identified)\b"
+    r"|\bnothing\s+(?:(?:was|is|were|are)\s+)?"
     r"(?:found|detected|seen|identified)\b")
+# Work verbs that make `examined, nothing found` a real basis. They are in the
+# generic vocabulary for the all-words test, so the result-closure test reads
+# them explicitly before closing a `nothing ...` row.
+_RESULT_WORK_WORDS = frozenset(
+    "examined inspected checked reviewed scanned searched verified re-derived "
+    "rederived probed read compared".split())
 
 
 def _reason_is_generic_filler(text) -> bool:
@@ -3730,6 +3870,18 @@ def _reason_is_generic_filler(text) -> bool:
         # it examined; `no problems found in section 3` names section 3.
         rest = raw[:m.start()] + " " + raw[m.end():]
         rest_words = _REASON_GENERIC_WORD_RE.findall(rest.lower())
+        if re.match(r"(?i)^nothing\b", m.group(0)):
+            # `examined, nothing found` names the work; a bare `nothing found`
+            # (or a count token that only repeats the zero verdict) does not.
+            if any(w in _RESULT_WORK_WORDS for w in rest_words):
+                return False
+            # The `nothing ...` form gets the same named-object test as
+            # `no problems found ...`: `nothing found in section 3` / `nothing
+            # was found in base/main.md` is a real clean basis (R06-20261126).
+            # A bare count token only repeats the zero verdict (`0 findings;
+            # nothing found`), so digits do not name an object by themselves.
+            return not rest_words or all(
+                w in _REASON_GENERIC_WORDS or w.isdigit() for w in rest_words)
         if not rest_words or all(w in _REASON_GENERIC_WORDS for w in rest_words):
             return True
     words = _REASON_GENERIC_WORD_RE.findall(raw.lower())

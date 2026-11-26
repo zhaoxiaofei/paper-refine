@@ -183,6 +183,10 @@ AUDIT_JSON = """{
 def _audit_sandbox(root: Path, table: str) -> Path:
     sb = root / "r1_audit"
     (sb / "audit").mkdir(parents=True, exist_ok=True)
+    # `clean -- basis: work/x.md` must name a real artifact (F88); create the
+    # fixture evidence so the shape/coverage assertions are what is tested.
+    (sb / "work").mkdir(parents=True, exist_ok=True)
+    (sb / "work" / "x.md").write_text("checked\n", encoding="utf-8")
     (sb / "audit" / "audit.json").write_text(table, encoding="utf-8")
     (sb / "audit" / "AUDIT.md").write_text("# audit\n", encoding="utf-8")
     (sb / "_pipeline_done.json").write_text(

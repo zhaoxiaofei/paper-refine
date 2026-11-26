@@ -405,8 +405,38 @@ def _extglob_to_regex(pat: str):
             elif c == "?":
                 out.append("[^/]")
             elif text.startswith("@(", i):
-                j = text.index(")", i)
-                alts = [a for a in text[i + 2:j].split("|") if a]
+                # Find the group's OWN closing paren with a depth counter: the
+                # first `)` belongs to an inner `@(...)`, so `@(a@(b|c)|d)` was
+                # cut at the inner close and discarded (F77-20261126). The
+                # alternatives are split at depth 0 for the same reason.
+                depth, j = 0, i
+                while j < n:
+                    if text.startswith("@(", j):
+                        depth += 1
+                        j += 2
+                        continue
+                    if text[j] == ")" and depth:
+                        depth -= 1
+                        if depth == 0:
+                            break
+                    j += 1
+                if j >= n:
+                    raise ValueError("unterminated extglob")
+                body = text[i + 2:j]
+                alts, start, k, inner = [], 0, 0, 0
+                while k < len(body):
+                    if body.startswith("@(", k):
+                        inner += 1
+                        k += 2
+                        continue
+                    if body[k] == ")" and inner:
+                        inner -= 1
+                    elif body[k] == "|" and not inner:
+                        alts.append(body[start:k])
+                        start = k + 1
+                    k += 1
+                alts.append(body[start:])
+                alts = [a for a in alts if a]
                 if not alts:
                     raise ValueError("empty extglob")
                 out.append("(?:" + "|".join(_translate(a) for a in alts) + ")")

@@ -468,6 +468,10 @@ def c158() -> None:
     errs, warns = pp.judge_discovery_problems(sb, {"kind": "judge", "label_map": {"v1": 1}})
     check("C158 an id defined only on the other side warns",
           any("X-001" in w and "v1 side" in w for w in warns), str(warns)[:240])
+    # The counterpart (target) must dispose the SAME candidate clean for the
+    # pair to be decidable (F90-20261126): put the finding on v1 only, so this
+    # still tests the F212 own-side id resolution without an undecidable pair.
+    (dd / "target.md").write_text(rows(False), encoding="utf-8")
     (dd / "v1.md").write_text(rows(True), encoding="utf-8")
     errs, warns = pp.judge_discovery_problems(sb, {"kind": "judge", "label_map": {"v1": 1}})
     check("C158 an id defined on the row's own side passes",

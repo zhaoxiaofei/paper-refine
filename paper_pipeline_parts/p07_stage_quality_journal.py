@@ -590,15 +590,33 @@ def probe_audit_problems(sb: Path) -> list:
                 f"finding-tier rows -- a blanket 'no anomalies' is the same boilerplate this "
                 f"stage exists to audit"]
     errors = []
-    seen, verdictless, promoted = set(), [], []
+    seen, verdictless, promoted, unevidenced = set(), [], [], []
     for r in _discovery_rows(path):
         m = DISCOVERY_PROBE_ID_RE.search(_row_text(r))
         if not m:
             continue
         pid = m.group(0)
         seen.add(pid)
-        if not _probe_audit_verdict(r):
+        verdict = _probe_audit_verdict(r)
+        if not verdict:
             verdictless.append(pid)
+        elif verdict.strip("`*_~ ").lower().startswith(("needs-evidence", "needs evidence")):
+            # `needs-evidence` must say exactly what evidence the closure lacks.
+            # A bare verdict passed, so the probe audit could itself be the
+            # boilerplate closure it exists to attack (F95-20261126). The
+            # explicit evidence column OR the verdict's own tail may carry it.
+            tail = re.sub(r"(?i)^needs[-\s]+evidence\b", "",
+                          verdict.strip("`*_~ ")).strip(" :;,-")
+            cells = []
+            for k, v in r.items():
+                if re.search(r"(?i)\b(evidence|reason)\b", str(k or "")):
+                    cell = " ".join(str(v or "").split())
+                    if cell:
+                        cells.append(cell)
+            evidence = " ".join(x for x in ([tail] + cells) if x).strip()
+            if not (_audit_rederivation_named(evidence)
+                    and not _reason_is_generic_filler(evidence)):
+                unevidenced.append(pid)
         if re.search(r"\bpromoted\s+to\s+AU-", _row_text(r), re.I):
             promoted.append(pid)
     missing = [p for p in ids if p not in seen]
@@ -613,6 +631,11 @@ def probe_audit_problems(sb: Path) -> list:
             f"audit/PROBE_AUDIT.md row(s) {', '.join(verdictless[:6])} carry no verdict: state "
             f"`stands` (the reviewer's disposition is rule-specific and stands) or "
             f"`needs-evidence` (say what evidence the closure lacks)")
+    if unevidenced:
+        errors.append(
+            f"audit/PROBE_AUDIT.md row(s) {', '.join(unevidenced[:6])} say `needs-evidence` "
+            f"without naming the missing evidence: state exactly what the closure lacks "
+            f"(the location or artifact it does not show), not the bare verdict")
     if promoted:
         errors.append(
             f"audit/PROBE_AUDIT.md row(s) {', '.join(sorted(promoted)[:6])} use the retired "
@@ -649,7 +672,7 @@ def postcheck_audit(ctx: Ctx, rec: dict):
         problems = audit_artifact_problems(audit, frozen_ids,
                                            expected_round=rec.get("round"))
         problems += audit_drop_locator_problems(audit, sb / "base")
-        coverage_problems = audit_coverage_problems(audit)
+        coverage_problems = audit_coverage_problems(audit, frozen, sb=sb)
         problems += coverage_problems
         errs.extend(problems)
         if not problems:
@@ -2770,6 +2793,8 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
     # recorded, or a judge can borrow the other side's evidence for a defect it
     # never re-derived there (F212).
     defined = {}
+    candidate_rows = {}       # (side, candidate key) -> row evidence
+    x_candidate = {}          # (side, X id) -> candidate key
     for side in sides:
         p = dd / f"{side}.md"
         if not p.is_file():
@@ -2806,6 +2831,30 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                 and not re.search(
                     r"(?i)\b(?:no|not|without)\s+(?:new\s+|additional\s+|further\s+)?"
                     r"findings?\b", disp_cell)
+            # The candidate key is how the same class is paired across sides.
+            # The judge's contract says the SAME candidates are probed on every
+            # side, so the class/candidate cell is that key.
+            _key = ""
+            for _k, _v in r.items():
+                if re.match(r"(?i)^(class|candidate|seed|issue[ _-]?class)\b",
+                            str(_k or "").strip()):
+                    _key = " ".join(str(_v or "").split()).lower()
+                    break
+            if not _key:
+                _vals = list(r.values())
+                _key = " ".join(str(_vals[0] if _vals else "").split()).lower()
+            _side_key = _norm_opponent_label(side)
+            if _key:
+                candidate_rows[(_side_key, _key)] = {
+                    "disp": disp_cell, "text": text,
+                    "finding": _is_finding_row,
+                    "limitation": bool(re.search(
+                        r"(?i)\b(?:limitation|could\s+not\s+probe|not\s+readable|"
+                        r"not\s+applicable|unable|unknown)\b", disp_cell)),
+                    "clean_checked": bool(
+                        re.search(r"(?i)\bclean\b", disp_cell)
+                        and re.search(r"(?i)\bchecked\b", disp_cell)),
+                }
             if _is_finding_row:
                 # A finding row carries location, category (0-5), severity and
                 # a verbatim evidence quote (F038). A bare digit is not a
@@ -2853,6 +2902,8 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                                  f"than once (one row per candidate, ids unique within the file)")
                 ids_in_file.append(fid)
                 defined.setdefault(_norm_opponent_label(side), set()).add(fid)
+                if _key:
+                    x_candidate[(_norm_opponent_label(side), fid)] = _key
     # Every X-* id a ledger row cites must be a finding the pass recorded FOR
     # THAT ROW'S SIDE: `resolved` names the OPPONENT's defect and `introduced`
     # the TARGET's, and one file per side is the evidence the row cites. Resolving
@@ -2871,9 +2922,10 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                         continue
                     cid = _frozen_check_id(item.get("check"))
                     if DISCOVERY_X_ID_RE.match(cid):
-                        cited.add((row_side, cid))
+                        _counterpart = ("target" if kind == "resolved" else label)
+                        cited.add((row_side, cid, _counterpart))
     unknown = sorted(
-        f"{cid} ({row_side} side)" for row_side, cid in cited
+        f"{cid} ({row_side} side)" for row_side, cid, _cp in cited
         if cid not in defined.get(row_side, set()))
     if unknown:
         out_w.append(
@@ -2881,6 +2933,33 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
             f"own side never defines ({', '.join(unknown[:6])}): a `resolved` row cites the "
             f"opponent's finding and an `introduced` row the target's -- the file for that "
             f"side gives the evidence the row cites")
+    # BOTH SIDES MUST BE DECIDABLE. An absence row is only evidence when the
+    # side that does not carry the class probed the SAME candidate and disposed
+    # it `clean -- checked`. Only the per-file shape was checked, so a row
+    # could score an absence against an unprobed/limited counterpart
+    # (F90-20261126).
+    for row_side, cid, counterpart in sorted(cited):
+        if cid not in defined.get(row_side, set()):
+            continue
+        key = x_candidate.get((_norm_opponent_label(row_side), cid))
+        if not key:
+            out_w.append(
+                f"{JUDGE_DISCOVERY_DIR}/{row_side}.md finding {cid} carries no candidate "
+                f"key (the class/candidate cell), so the both-sides decisability rule "
+                f"cannot be checked")
+            continue
+        other = candidate_rows.get((_norm_opponent_label(counterpart), key))
+        if other is None:
+            out_e.append(
+                f"ledger row cites {cid} ({row_side}) for candidate {key!r}, but "
+                f"{JUDGE_DISCOVERY_DIR}/{counterpart}.md has no row for that candidate: "
+                f"the pair is undecidable and the row must not be scored")
+        elif other["finding"] or not other["clean_checked"] or other["limitation"]:
+            out_e.append(
+                f"ledger row cites {cid} ({row_side}) for candidate {key!r}, but the "
+                f"counterpart {JUDGE_DISCOVERY_DIR}/{counterpart}.md did not dispose the "
+                f"same candidate `clean -- checked` ({other['disp'][:80]!r}): the pair is "
+                f"undecidable and the row must not be scored")
     return out_e, out_w
 
 
@@ -4863,6 +4942,44 @@ def postcheck_feedback(ctx: Ctx, rec: dict):
     return (not errs), errs, warns, None
 
 
+def _base_location_problem(location, base_dir) -> str:
+    """Why an `already-addressed` `base/ file:where` locator does not resolve.
+
+    The reconciliation rule says the row must name the base/ location that
+    answers the concern, but the gate checked only that the string was
+    non-empty: an invented section passed and the concern left the revision
+    surface (F96-20261126). A file path is required; a `:line` range, when
+    present, must be inside that file.
+    """
+    loc = str(location or "").strip().strip("`'\"")
+    if not loc:
+        return "is empty"
+    rel = loc[5:] if loc.startswith("base/") else loc
+    m = re.match(r"([^\s:,;#()]+)(?::(\d+)(?:-(\d+))?)?", rel)
+    if m is None:
+        return "names no file"
+    path_part = m.group(1)
+    if Path(path_part).is_absolute() or ".." in Path(path_part).parts:
+        return "escapes base/"
+    base_real = Path(base_dir).resolve()
+    try:
+        target = (base_real / path_part).resolve()
+        target.relative_to(base_real)
+    except (OSError, RuntimeError, ValueError):
+        return "escapes base/"
+    if not target.is_file():
+        return f"names no file in base/ ({path_part})"
+    if m.group(2):
+        text = read_text_bounded(target)
+        if text is None:
+            return f"names an unreadable/oversize file in base/ ({path_part})"
+        start, end = int(m.group(2)), int(m.group(3) or m.group(2))
+        line_count = len(text.splitlines())
+        if start < 1 or end < start or end > line_count:
+            return (f"is outside base/{path_part} ({line_count} line(s))")
+    return ""
+
+
 def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) -> list:
     """Modes 1-2: the review reconciled EVERY concern of the decision letter.
 
@@ -4933,9 +5050,17 @@ def journal_review_coverage_problems(ctx: Ctx, rec: dict, sb: Path, fj: dict) ->
                         or str(f.get("concern") or "") != cid:
                     errs.append(f"reconciliation row {cid!r}: finding {fid!r} is not the JF "
                                 f"finding for this concern (check/concern mismatch)")
-        elif status == "already-addressed" and not str(row.get("location") or "").strip():
-            errs.append(f"reconciliation row {cid!r}: 'already-addressed' needs the base/ "
-                        f"location")
+        elif status == "already-addressed":
+            _loc = str(row.get("location") or "").strip()
+            if not _loc:
+                errs.append(f"reconciliation row {cid!r}: 'already-addressed' needs the "
+                            f"base/ location")
+            else:
+                _loc_problem = _base_location_problem(_loc, sb / "base")
+                if _loc_problem:
+                    errs.append(f"reconciliation row {cid!r}: the 'already-addressed' "
+                                f"location {_loc!r} {_loc_problem}; quote the base/ "
+                                f"file:where that answers the concern")
         elif status in ("manual", "not-applicable") and not _coverage_reason_named(
                 row.get("rationale")):
             # A one-character rationale ("x") discharged a manual/not-applicable
@@ -9003,8 +9128,11 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
                 _final_rec = {"id": f"{rid_response_repair(r)}_final",
                               "kind": "response", "round": int(r), "status": "running"}
                 try:
+                    # p24 already owns the response's ONE bounded repair; this
+                    # is the independent verification of those final bytes, not
+                    # a second repair pass (F06-20261126).
                     audit_write_output(response_dir, _final_rec, cmd, timeout,
-                                       output_rel="response")
+                                       output_rel="response", verify_only=True)
                 except (OSError, ValueError, TypeError) as exc:
                     print(f"[journal] the repaired response did not pass the independent "
                           f"write-quality audit: {str(exc)[:400]}")
@@ -9561,7 +9689,8 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
             # coverage table that this check called clean and the postcheck
             # then rejected 14 problems on -- the session had no way to see it
             # before writing the marker ("all requirements verified manually").
-            errs.extend(audit_coverage_problems(_audit))
+            errs.extend(audit_coverage_problems(
+                _audit, _frozen_review_findings(sb), sb=sb))
         if not (sb / "audit" / "AUDIT.md").is_file():
             warns.append("audit/AUDIT.md (the human-readable disposition record) is missing")
         errs.extend(probe_audit_problems(sb))

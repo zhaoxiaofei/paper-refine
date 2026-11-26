@@ -307,6 +307,13 @@ raise SystemExit(0 if doc.strip() else 1)'         "$OUTPUT_TMP" 2>/dev/null; th
     rm -f -- "$OUTPUT_TMP"
     exit 1
 fi
+# Re-check the destination immediately before the rename: `mv` follows a
+# destination that is a symlink to a directory and moves the temp INSIDE
+# it, returning success while the expected redline is absent (F52-20261126).
+if [[ -L "$OUTPUT" || ( -e "$OUTPUT" && ! -f "$OUTPUT" ) ]]; then
+    echo "Error: refusing to replace a symlinked/non-regular destination: $OUTPUT" >&2
+    exit 1
+fi
 mv -f -- "$OUTPUT_TMP" "$OUTPUT"
 
 echo "Redline written: $OUTPUT"

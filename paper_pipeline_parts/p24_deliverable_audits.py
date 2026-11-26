@@ -163,10 +163,28 @@ def _concern_names_llm(sb: Path, row) -> bool:
     llm_dir = sb / "feedback" / "llm" / "files"
     llm_names = ([p.name for p in sorted(llm_dir.iterdir())
                   if p.is_file() and not p.is_symlink()] if llm_dir.is_dir() else [])
+    human_names = _staged_human_names(sb)
     srcs = [t.strip() for t in re.split(r"\s*;\s*|\s+\+\s+",
                                           str((row or {}).get("source") or ""))
             if t.strip()]
-    return any(_name_matches(tok, llm_names) for tok in srcs)
+    llm_exact = {str(n).lower() for n in llm_names}
+    for tok in srcs:
+        if not _name_matches(tok, llm_names):
+            continue
+        # A bare basename/stem that also names a staged HUMAN file is
+        # ambiguous, not evidence of an LLM row: the flattened variant set
+        # reduced `human__editor.txt` and `llm__editor.txt` to the same
+        # `editor.txt`, so a human row bypassed the human-verbatim gate (F41).
+        # Only a stream-qualified spelling or the exact staged LLM name closes
+        # the row as LLM-containing.
+        low = tok.lower()
+        if _name_matches(tok, human_names) and not (
+                low in llm_exact
+                or low.startswith(("llm/", "llm_", "llm-"))
+                or low.startswith(LLM_FEEDBACK_DIR.lower() + "/")):
+            continue
+        return True
+    return False
 
 
 def response_comment_human_verbatim(ctx, sb: Path, row, comment: str) -> bool:
@@ -1057,6 +1075,25 @@ def materialize_response_draft(ctx: Ctx, r: int) -> dict:
     return rec
 
 
+# First-person perfect/past and passive completed-work claims. The draft is a
+# PLAN written BEFORE the revision, so "we have added ..." is a final claim the
+# prompt forbids; only `**Changes:**` lines were checked, so the same claim in
+# the `**Response:**` prose passed (F42-20261126).
+_RESPONSE_COMPLETED_CLAIM_RE = re.compile(
+    r"(?i)\b(?:we|the\s+authors?)\s+"
+    r"(?:(?:have|has|had)\s+(?:already\s+)?|(?:already\s+))?"
+    r"(?:added|changed|revised|rewritten|rewrote|removed|deleted|replaced|updated|"
+    r"corrected|fixed|implemented|expanded|shortened|moved|restructured|"
+    r"re-?analys[ei]d|re-?ran)\b"
+    r"|\b(?:has|have|had)\s+been\s+(?:added|changed|revised|rewritten|removed|deleted|"
+    r"replaced|updated|corrected|fixed|implemented)\b")
+
+
+def response_completed_claim(text):
+    """The completed-work claim in a draft answer, or None."""
+    return _RESPONSE_COMPLETED_CLAIM_RE.search(str(text or ""))
+
+
 def response_planned_change_paths(letter: str) -> dict:
     """{concern id: [path or None for 'none']} from `**Planned changes:**` lines.
 
@@ -1113,6 +1150,13 @@ def postcheck_response_draft(ctx: Ctx, rec: dict):
     comments = response_comment_quotes(letter)
     answers = response_answers(letter)
     planned = response_planned_change_paths(letter)
+    for cid, answer in answers.items():
+        _claim = response_completed_claim(answer)
+        if _claim:
+            errs.append(f"response draft {cid!r}: the **Response:** prose claims completed "
+                        f"work ({_claim.group(0)!r}); this letter is written BEFORE the "
+                        f"revision -- state the intended answer/planned change, not a final "
+                        f"claim")
     if letter and response_letter_change_paths(letter):
         errs.append("the draft letter carries a `**Changes:**` claim: this is written "
                     "BEFORE the revision; use `**Planned changes:**` and keep the map's "
@@ -1574,6 +1618,104 @@ def response_repair_ledger_problems(sb: Path, audit, ledger_ids) -> list:
     return errs
 
 
+def _response_letter_parts(letter: str):
+    """(header, {concern id: [block, ...]}) from a response letter.
+
+    A `## <id>` line inside a fenced code sample is CONTENT, not a concern
+    heading, and every block keeps its fenced bytes. The repair bound below
+    compares the FULL block: the old helper deleted fenced content from both
+    sides, so a changed command/sample in a row the ledger did not mark
+    `corrected` was invisible (R04-20261126).
+    """
+    text = str(letter or "")
+    boundaries = []
+    fence = None
+    for lm in re.finditer(r"(?m)^.*$", text):
+        line = lm.group(0)
+        m = re.match(r"[ \t]*(`{3,}|~{3,})", line)
+        if fence is None:
+            if m:
+                fence = m.group(1)
+            else:
+                hm = re.match(r"##\s+", line)
+                if hm:
+                    # Keep the `## <id>` payload: the block starts right after
+                    # the `## ` prefix, exactly as the old re.split did.
+                    boundaries.append((lm.start(), lm.start() + hm.end()))
+        else:
+            close = re.fullmatch(r"[ \t]*(`{3,}|~{3,})[ \t]*", line)
+            if (close and close.group(1)[0] == fence[0]
+                    and len(close.group(1)) >= len(fence)):
+                fence = None
+    header = (text[:boundaries[0][0]] if boundaries else text).strip()
+    blocks = {}
+    for i, (_start, body_start) in enumerate(boundaries):
+        end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(text)
+        part = text[body_start:end].strip()
+        m = re.match(r"([A-Za-z0-9_.\-]+)", part)
+        if m is None:
+            continue
+        blocks.setdefault(m.group(1), []).append(part)
+    return header, blocks
+
+
+def _response_map_doc(path: Path):
+    data = read_json(path, revive=False, lenient=True)
+    if not isinstance(data, dict):
+        return {}, {}
+    rows = {}
+    for row in data.get("rows") or []:
+        if isinstance(row, dict):
+            rows[str(row.get("id") or "")] = row
+    meta = {k: v for k, v in data.items() if k != "rows"}
+    return meta, rows
+
+
+def response_repair_scope_problems(sb: Path, ledger_rows) -> list:
+    """Changed response bytes must belong to a `corrected` repair row.
+
+    The old postcheck compared `response/` to `response_prerepair/` only when
+    NO row was marked `corrected`, so one corrected row licensed any rewrite of
+    any other concern block, including a new claim (F01-20261126). The repair is
+    bounded: compare every block and map row, and require each difference to be
+    a row the ledger recorded as corrected.
+    """
+    pre = sb / "response_prerepair"
+    if not pre.is_dir():
+        return []
+    corrected = {str(r.get("id") or "") for r in (ledger_rows or [])
+                 if isinstance(r, dict)
+                 and str(r.get("action") or "") == "corrected"}
+    problems = []
+    before_md = read_text_bounded(pre / "RESPONSE_TO_REVIEWERS.md") or ""
+    after_md = read_text_bounded(sb / "response" / "RESPONSE_TO_REVIEWERS.md") or ""
+    before_head, before_blocks = _response_letter_parts(before_md)
+    after_head, after_blocks = _response_letter_parts(after_md)
+    if before_head != after_head:
+        problems.append("the repaired response letter changed text outside its concern "
+                        "blocks: a bounded repair may edit only the rows the audit confirmed")
+    for cid in sorted(set(before_blocks) | set(after_blocks)):
+        before = "\n".join(before_blocks.get(cid) or [])
+        after = "\n".join(after_blocks.get(cid) or [])
+        if before == after:
+            continue
+        if cid not in corrected:
+            problems.append(f"the repaired response letter changed concern block {cid!r}, "
+                            f"but the repair ledger does not record that row as `corrected`: "
+                            f"a bounded repair may not rewrite another row")
+    before_meta, before_rows = _response_map_doc(pre / "response_map.json")
+    after_meta, after_rows = _response_map_doc(sb / "response" / "response_map.json")
+    if before_meta != after_meta:
+        problems.append("the repaired response map changed fields outside its rows: a "
+                        "bounded repair may edit only the rows the audit confirmed")
+    for cid in sorted(set(before_rows) | set(after_rows)):
+        if before_rows.get(cid) != after_rows.get(cid) and cid not in corrected:
+            problems.append(f"the repaired response map changed row {cid!r}, but the "
+                            f"repair ledger does not record that row as `corrected`: a "
+                            f"bounded repair may not rewrite another row")
+    return problems
+
+
 def postcheck_response_repair(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     errs, warns = [], []
@@ -1613,6 +1755,9 @@ def postcheck_response_repair(ctx: Ctx, rec: dict):
                 errs.append("the response repair ledger records no correction, but response/ "
                             "was changed: a no-change/rejected run must leave the deliverable "
                             "byte-identical")
+        # Per-block/map-row bounding: a corrected row licenses only ITS OWN
+        # change, never a rewrite of another concern (F01-20261126).
+        errs.extend(response_repair_scope_problems(sb, _rows))
     else:
         errs.append("the response repair cannot find the audit it consumed")
     if not (sb / RESPONSE_REPAIR_LOG_REL).is_file():

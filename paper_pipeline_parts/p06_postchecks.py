@@ -3022,26 +3022,7 @@ def check_visual_artifact(path: Path, label: str, errs: list, warns: list,
                         f"comparison did not happen. Re-render it, or state explicitly "
                         f"that the template was NOT visually verified and hand it to the "
                         f"author")
-                missing = []
-                for d in docs:
-                    name = str(d.get("source") or "").lower()
-                    pages = str(d.get("pages") or "")
-                    # The artifact must COMPARE the template, not merely mention
-                    # it inside a denial: `main.docx: 3 pages were NOT visually
-                    # compared to the template` used to satisfy every substring
-                    # test (F103).
-                    name_lines = [ln for ln in text.splitlines() if name and name in ln]
-                    positive = [ln for ln in name_lines
-                                if not re.search(
-                                    r"(?i)\b(?:not|never|no|without)\b[^.;\n]{0,40}"
-                                    r"\b(?:compared|verified|checked|inspected|reviewed)\b",
-                                    ln)]
-                    if name and not positive:
-                        missing.append(name)
-                    elif pages and not any(re.search(
-                            rf"\b{re.escape(pages)}[\s-]+pages?\b", ln, re.I)
-                            for ln in (positive or [text])):
-                        missing.append(f"{name} ({pages} page(s))")
+                missing = _template_comparison_missing(docs, text)
                 if "template" not in text:
                     missing.append("a template-comparison section")
                 if missing:
@@ -4500,6 +4481,20 @@ def check_review_contract(ctx: Ctx, sb: Path, fj, errs: list, warns: list,
                     errs.append(f"{FINDINGS_REL} coverage row {_cid!r} names basis "
                                 f"{_named!r}, which does not resolve to a file in this "
                                 f"sandbox")
+    # 3d-bis. An absolute/escaping or `file:line` basis must resolve under the
+    # stage sandbox too: `/etc/passwd` and `main.md:99999` are not the artifact
+    # the reviewer re-derived (F88-20261126). A bare prose artifact name stays
+    # with the shape gate; path-qualified artifact/ paths are 3d's job.
+    if isinstance(coverage, list):
+        for _cid in sorted(seen_rows):
+            if in_scope and _cid not in in_scope:
+                continue
+            _row = seen_rows.get(_cid) or {}
+            for _problem in _coverage_basis_locator_problems(
+                    _row.get("disposition"), _row.get("detail"), sb,
+                    base_dir=sb / "base", strict=False):
+                errs.append(f"{FINDINGS_REL} coverage row {_cid!r} names a basis that "
+                            f"does not resolve: {_problem}")
 
 
 # The M1b table's own column names and row-number headers. A session that
@@ -9628,7 +9623,7 @@ AUDIT_ID_RE = re.compile(r"^AU-\d+$")
 # =====================================================================
 # REVIEW-AUDIT VALIDATION
 # =====================================================================
-def audit_coverage_problems(audit) -> list:
+def audit_coverage_problems(audit, frozen_findings=None, sb=None) -> list:
     """Problems with the auditor's own coverage table.
 
     `audit_artifact_problems` validates dispositions and (retired) adds; it
@@ -9636,6 +9631,16 @@ def audit_coverage_problems(audit) -> list:
     M1-M36 / J1-J5 check. An auditor could omit the table -- or write one
     generic row -- and the audit still passed, so the completeness of the
     attack on the sweeps was unverified.
+
+    ``frozen_findings``, when the caller has them, is the frozen review's list
+    of finding dicts. A `N findings` coverage row must then be backed by the
+    frozen list: N finding ids whose `check` cell resolves to that check, and a
+    `0 findings` row must not be contradicted by a confirmed disposition under
+    that check. Without it the count was pure shape, so an invented table passed
+    the audit's own completeness attestation (F39-20261126).
+
+    ``sb``, when the authoritative postcheck has the sandbox, makes every clean
+    basis resolve to a real file/line under it (F88-20261126).
     """
     problems = []
     if not isinstance(audit, dict):
@@ -9674,6 +9679,49 @@ def audit_coverage_problems(audit) -> list:
                             f"disposition: record a finding count, `clean -- basis: "
                             f"<artifact>`, `unable -- <reason>`, or the re-derivation "
                             f"the audit performed")
+        elif sb is not None:
+            # Resolve the named basis under the audit sandbox: a fabricated
+            # artifact or an out-of-package path cannot certify a clean check
+            # (F88-20261126).
+            for _basis_problem in _coverage_basis_locator_problems(
+                    disp, row.get("detail"), sb, base_dir=Path(sb) / "base",
+                    strict=True):
+                problems.append(f"coverage {check} names a basis that does not resolve: "
+                                f"{_basis_problem}")
+    if frozen_findings is not None:
+        frozen_checks = {}
+        for f in frozen_findings:
+            if not isinstance(f, dict):
+                continue
+            fid = str(f.get("id") or "").strip()
+            chk = _normalise(str(f.get("check") or "").strip())
+            if fid and chk in known:
+                frozen_checks[fid] = chk
+        confirmed = {str(r.get("id") or "").strip()
+                     for r in (audit.get("dispositions") or [])
+                     if isinstance(r, dict)
+                     and str(r.get("verdict") or "").strip().lower() == "confirm"}
+        for row in coverage:
+            if not isinstance(row, dict):
+                continue
+            check = _normalise(str(row.get("check") or "").strip())
+            count = re.match(r"(?i)^(\d+)\s+findings?\b",
+                             str(row.get("disposition") or "").strip())
+            if check not in known or count is None:
+                continue
+            backed = [fid for fid, chk in frozen_checks.items() if chk == check]
+            n = int(count.group(1))
+            if n and len(backed) < n:
+                problems.append(
+                    f"coverage {check} claims {n} finding(s), but the frozen review "
+                    f"carries only {len(backed)} finding(s) under that check: a "
+                    f"coverage count must be backed by the frozen list it re-derived")
+            elif n == 0 and any(fid in confirmed and chk == check
+                                for fid, chk in frozen_checks.items()):
+                problems.append(
+                    f"coverage {check} claims 0 findings, but the audit confirms a "
+                    f"frozen finding under that check: the coverage row contradicts "
+                    f"the audit's own dispositions")
     missing = [c for c in AUDIT_COVERAGE_CHECKS if c not in seen]
     if missing:
         problems.append(
@@ -9771,6 +9819,25 @@ def audit_artifact_problems(audit, frozen_ids, expected_round=None, base_dir=Non
         if verdict not in AUDIT_VERDICTS:
             problems.append(f"{fid}: verdict {verdict!r} is not confirm|drop")
             continue
+        if verdict == "confirm":
+            # The prompt's disposition schema carries reason/evidence for EVERY
+            # row. A confirm with neither gave the reviser an upheld finding
+            # and the operator no basis to re-check (F93-20261126). The bar is
+            # deliberately the non-filler gate, not the drop's 20/40-character
+            # prose bar: a confirm legitimately quotes a short verbatim span.
+            if not reason:
+                problems.append(f"{fid}: a confirm needs a `reason` (why the finding "
+                                f"is upheld) the human can re-check")
+            elif _reason_is_generic_filler(reason) or _nowork_token_is_reason(reason):
+                problems.append(f"{fid}: the confirm reason names no basis (filler or a "
+                                f"no-work token); state what the auditor re-derived")
+            if not evid:
+                problems.append(f"{fid}: a confirm needs `evidence` (the verbatim text "
+                                f"or file:line the auditor re-opened)")
+            _sev = str(row.get("severity_after") or "").strip()
+            if _sev and _sev.lower() not in AUDIT_SEVERITIES:
+                problems.append(f"{fid}: severity_after {_sev!r} is not "
+                                f"Critical|Major|Minor|Fatal")
         if verdict == "drop":
             if len(reason) < 20:
                 problems.append(f"{fid}: a drop needs a reason (>=20 characters) the human "

@@ -62,8 +62,13 @@ def _input_file_problem(path) -> str:
             return "it is a symlink, not a package file"
         if not p.is_file():
             return "it is not a regular file"
+        # `is_file()` says the inode is regular, not that this process may read
+        # it: a mode-000 --pdf reached check_pdf() and became an FMT-S2 high row
+        # in an otherwise successful scan that exited 0 (F69-20261126).
+        with p.open("rb"):
+            pass
     except OSError as exc:
-        return f"{type(exc).__name__}: {exc}"
+        return f"it is not readable ({type(exc).__name__}: {exc})"
     return ""
 
 
@@ -7312,6 +7317,20 @@ def cmd_scan(args) -> int:
         for b in bad:
             log(f"error: not a regular file: {b}")
         return 2
+    # `--pdf` is a caller-named INPUT, like the positional paths: a typo must be
+    # the documented input error (exit 2), not a high-severity row in an
+    # otherwise successful scan (F69-20261126). Only the positional paths were
+    # validated, so a mistyped render exited 0 and looked like a real finding.
+    if args.pdf:
+        pdf_path = Path(args.pdf)
+        missing_pdf = _missing_paths([pdf_path])
+        if missing_pdf:
+            log(f"error: no such file or directory: {missing_pdf[0]}")
+            return 2
+        pdf_problem = _input_file_problem(pdf_path)
+        if pdf_problem:
+            log(f"error: cannot read {pdf_path}: {pdf_problem}")
+            return 2
     info = scan_paths([Path(p) for p in args.paths], policy)
     if args.pdf:
         pdf = check_pdf(Path(args.pdf), policy)

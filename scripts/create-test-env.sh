@@ -4,6 +4,8 @@
 # Usage:
 #   bash scripts/create-test-env.sh              # create it if missing; verify either way
 #   bash scripts/create-test-env.sh --recreate   # DELETE it first, then create it again
+#   bash scripts/create-test-env.sh --recreate --force-delete-prefix=<path>
+#        # also delete a NON-EMPTY directory that is not a conda/venv env
 #   PAPER_REFINE_TEST_ENV=my-paper-refine-test bash scripts/create-test-env.sh
 #   PAPER_REFINE_TEST_PREFIX="$PWD/tmp/paper-refine-test" bash scripts/create-test-env.sh
 #
@@ -38,10 +40,15 @@ ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
 EXPORT_DIR="${PAPER_REFINE_TEST_EXPORT_DIR:-${WS}/env}"
 RECREATE=0
+# An explicit opt-in for deleting a non-empty directory that is not a
+# conda/venv prefix. A typo in PAPER_REFINE_TEST_PREFIX must never turn
+# `--recreate` into `rm -rf $HOME` (F08-20261126).
+FORCE_DELETE_PREFIX=""
 
 for arg in "$@"; do
   case "${arg}" in
     --recreate) RECREATE=1 ;;
+    --force-delete-prefix=*) FORCE_DELETE_PREFIX="${arg#*=}" ;;
     -h|--help) sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "error: unknown argument ${arg}" >&2; exit 2 ;;
   esac
@@ -147,13 +154,51 @@ esac
 if [[ "${RECREATE}" -eq 1 ]]; then
   if [[ -n "${ENV_PREFIX}" && -e "${ENV_PREFIX}" \
         && ! -e "${ENV_PREFIX}/conda-meta/history" ]]; then
-    # The prefix exists but is not a conda environment (an empty directory, or
-    # the debris of an interrupted install). `conda env remove` refuses it with
-    # EnvironmentLocationNotFound, and `set -e` used to abort --recreate before
-    # the rm -rf below and before any recreation -- the documented "supported
-    # repair" could never repair this state (F037). conda's own environment
-    # test is conda-meta/history; with no such file there is nothing conda can
-    # remove, so only an explicit --recreate may delete the directory.
+    # The prefix exists but is not a conda environment (an empty directory, a
+    # venv, or the debris of an interrupted install). `conda env remove`
+    # refuses it with EnvironmentLocationNotFound, and `set -e` used to abort
+    # --recreate before the rm -rf below and before any recreation -- the
+    # documented "supported repair" could never repair this state (F037).
+    # conda's own environment test is conda-meta/history; with no such file
+    # there is nothing conda can remove.
+    #
+    # But `rm -rf` on ANY non-empty directory was reachable by a typo'd or
+    # reused PAPER_REFINE_TEST_PREFIX -- including $HOME. Only a directory with
+    # nothing to lose (empty), a venv (pyvenv.cfg), a symlink (rm removes the
+    # link, not its target), or an explicitly forced path may be deleted.
+    _prefix_safe=0
+    if [[ -L "${ENV_PREFIX}" ]]; then
+      _prefix_safe=1
+    elif [[ -d "${ENV_PREFIX}" && -f "${ENV_PREFIX}/pyvenv.cfg" ]]; then
+      _prefix_safe=1
+    elif [[ -d "${ENV_PREFIX}" ]] \
+          && [[ -z "$(find "${ENV_PREFIX}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
+      _prefix_safe=1
+    elif [[ -n "${FORCE_DELETE_PREFIX}" ]]; then
+      _force="${FORCE_DELETE_PREFIX%/}"
+      _target="${ENV_PREFIX%/}"
+      if [[ -d "${_force}" ]]; then _force="$(cd "${_force}" && pwd -P)"; fi
+      if [[ -d "${_target}" ]]; then _target="$(cd "${_target}" && pwd -P)"; fi
+      if [[ "${_force}" == "${_target}" ]]; then
+        _prefix_safe=1
+      else
+        echo "error: --force-delete-prefix names ${FORCE_DELETE_PREFIX}, not the" >&2
+        echo "       resolved prefix ${ENV_PREFIX}" >&2
+        exit 2
+      fi
+    fi
+    if [[ "${_prefix_safe}" -ne 1 ]]; then
+      echo "error: refusing to delete the non-empty, non-conda directory" >&2
+      echo "       ${ENV_PREFIX}; set PAPER_REFINE_TEST_PREFIX to a dedicated" >&2
+      echo "       environment path, or pass an explicit" >&2
+      echo "       --force-delete-prefix=${ENV_PREFIX} if you are certain." >&2
+      exit 2
+    fi
+    if [[ "$(cd "${ENV_PREFIX}" 2>/dev/null && pwd -P || printf '%s' "${ENV_PREFIX}")" == "/" ]]; then
+      echo "error: refusing to delete /; set PAPER_REFINE_TEST_PREFIX to an" >&2
+      echo "       environment path" >&2
+      exit 2
+    fi
     echo "removing non-conda directory at the prefix ${ENV_PREFIX}"
     rm -rf -- "${ENV_PREFIX}"
   elif env_exists || env_registered; then

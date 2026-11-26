@@ -285,4 +285,11 @@ if ! tail -c 2048 -- "$PDF_TMP" | grep -aq '%%EOF'; then
     echo "Error: the converter wrote no PDF trailer (%%EOF): $PDF" >&2
     exit 1
 fi
+# Re-check the destination immediately before the rename: `mv` follows a
+# destination that is a symlink to a directory and moves the temp INSIDE
+# it, returning success while the expected PDF is absent (F52-20261126).
+if [[ -L "$PDF" || ( -e "$PDF" && ! -f "$PDF" ) ]]; then
+    echo "Error: refusing to replace a symlinked/non-regular destination: $PDF" >&2
+    exit 1
+fi
 mv -f -- "$PDF_TMP" "$PDF"

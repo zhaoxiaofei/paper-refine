@@ -404,7 +404,7 @@ def do_review(sb: Path, name: str, round_no: int) -> int:
             continue
         target.write_text(
             f"# {cid} (stub)\n\n| row | disposition |\n|---|---|\n"
-            f"| stub | OK - stub: nothing found |\n", encoding="utf-8")
+            f"| stub | OK - stub: {fname} row 1 is inside its bar |\n", encoding="utf-8")
     (out / "ARCHITECTURE.md").write_text(
         "# J5 - architecture & rewrite-class pass (stub)\n\n"
         "| document | section | paragraphs | current structure | reader cost | "

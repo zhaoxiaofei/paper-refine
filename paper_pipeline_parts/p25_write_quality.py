@@ -53,10 +53,45 @@ def _write_input_digest(root: Path) -> str:
     Authored artifacts themselves still reject every symlink.
     """
     entries = {}
+    root = Path(root)
+    try:
+        root_real = root.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"unreadable writer-input root: {root}") from exc
+    anchor = _enclosing_run_root(root.parent)
+    anchor_real = anchor.resolve() if anchor is not None else root_real
+    if root.is_symlink():
+        # A top-level input alias is legal only in the one canonical evidence
+        # shape the pipeline creates (`<root>/non_revised/<area>`). Without
+        # this proof, resolving the link first would make every outside alias
+        # look contained in itself.
+        allowed = (is_canonical_evidence_link(root, anchor) if anchor is not None
+                   else _evidence_link_shape_ok(root))
+        if not allowed:
+            raise ValueError(f"refusing to hash through a non-canonical writer-input "
+                             f"link: {root}")
 
     def visit(path, rel, ancestors):
         if path.is_symlink():
             entries[rel + ":link"] = os.readlink(path)
+            try:
+                target = path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise ValueError(f"broken/unreadable writer-input link {path}: {exc}") from exc
+            # Materialize an alias as an ordinary copy: hash/descend through the
+            # RESOLVED target so the no-follow readers do not refuse a
+            # legitimate nested alias (F44-20261126). A nested link that escapes
+            # the evidence area is not materialized.
+            if path != root:
+                # A nested alias may point at this sandbox's own tree or at the
+                # run root's read-only stores (`<root>/non_revised/<area>`); it
+                # may not escape the run root.
+                try:
+                    target.relative_to(anchor_real)
+                except ValueError:
+                    raise ValueError(f"writer-input link {path} escapes the run "
+                                     f"root") from None
+            path = target
         if path.is_dir():
             real = path.resolve()
             if real in ancestors:
@@ -265,13 +300,20 @@ def _write_repair_check(pre: Path, after: Path, rows: list, ledger_path: Path) -
 
 
 def audit_write_output(sb: Path, rec: dict, cmd: list, timeout: int,
-                       output_rel: str = None, verify_only: bool = False) -> dict:
+                       output_rel: str = None, verify_only: bool = False,
+                       repair: bool = True) -> dict:
     """Audit exact bytes, repair only a plan, independently verify, then publish.
 
     Nothing is installed into the parent artifact on any failure. Auxiliary
     attempts are separate sessions and their metadata never replaces the
     author's prompt/session identity. An interrupted chain has no passing
     digest and therefore cannot be adopted as an accepted output.
+
+    ``repair=False`` makes the audit report-only: a non-empty plan fails the
+    attempt for the author to fix instead of opening a bounded-repair pass.
+    The response writer uses it because the response has its own single
+    semantic audit+repair chain (p24); a write-quality repair here would be a
+    second bounded-repair pass on the same accepted attempt (F06-20261126).
     """
     output_rel = output_rel or WRITE_ARTIFACTS[rec["kind"]]
     artifact = sb / output_rel
@@ -305,6 +347,10 @@ def audit_write_output(sb: Path, rec: dict, cmd: list, timeout: int,
         unchanged()
         if rows and verify_only:
             raise ValueError("post-repair verification still finds defects; no second repair pass")
+        if rows and not repair:
+            raise ValueError("the independent write audit found repairable defects; this "
+                             "writer's single bounded-repair chain owns the repair -- the "
+                             "author must fix them first")
         if rows:
             repair = quality / "repair"
             repair.mkdir()
@@ -467,7 +513,11 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     result = _execute_attempt_raw(sb, rec, cmd, timeout, prompt_name, log_name, archive_marker)
     if author and result.get("rc") == 0 and not result.get("error"):
         try:
-            audit_write_output(sb, rec, cmd, timeout)
+            # The response writer's single bounded repair is the semantic
+            # response_audit/response_repair chain in p24; this generic audit
+            # must not open a second pass on the same accepted attempt.
+            audit_write_output(sb, rec, cmd, timeout,
+                               repair=(rec.get("kind") != "response"))
         except (OSError, ValueError, TypeError) as exc:
             result.update(rc=1, error=str(exc), failure_kind="write_quality")
     return result

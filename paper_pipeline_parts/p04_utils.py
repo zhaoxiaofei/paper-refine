@@ -7032,8 +7032,15 @@ def _format_fix_stage_package(ctx: Ctx, rec: dict, pkg_dir: Path, warns: list,
     try:
         rec["validation"] = _validate_stage_package(ctx, rec, pkg_dir, inp, errs, warns)
     except Exception as e:                                            # noqa: BLE001
-        warns.append(f"VALIDATION: the deliverable check could not run "
-                     f"({type(e).__name__}: {e})")
+        # A crash means the package was never validated; the comment above says
+        # validation failure is an ERROR so the retry policy runs. Downgrading
+        # the crash to a warning let an unvalidated package reach the pin/judge
+        # (F99-20261126). It is still recorded, and the stage now FAILS.
+        _validation_error = (f"VALIDATION: the deliverable check could not run "
+                             f"({type(e).__name__}: {e}); the package is UNVALIDATED")
+        warns.append(_validation_error)
+        if isinstance(errs, list):
+            errs.append(_validation_error)
     # Consistency check: re-derive the SAME code-side evidence the other sessions
     # were given, for the package this stage produced, and compare it with the
     # package the stage started from. Regressions are reported (never silently
