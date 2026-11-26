@@ -742,12 +742,14 @@ staged and (unless `--manual`, which stops with the instruction to fill it) the 
 session runs, and the code-side postcheck gates the whole run. With an official Word template the
 session copies it and replaces its placeholders; with no `.official` directory, `init` still runs
 the session, falling back to the journal's own author guidelines and then to academic convention
-(`transfer` skips the stage instead — its job IS the target journal's template). The passing
+(`transfer` runs the same guideline/convention fallback; only `--no-template-stage` or a
+mode without the stage skips it). The passing
 package becomes **round 1's working original** — the `a1` base the rewrites start from, the
 field's `original` view and every `vs_original` comparison read it — while the true pristine
 manuscript stays the root's read-only evidence (`non_revised/`). `--no-template-stage` opts out
-(the historical behaviour). A corpus without any `.docx` skips the stage (there is nothing to
-author in a Word-oriented pass).
+(the historical behaviour). A corpus without any `.docx` still runs the guideline/convention
+fallback, so non-Word sources are conformed in their own format; the stage is skipped only by
+`--no-template-stage` (or when the mode does not stage it).
 
 **Style precedence: template → venue guidelines → academic convention.** Anything the official
 template does not pin (table font size, spacing inside a table, caption size, list indentation,
@@ -3762,7 +3764,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 306 suites (a few
+any failure. They are independent, so run them in parallel — 307 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

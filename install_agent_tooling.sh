@@ -1440,7 +1440,11 @@ fi
 # installed under that directory (a bridge, for example) are left untouched.
 legacy_tool_path_referenced() {
     local needle=$1 file
-    for file in "$codex_home/config.toml" "$repo_dir/.codex/config.toml"; do
+    # Claude Code's user MCP registration lives in `$HOME/.claude.json` (the
+    # `claude mcp add --scope user` rows above); omitting it let a live path be
+    # moved to .legacy and break the registration this installer wrote (F027).
+    for file in "$codex_home/config.toml" "$repo_dir/.codex/config.toml" \
+                "$HOME/.claude.json"; do
         if [ -f "$file" ] && grep -Fq -- "$needle" "$file" 2>/dev/null; then
             return 0
         fi

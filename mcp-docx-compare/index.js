@@ -10,7 +10,7 @@
 // OOXML writer.
 import { McpServer } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
-import { accessSync, constants, existsSync, lstatSync, mkdtempSync, rmSync } from 'node:fs';
+import { accessSync, constants, existsSync, lstatSync, mkdtempSync, rmSync, unlinkSync } from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
@@ -262,13 +262,20 @@ serveStdio(() => {
         // for the child, so this detection is the enforcement point.
         if (ALLOWED_ROOTS.length && spawnOutput && existsSync(spawnOutput)
             && !containsPath(spawnOutput, ALLOWED_ROOTS)) {
-          let stray = '';
-          try { stray = realOrResolved(spawnOutput); } catch { stray = ''; }
-          if (stray) {
-            try {
-              if (lstatSync(stray).isFile()) rmSync(stray, { force: true });
-            } catch { /* already gone */ }
-          }
+          // Never delete the RESOLVED target of an outside-root symlink: that
+          // would remove a file we were refusing to write. Unlink the output
+          // path itself (a symlink removal never touches its target), and only
+          // remove a regular file when its directory is inside the roots (F022).
+          try {
+            if (lstatSync(spawnOutput).isSymbolicLink()) {
+              unlinkSync(spawnOutput);
+            } else if (lstatSync(spawnOutput).isFile()) {
+              // The child wrote this stray file during THIS call; removing a
+              // regular stray path is cleanup. A symlink is unlinked above so
+              // its outside TARGET is never deleted (F022).
+              rmSync(spawnOutput, { force: true });
+            }
+          } catch { /* already gone */ }
           return {
             content: [{ type: 'text', text: `refused: the output was written outside `
                                             + `DOCX_MCP_ALLOWED_ROOTS (its path changed during `

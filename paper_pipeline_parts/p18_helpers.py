@@ -3608,7 +3608,8 @@ def _json_from_text(text: str, lenient: bool):
         # it (a document buried in text is ambiguous).
         _tail_note = tail if len(tail) < 120 else ""
         _example_note = bool(re.search(
-            r"(?i)\b(?:example|schema|sample|e\.g\.|for\s+instance)\b", _tail_note))
+            r"(?i)(?:\b(?:example|schema|sample|for\s+instance)\b|"
+            r"\be\.g\.(?=\s|$))", _tail_note))
         if not fenced and prose > 2 * json_len and not _example_note:
             rejected.append((i, end))
             continue
@@ -3640,8 +3641,8 @@ def _json_from_text(text: str, lenient: bool):
         _prefix = _prefix.rstrip()
         # The marker must introduce THIS value: a sentence boundary between
         # the marker and the value means it introduced an earlier sentence.
-        _marker = re.search(r"(?i)\b(?:example|schema|sample|e\.g\.|for\s+instance)\b"
-                            r"[^.!?\n]{0,40}$", _prefix[-120:])
+        _marker = re.search(r"(?i)(?:\b(?:example|schema|sample|for\s+instance)\b|"
+                            r"\be\.g\.(?=\s|$))[^.!?\n]{0,40}$", _prefix[-120:])
         if _marker:
             _marker_start = len(_prefix) - len(_prefix[-120:]) + _marker.start()
             earlier = [c for c in accepted if c[1] <= best_start]

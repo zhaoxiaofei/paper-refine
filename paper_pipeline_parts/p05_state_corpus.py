@@ -1324,15 +1324,28 @@ class Ctx:
         # (`r1_x`, the shape older roots and many fixtures use) stay legal, so
         # reject the ROOT itself and the pipeline's protected trees rather than
         # requiring a strict runs/ child.
+        # Fake/legacy Ctx objects in tests may carry only the three historic
+        # paths; fall back to the root-relative locations.
+        reports_dir = getattr(self, "reports_dir", root / "reports")
+        state_path = getattr(self, "state_path", root / "state.json")
+        cfg_path = getattr(self, "cfg_path", root / "pipeline_config.json")
+        venue_profiles = root / "venue_profiles"
         protected = [self.runs_dir.resolve(), self.pristine.resolve(),
-                     self.pins_dir.resolve()]
+                     self.pins_dir.resolve(), reports_dir.resolve(),
+                     venue_profiles.resolve(),
+                     state_path.resolve(), cfg_path.resolve()]
         try:
             if full == root or full in protected:
                 raise ValueError("the root or a protected tree is not a run sandbox")
             full.relative_to(root)
-            for tree in (self.pristine.resolve(), self.pins_dir.resolve()):
+            for tree in (self.pristine.resolve(), self.pins_dir.resolve(),
+                         reports_dir.resolve(), venue_profiles.resolve()):
                 if full.is_relative_to(tree):
-                    raise ValueError("the pristine/pin tree is not a run sandbox")
+                    # reports/ and venue_profiles/ are pipeline-owned
+                    # bookkeeping: a damaged state record must not point
+                    # prune/retry at them (F046).
+                    raise ValueError("the pristine/pin/reports/venue_profiles tree is not "
+                                     "a run sandbox")
         except ValueError:
             die(f"state.json is damaged: run record {rec.get('id')!r} names {raw!r} as its "
                 f"sandbox, which is the root or a protected read-only tree; refusing to "

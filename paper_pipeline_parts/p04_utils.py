@@ -224,12 +224,12 @@ def redact_secrets(text: str) -> str:
         lambda m: m.group(1) + "[REDACTED]", text)
     text = re.sub(
         r"(?im)^(\s*(?:x-api-key|x-goog-api-key|x-amz-security-token|"
-        r"api[_-]?key|apikey|token|secret)\s*:\s*)\S+",
+        r"api[_-]?key|apikey|token|secret|cookie|set-cookie)\s*:\s*)\S.*$",
         r"\1[REDACTED]", text)
     # A JSON object logged as text still masks its credential-looking string values.
     text = re.sub(
         r'(?i)("(?:api[_-]?key|apikey|key|token|access[_-]?token|auth|'
-        r'authorization|password|passwd|pwd|secret|sig|signature|'
+        r'authorization|password|passwd|pwd|secret|sig|signature|cookie|set-cookie|'
         r'x-(?:amz|goog)-[a-z-]+)"\s*:\s*)"[^"]*"',
         r'\1"[REDACTED]"', text)
     for value in secret_env_values():

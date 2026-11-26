@@ -753,11 +753,12 @@ def select_champion(ctx: Ctx, r: int, agg: dict, floor: int = None) -> dict:
                 f"  {i}. {t['id']}: median={_g(_med)} mean={_mean} "
                 f"vs_original={_g(t['vs_original'])} vs_base={_g(t['vs_base'])} "
                 f"defects@{prefix_cells}={t['defect_prefix_total']} "
-                + "(cf/maj/min peer+own="
-                + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
-                           for g in ("fatal", "critical", "major", "minor"))
-                + ") "
-                f"iqr={_g(_iqr)} critical_remaining={t['critical_remaining']} "
+                + ("(cf/maj/min peer+own=-) " if not t.get("issues") else
+                   "(cf/maj/min peer+own="
+                   + "/".join(f"{t['issues'][g]['peer']}+{t['issues'][g]['own']}"
+                              for g in ("fatal", "critical", "major", "minor"))
+                   + ") ")
+                + f"iqr={_g(_iqr)} critical_remaining={t['critical_remaining']} "
                 f"writing_remaining={t['writing_remaining']} "
                 f"manual_steps={t['manual_steps']} "
                 f"placeholders={t['author_placeholders'] or 0} "
@@ -3260,6 +3261,26 @@ def _repair_occurrences(hay: str, needle: str) -> list:
         start = i + 1
 
 
+def _repair_binary_parts(path: Path) -> dict:
+    """Digest of a DOCX package's non-text parts (media/embedded/opaque).
+
+    A textual `before`/`after` quote can never authorize replacing a binary
+    part, so the inventory is compared independently of the visible-text diff
+    (F020). Text-bearing XML is excluded because a legitimate text repair
+    rewrites it; media/embedded payloads are not.
+    """
+    if path.suffix.lower() != ".docx" or not path.is_file():
+        return {}
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return {name: hashlib.sha256(zf.read(name)).hexdigest()
+                    for name in zf.namelist()
+                    if not name.endswith("/")
+                    and not name.endswith((".xml", ".rels"))}
+    except (OSError, KeyError, RuntimeError, zipfile.BadZipFile):
+        return {}
+
+
 def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
     """Why `rel`'s actual text change is outside the confirmed rows' spans, or None.
 
@@ -3278,10 +3299,33 @@ def _repair_spans_cover(pre: Path, cur: Path, rel: str, quotes: list):
     F03 guard. A row may cover several diff runs inside its one occurrence (a
     rewritten sentence is several opcodes, one edit).
     """
-    pre_text = _repair_file_text(pre / rel)
+    # A CREATED file has no preimage: compare its full text against the empty
+    # preimage so the confirmed `after` quote must cover all of it (F015).
+    pre_text = ("" if not (pre / rel).exists() and (cur / rel).is_file()
+                else _repair_file_text(pre / rel))
     cur_text = _repair_file_text(cur / rel)
-    if pre_text is None or cur_text is None or pre_text == cur_text:
-        return None                     # opaque/binary, or no textual change
+    if pre_text is None or cur_text is None:
+        # A binary/opaque file (DOCX media, an embedded object, a scanned PDF)
+        # cannot be covered by a text quote: accept no bounded repair of it.
+        return ("the changed file is binary/opaque, so its change is not covered by a "
+                "confirmed textual quote")
+    if str(rel).lower().endswith(".docx") \
+            and _repair_binary_parts(pre / rel) != _repair_binary_parts(cur / rel):
+        # A text change does NOT authorize swapping an image/embedded part in
+        # the same DOCX: compare the non-text inventory independently (F020).
+        return ("the DOCX binary/embedded part inventory changed, so the change is not "
+                "covered by a confirmed textual quote")
+    if pre_text == cur_text:
+        try:
+            raw_changed = sha256_file(pre / rel) != sha256_file(cur / rel)
+        except OSError:
+            raw_changed = True
+        if raw_changed:
+            # The visible text did not change, but bytes did (media/formatting):
+            # no `before`/`after` text span authorizes that either (F020).
+            return ("the file changed outside its visible text, so the change is not "
+                    "covered by a confirmed textual quote")
+        return None                     # no textual change
     # Compare NORMALIZED text and anchor every changed span to a concrete
     # occurrence of the quoted text.
     pre_n = _repair_text_norm(rel, pre_text)
@@ -4330,7 +4374,8 @@ def run_revision_chain(ctx, rec: dict, cmd: list, timeout: int) -> None:
                                             deletions_allowed=_audit_del,
                                             prefer_rewrite=_audit_prefer,
                                             soft_deletions=_audit_removable,
-                                            author_to_complete=author_to_complete_mode_of(ctx)))
+                                            author_to_complete=author_to_complete_mode_of(ctx),
+                                            journal_block=_journal_audit_block))
     if journal_is_scoped(ctx):
         scope = ("\nMANDATORY CONCERN-SCOPED AUDIT: this is a major/minor revision. "
                  "Read concerns/JF_concerns.json and the JF findings. Verify every admitted "

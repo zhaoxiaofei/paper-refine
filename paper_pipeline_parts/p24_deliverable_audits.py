@@ -56,11 +56,29 @@ REPAIR_ACTIONS = ("kept", "corrected", "merged", "dropped", "no-change")
 
 
 def _deliverable_audit_policy(ctx, key: str) -> str:
-    """`on` unless the root, the operator or the environment turned it off."""
-    raw = str(os.environ.get("PAPER_" + key.upper())
-              or (getattr(ctx, "cfg", None) or {}).get(key)
-              or "on").strip().lower()
-    return "off" if raw in {"off", "0", "no", "false", "none"} else "on"
+    """`on` unless the root, the operator or the environment turned it off.
+
+    An EMPTY environment value is unset, not `off`: it falls back to the
+    configured value. An absent or JSON-null config value means the default
+    `on`; only an explicit off/0/no/false/none spelling disables the gate
+    (F091).
+    """
+    off = {"off", "0", "no", "false", "none"}
+    env = os.environ.get("PAPER_" + key.upper())
+    if env is not None and str(env).strip() != "":
+        return "off" if str(env).strip().lower() in off else "on"
+    cfg = getattr(ctx, "cfg", None) or {}
+    if key not in cfg:
+        return "on"
+    value = cfg.get(key)
+    if value is None:
+        return "on"
+    if isinstance(value, bool):
+        return "on" if value else "off"
+    if isinstance(value, (int, float)):
+        return "on" if value else "off"
+    raw = str(value).strip().lower()
+    return "off" if raw in off else "on"
 
 
 def concern_audit_of(ctx) -> str:
@@ -164,6 +182,15 @@ def response_comment_human_verbatim(ctx, sb: Path, row, comment: str) -> bool:
     if not tdir.is_dir():
         return True
     human_names = _staged_human_names(sb)
+    # A converted text file is `<staged>.txt` (and older roots have only
+    # feedback/text/): include those spellings when binding a concern's source,
+    # or `editor.txt.txt` looked like no staged file at all and the check was
+    # skipped (F007).
+    for p in sorted(tdir.glob("*.txt")):
+        name = p.name
+        human_names.append(name[:-4] if name.lower().endswith(".txt") else name)
+        human_names.append(name)
+    human_names = sorted(set(human_names))
     srcs = [t.strip() for t in re.split(r"\s*;\s*|\s+\+\s+",
                                           str((row or {}).get("source") or ""))
             if t.strip()]
@@ -173,8 +200,10 @@ def response_comment_human_verbatim(ctx, sb: Path, row, comment: str) -> bool:
     # must occur verbatim in the human text.
     if _concern_names_llm(sb, row):
         return True
-    if not any(_name_matches(tok, human_names) for tok in srcs):
-        return True
+    if srcs and not any(_name_matches(tok, human_names) for tok in srcs):
+        # A human row that names a file none of the staged human sources match
+        # cannot be verified: fail closed instead of accepting it unbound (F007).
+        return False
     c_norm = " ".join(str(comment or "").split())
     if not c_norm:
         return False
@@ -223,6 +252,12 @@ def _name_matches(cell: str, names) -> bool:
     low = str(cell or "").strip().lower()
     if not low:
         return False
+    # A staged LLM review is often cited with the stream prefix
+    # (`llm_review.md` for staged `review.md`): match the bare name too.
+    lows = {low}
+    for pref in ("llm_", "llm-", "llm/"):
+        if low.startswith(pref) and len(low) > len(pref):
+            lows.add(low[len(pref):])
     for name in names:
         n = str(name).lower()
         variants = {n}
@@ -235,9 +270,11 @@ def _name_matches(cell: str, names) -> bool:
         if "__" in n:
             base = n.rsplit("__", 1)[-1]
             variants.add(base)
+            variants.add(base + ".txt")
             if "." in base:
                 variants.add(base.rsplit(".", 1)[0])
-        if any(low == v or low.endswith("/" + v) for v in variants if v):
+        variants.add(n + ".txt")
+        if any(l == v or l.endswith("/" + v) for l in lows for v in variants if v):
             return True
     return False
 
@@ -705,6 +742,10 @@ def materialize_concern_repair(ctx: Ctx, r: int) -> dict:
                               concern_repair_prompt(ctx, sb, r) + note + shared_blocks()))
     rec = ctx.register(rid, "concern_repair", r, f"runs/{rid}",
                        upstream_run_id=rid_concern_audit(r))
+    # The repaired ledger records the same feedback-file list as the generated
+    # one; without this it always published `files: []` (F012).
+    rec["feedback_files"] = list(con_rec.get("feedback_files") or [])
+    rec["llm_feedback_files"] = list(con_rec.get("llm_feedback_files") or [])
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
                               PRISTINE_DIR: hash_manifest(sb / PRISTINE_DIR,
                                                           follow_dir_links=True),
@@ -783,7 +824,7 @@ def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows
                 errs.append(f"repair row {cid!r}: the repair rejected the audit's drop, so the "
                             f"concern must remain in the repaired ledger")
         elif av in ("confirmed", "defective"):
-            if cid not in new:
+            if cid not in new and not (verdict == "confirmed" and action == "merged"):
                 errs.append(f"repair row {cid!r}: the audit did not drop this concern, but the "
                             f"repaired ledger lost it")
             if action == "dropped":
@@ -795,8 +836,32 @@ def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows
             if av == "defective" and verdict == "confirmed" and action in ("no-change", "kept"):
                 errs.append(f"repair row {cid!r}: the audit found a defect and the repair "
                             f"confirmed it; record `corrected` (or reject the audit row)")
+            if av == "defective" and verdict == "confirmed" and action == "corrected" \
+                    and new.get(cid) == orig.get(cid):
+                # A "correction" that leaves the defective concern byte-identical
+                # is not a repair: the reviser would consume the same defect (F001).
+                errs.append(f"repair row {cid!r}: action 'corrected' but the repaired concern "
+                            f"is byte-identical to the generated one")
             _defs = [d for d in ((audit_rows.get(cid) or {}).get("defects") or [])
                      if isinstance(d, dict)]
+            # A `corrected` row must apply the AUDITED replacement, not merely
+            # change some byte: an unrelated summary edit left the defect in
+            # place and still passed (F001).
+            if av == "defective" and verdict == "confirmed" and action == "corrected":
+                _flat = "\n".join(str(v) for v in (new.get(cid) or {}).values()
+                                  if isinstance(v, str))
+                for _d in _defs:
+                    _wrong = str(_d.get("wrong") or "").strip()
+                    _correct = str(_d.get("correct") or "").strip()
+                    if not (_wrong and _correct) or _wrong == _correct:
+                        continue
+                    if _correct not in _flat or _wrong in _flat:
+                        errs.append(
+                            f"repair row {cid!r}: the audited replacement {_correct!r} "
+                            f"is not applied (the wrong value {_wrong!r} is still "
+                            f"present or the replacement is absent); bind the correction "
+                            f"to the audit's wrong/correct values")
+                        break
             _dups = [d for d in _defs if str(d.get("type")) == "duplicate"]
             if _dups and verdict == "confirmed" and action != "merged":
                 errs.append(f"repair row {cid!r}: the audit found a duplicate; a confirmed "
@@ -992,6 +1057,41 @@ def materialize_response_draft(ctx: Ctx, r: int) -> dict:
     return rec
 
 
+def response_planned_change_paths(letter: str) -> dict:
+    """{concern id: [path or None for 'none']} from `**Planned changes:**` lines.
+
+    The draft prompt requires a planned-change line per block, but only the
+    final `**Changes:**` claims were parsed; a plan with no line (or an invented
+    path) passed untouched (F009).
+    """
+    out = {}
+    for part in re.split(r"(?m)^##\s+", letter or "")[1:]:
+        m = re.match(r"([A-Za-z0-9_.\-]+)", part)
+        if not m:
+            continue
+        lines = re.findall(r"(?m)^\s*\*\*Planned changes:\*\*\s*(.+)$", part)
+        if not lines:
+            continue
+        paths = []
+        for line in lines:
+            payload = line.strip().strip("<>").strip()
+            if payload.lower().strip(" .;") in ("none", "no change", "no changes"):
+                paths.append(None)
+                continue
+            pm = re.match(r"([^:\s]+):", payload)
+            candidate = pm.group(1) if pm else (payload.split()[0] if payload.split() else "")
+            candidate = candidate.strip("<>`'\"")
+            if candidate.startswith("base/"):
+                candidate = candidate[5:]
+            candidate = candidate.lstrip("./")
+            if candidate and not candidate.startswith(("http:", "https:")):
+                paths.append(candidate)
+            else:
+                paths.append("")
+        out[m.group(1)] = paths
+    return out
+
+
 def postcheck_response_draft(ctx: Ctx, rec: dict):
     sb = ctx.sandbox_of(rec)
     r = int(rec.get("round") or 1)
@@ -1012,6 +1112,7 @@ def postcheck_response_draft(ctx: Ctx, rec: dict):
         letter = ""
     comments = response_comment_quotes(letter)
     answers = response_answers(letter)
+    planned = response_planned_change_paths(letter)
     if letter and response_letter_change_paths(letter):
         errs.append("the draft letter carries a `**Changes:**` claim: this is written "
                     "BEFORE the revision; use `**Planned changes:**` and keep the map's "
@@ -1031,6 +1132,20 @@ def postcheck_response_draft(ctx: Ctx, rec: dict):
                         f"reviewer's verbatim text (preserve typos and punctuation)")
         if not answers.get(cid):
             errs.append(f"response draft {cid!r}: no non-empty **Response:** line")
+        _planned = planned.get(cid)
+        if _planned is None:
+            errs.append(f"response draft {cid!r}: no `**Planned changes:**` line (write "
+                        f"`none` when no edit is planned)")
+        else:
+            for rel in _planned:
+                if rel is None:
+                    continue
+                if not rel:
+                    errs.append(f"response draft {cid!r}: a `**Planned changes:**` line does "
+                                f"not name a file:location")
+                elif not (sb / "base" / rel).is_file():
+                    errs.append(f"response draft {cid!r}: the planned change names {rel!r}, "
+                                f"which is not a file in base/")
     data = read_json(sb / JOURNAL_RESPONSE_MAP_REL, revive=False, lenient=True)
     if not isinstance(data, dict):
         errs.append(f"{JOURNAL_RESPONSE_MAP_REL} is missing/unparsable")
@@ -1073,8 +1188,9 @@ deliverable (round {int(r)}; read-only. You did NOT write the letter.)
 Your sandbox:
   target/                 the FINAL package the letter describes (read-only)
   previous_package/       the pre-revision package, when staged (read-only)
-  concerns/               the REPAIRED human concern ledger (read-only)
-  feedback/               the human feedback files + text (read-only)
+  concerns/               the REPAIRED concern ledger (human, plus the admitted
+                           LLM rows in resubmit/transfer) (read-only)
+  feedback/               the staged feedback files + text (read-only)
   response/               the deliverable under audit:
                           RESPONSE_TO_REVIEWERS.md + response_map.json (READ-ONLY)
   response_audit/         YOUR OUTPUT DIR
@@ -1110,10 +1226,10 @@ Defect types:
   overclaim             claims more than the package supports
   underclaim            does less than the package supports (optional, lower priority)
   inconsistent-map      the letter and response_map.json disagree
-  non-human-concern     the letter answers an item that is not a human concern
+  non-human-concern     the letter answers an item that is not in the repaired ledger
   other                 say exactly what
 
-A `planned`/`manual` answer claims nothing done. An `addressed` answer needs a
+A `planned` answer claims nothing done. An `addressed` answer needs a
 real change or new-data file in target/. A new-experiment concern needs its new
 data. The response must not invent a result, a number, a reviewer sentence, or a
 file.
@@ -1302,8 +1418,9 @@ round {int(r)}; you do NOT edit the manuscript)
 Your sandbox:
   target/                 the FINAL package (read-only)
   previous_package/       the pre-revision package, when staged (read-only)
-  concerns/               the repaired human concern ledger (read-only)
-  feedback/               the human feedback files + text (read-only)
+  concerns/               the repaired concern ledger (human, plus the admitted
+                           LLM rows in resubmit/transfer) (read-only)
+  feedback/               the staged feedback files + text (read-only)
   response/               the deliverable you repair:
                           RESPONSE_TO_REVIEWERS.md + response_map.json (EDITABLE)
   response_audit/         the audit's RESPONSE_AUDIT.json + evidence (READ-ONLY)
@@ -1327,10 +1444,10 @@ WHAT YOU MAY CHANGE (response/ only):
   * correct a wrong status to what the package supports
     (addressed / partially-addressed / already-addressed / planned / not-applicable);
   * replace an unsupported claim with the true supported statement, or downgrade
-    the row to `planned`/`manual` with the exact steps when the package does not
+    the row to `planned` with the exact steps when the package does not
     support it;
   * add a missing answer only when target/ supports it; otherwise mark it planned
-    or manual with the exact author steps;
+    with the exact author steps;
   * make the letter and response_map.json agree.
 
 WHAT YOU MAY NOT DO:
@@ -1451,6 +1568,9 @@ def response_repair_ledger_problems(sb: Path, audit, ledger_ids) -> list:
         if action == "corrected" and av != "defective":
             errs.append(f"response repair row {cid!r}: 'corrected' needs a DEFECTIVE audit "
                         f"row (the audit found no defect here)")
+        if av == "defective" and verdict == "confirmed" and action in ("kept", "no-change"):
+            errs.append(f"response repair row {cid!r}: the audit found a defect and the repair "
+                        f"confirmed it; record `corrected` (or reject the audit row)")
     return errs
 
 
@@ -1497,6 +1617,13 @@ def postcheck_response_repair(ctx: Ctx, rec: dict):
         errs.append("the response repair cannot find the audit it consumed")
     if not (sb / RESPONSE_REPAIR_LOG_REL).is_file():
         warns.append(f"{RESPONSE_REPAIR_LOG_REL} is missing")
+    _ledger = read_json(sb / RESPONSE_REPAIR_LEDGER_REL, revive=False, lenient=True) or {}
+    _residual = _ledger.get("residual") if isinstance(_ledger, dict) else None
+    if isinstance(_residual, str) and _residual.strip()             and _residual.strip().lower() not in ("none", "empty", "no residual", "n/a"):
+        # The prompt requires a residual for a defect the repair could not fix,
+        # but the postcheck ignored it, so a known unresolved defect shipped (F069).
+        errs.append(f"{RESPONSE_REPAIR_LEDGER_REL} reports an unresolved residual: "
+                    f"{_residual.strip()[:240]}")
     errs.extend(input_mismatches(ctx, rec))
     return (not errs), errs, warns, None
 

@@ -627,7 +627,7 @@ def _table_row_context(paras: list, i: int) -> bool:
         return True
     for j in (i - 1, i + 1):
         if 0 <= j < len(paras) and re.fullmatch(
-                r"\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*",
+                r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*",
                 str(paras[j] or "").strip()):
             return True
     return False
@@ -853,6 +853,18 @@ _SINGLE_LETTER_INITIAL_PRECEDERS = frozenset(" ".join((
     "see cite cited cites said says wrote written report reports reported",
     "author authors editor editors dr prof mr mrs ms",
 )).split())
+# A capitalized word before a one-letter token is a PERSON NAME ("John F.",
+# "Robert J."), not any capitalized word: an ordinary capitalized label
+# ("Group A.", "Type B.", "Phase I.", "Figure A.") still ends the sentence
+# (F036). This is the small name heuristic the fix needed; a true name is not
+# one of the common scientific labels below.
+_SINGLE_LETTER_NON_NAME_PRECEDERS = frozenset(" ".join((
+    "group type phase figure fig table section stage class grade category",
+    "level part step appendix panel cohort arm condition treatment model",
+    "method equation eq room batch site sample region zone scenario case",
+    "example rule item option version variant trial study experiment protocol",
+    "chapter line column row patient subject participant",
+)).split())
 
 
 def _single_letter_ends_sentence(text: str, start: int, period: int,
@@ -868,6 +880,15 @@ def _single_letter_ends_sentence(text: str, start: int, period: int,
     prev = tokens[-2].strip("\"'([{") if len(tokens) >= 2 else ""
     if not prev:
         return False                       # sentence-initial "J. Smith"
+    if re.fullmatch(r"[A-Z]\.?", prev):
+        return False                       # chained initials: "J. F. Kennedy"
+    if prev[:1].isupper() and any(c.isalpha() for c in prev) \
+            and prev.lower().strip(".") not in _SINGLE_LETTER_NON_NAME_PRECEDERS:
+        # A name before the initial ("John F.", "Robert J.") is the classic
+        # middle-initial context. A capitalized LABEL ("Group A.", "Type B.",
+        # "Figure A.") is not a name and still ends the sentence (F036);
+        # an ordinary lower-case content word ("vitamin C.") does too.
+        return False
     return prev.lower() not in _SINGLE_LETTER_INITIAL_PRECEDERS
 
 
@@ -1063,6 +1084,16 @@ def claim_strength_rows(paras: list, is_ref: list = None, kinds: list = None) ->
 DOI_IN_TEXT_RE = re.compile(
     r"\bdoi\s*:\s*10\.\d{4,9}/\S+|\b10\.\d{4,9}/[^\s,;)\]]+", re.I)
 
+# An identifier/position is not a thousands-separator quantity: a chromosome
+# position or residue number beside a real count must not be flagged and told
+# to add a separator (F042). Mask the number a scientific identifier cue
+# introduces; a plain 4-digit QUANTITY (`1,000 samples and 2500 cells`) has no
+# such cue and still participates in the convention check.
+IDENTIFIER_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:chromosome|chromosomal|chr|position|pos|codon|residue|exon|"
+    r"intron|nucleotide|base\s+pair|bp|nt|site|allele|snp|rs|amino\s+acid|"
+    r"variant|mutation)\b[\s=:#\-]*\d[\d,]*")
+
 
 def number_format_rows(paras: list) -> list:
     """FMT-T9h: a document mixes 4+-digit numbers with and without separators."""
@@ -1077,12 +1108,17 @@ def number_format_rows(paras: list) -> list:
         # bare `10.1000/...` path.
         masked = URL_RE.sub(" ", text or "")
         masked = DOI_IN_TEXT_RE.sub(" ", masked)
+        # A chromosome/residue position or other identifier is not a quantity:
+        # `Position 1234` beside `1,000 reads` must not be told to add a
+        # thousands separator (F042).
+        masked = IDENTIFIER_CONTEXT_RE.sub(" ", masked)
         # NUMBER_RE has two alternatives (decimal / integer); `findall` would
         # return a tuple of their group captures, so take group(1) explicitly.
         nums += [m.group(1) for m in NUMBER_RE.finditer(masked)]
-    # 4-digit years and list-position numbers are not quantities: only numbers
-    # with 5+ digits (or a 4+-digit number that already carries a separator)
-    # take part in the convention check.
+    # 4-digit YEARS are not quantities and are excluded below. A plain 4-digit
+    # QUANTITY does participate: `1,000 samples and 2500 cells` is the mixed
+    # convention this rule exists to report. An identifier cue ("position
+    # 1234") was masked above, so its digits do not participate (F042).
     def _is_quantity(n: str) -> bool:
         # `1.2e-4` is one value, not a 6-character integer: it has no bearing on
         # the thousands-separator convention (before the exponent was part of

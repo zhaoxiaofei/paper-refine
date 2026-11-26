@@ -191,6 +191,22 @@ def _write_audit(sb: Path, parent: dict, artifact: Path, cmd: list, timeout: int
     return rows, metadata
 
 
+def _write_created_text(text) -> str:
+    """A created file's exact content, allowing ONE final line ending.
+
+    A new file has no preimage a quote can bind to, so its bytes must equal the
+    confirmed row's full `after` content. Only the writer's one trailing
+    newline is optional; any other whitespace difference is unplanned content
+    (F015).
+    """
+    text = str(text or "")
+    if text.endswith("\r\n"):
+        return text[:-2]
+    if text.endswith("\n"):
+        return text[:-1]
+    return text
+
+
 def _write_repair_check(pre: Path, after: Path, rows: list, ledger_path: Path) -> None:
     data = _write_read_json(ledger_path)
     if not isinstance(data, dict) or not isinstance(data.get("rows"), list):
@@ -218,6 +234,20 @@ def _write_repair_check(pre: Path, after: Path, rows: list, ledger_path: Path) -
         group = [r for r in confirmed if r["file"] == rel]
         if rel in old and rel not in new:
             raise ValueError("bounded repair removed an artifact file")
+        if rel not in old:
+            # A CREATED file has no preimage a quote can bind to, so the only
+            # safe contract is the full exact content of one confirmed row;
+            # otherwise the repair could add arbitrary unplanned bytes (F015).
+            # Compare exact text (only ONE final line ending is optional), so
+            # unplanned leading/trailing spaces or blank lines are refused.
+            cur_text = _repair_file_text(after / rel)
+            if len(group) != 1 or cur_text is None:
+                raise ValueError("bounded repair may create a file only from one confirmed "
+                                 "full-content row")
+            if _write_created_text(cur_text) != _write_created_text(
+                    ledger[group[0]["id"]]["after"]):
+                raise ValueError("a newly created file's bytes are not the confirmed "
+                                 "row's full `after` content")
         quotes = [(ledger[r["id"]]["before"], ledger[r["id"]]["after"]) for r in group]
         if _repair_spans_cover(pre, after, rel, quotes):
             raise ValueError(f"repair changed text outside its confirmed quotes: {rel}")
@@ -248,6 +278,9 @@ def audit_write_output(sb: Path, rec: dict, cmd: list, timeout: int,
     quality = sb / WRITE_QUALITY_DIR
     if quality.is_symlink():
         raise ValueError("write quality directory is a symlink")
+    if quality.exists() and not quality.is_dir():
+        # A regular file at the bookkeeping path is not a directory (F014).
+        quality.unlink()
     if quality.exists():
         shutil.rmtree(quality)
     quality.mkdir()
@@ -424,7 +457,10 @@ def _execute_attempt_in(sb: Path, rec: dict, cmd: list, timeout: int,
     if author:
         rec.pop("write_quality", None)
         previous = sb / WRITE_QUALITY_DIR
-        if previous.is_symlink():
+        if previous.is_symlink() or (previous.exists() and not previous.is_dir()):
+            # The sandbox is agent-writable: a regular file named
+            # write_quality made shutil.rmtree raise NotADirectoryError and
+            # crash the retry (F014). A non-directory is stale junk; unlink it.
             previous.unlink()
         elif previous.exists():
             shutil.rmtree(previous)

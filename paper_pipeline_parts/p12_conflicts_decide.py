@@ -536,7 +536,7 @@ def declared_submission_set(root: Path) -> dict:
             bare = re.sub(r"^\s*(?:[-*+]|\d+[.)])\s+", "", str(fragment or "")).strip()
             tok = bare.split()[0].strip(",;") if bare.split() else ""
             if tok and "`" not in tok \
-                    and ("*" in tok or "?" in tok or "@(" in tok) \
+                    and ("*" in tok or "?" in tok or "@(" in tok or "[" in tok) \
                     and _extglob_to_regex(tok) is not None and tok not in out:
                 out.append(tok)
             return out
@@ -3284,17 +3284,35 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                     gaps.append(f"{rel}: the PDF has no extractable text (image-only), so "
                                 f"its editorial decisions were NOT checked")
                     continue
-            elif suffix in (".txt", ".md", ".html", ".json"):
-                try:
-                    text = read_text_bounded(p)
-                except OSError as e:
-                    gaps.append(f"{rel}: unreadable ({type(e).__name__}: {e}), so its "
-                                f"editorial decisions were NOT checked")
-                    continue
-                if text is None:
-                    gaps.append(f"{rel}: unreadable or over the byte budget, so its "
-                                f"editorial decisions were NOT checked")
-                    continue
+            elif suffix in (".txt", ".md", ".html", ".json", ".rtf", ".doc", ".odt"):
+                if suffix == ".json":
+                    # A JSON evidence file is scanned as its own text, not
+                    # converted through the feedback renderer.
+                    try:
+                        text = read_text_bounded(p)
+                    except OSError as e:
+                        gaps.append(f"{rel}: unreadable ({type(e).__name__}: {e}), so its "
+                                    f"editorial decisions were NOT checked")
+                        continue
+                    if text is None:
+                        gaps.append(f"{rel}: unreadable or over the byte budget, so its "
+                                    f"editorial decisions were NOT checked")
+                        continue
+                else:
+                    # RTF/DOC are converted by the same feedback reader the
+                    # concern ledger uses; an unconvertible/unsupported
+                    # attachment (ODT) is a named coverage gap, never a silent
+                    # skip (F045).
+                    try:
+                        text, failure = feedback_text_of(p)
+                    except OSError as e:
+                        gaps.append(f"{rel}: unreadable ({type(e).__name__}: {e}), so its "
+                                    f"editorial decisions were NOT checked")
+                        continue
+                    if failure or text is None:
+                        gaps.append(f"{rel}: {failure or 'unreadable'}, so its editorial "
+                                    f"decisions were NOT checked")
+                        continue
             else:
                 continue
             seen_decision_ids = set()
@@ -5334,7 +5352,7 @@ def _pkg4_cited_labels(expr: str, plural: bool = True) -> list:
     # ("Figures 2-4" cites 2, 3 and 4); the production caller strips the
     # keyword, but the helper itself did not, so its public contract and test
     # surface disagreed (F22, 2026-11-23).
-    expr = re.sub(r"(?i)^\s*(?:supplementary\s+)?(?:figures?|figs?\.?)\s*",
+    expr = re.sub(r"(?i)^\s*(?:supplementary\s+)?(?:figures?|figs?\.?)(?=\s|$)\s*",
                   "", str(expr or ""))
     # Keep the separators so a comma can be told apart from "and"/"&"/";".
     parts = re.split(r"\s*(,|and\b|&|;)\s*", expr, flags=re.I)
@@ -6901,6 +6919,10 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
                     break
                 unreadable = None
                 continue
+            unreadable = cand
+        elif cand.exists() or cand.is_symlink():
+            # A directory/dangling symlink at a report name is not "no open
+            # items": it is unknown evidence and must fail closed (F047).
             unreadable = cand
     if unreadable is not None and not report:
         # A corrupt ledger is NOT "no open items": `report = report or {}`

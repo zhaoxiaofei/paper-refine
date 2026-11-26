@@ -4644,11 +4644,19 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                     return
                 sys.exit(3)
         if only is not None:
-            print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
-                  f"journal_submission/ are assembled only by a plain `run` once the "
-                  f"{journal_mode_of(ctx)} revision is complete.")
-            summarize(ctx)
-            return
+            # The response letter/audit/repair run in the FINALIZATION phase, not
+            # in the round DAG. A selection that names one of them must drive
+            # that phase, not print "only a plain run" and exit 0 (F010).
+            _final_stages = ("response", "response_audit", "response_repair")
+            if not any(only_names_explicit_stage(only, _s) for _s in _final_stages):
+                print(f"[run] --only {getattr(args, 'only', None)!r}: the response letter and "
+                      f"journal_submission/ are assembled only by a plain `run` once the "
+                      f"{journal_mode_of(ctx)} revision is complete.")
+                summarize(ctx)
+                return
+            if not journal_needs_response(ctx):
+                die(f"--only names a response stage, but the {journal_mode_of(ctx)} revision "
+                    f"mode has no response-to-reviewers deliverable", code=2)
         ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,
                                        retries=retries, manual=manual, nowait=args.no_wait,
                                        poll=args.poll, retry_backoff=retry_backoff,

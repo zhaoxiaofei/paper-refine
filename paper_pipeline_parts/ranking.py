@@ -353,7 +353,9 @@ def derive_ranking(stats: dict, candidates: list, base_rep, census: dict,
                      "vs_base": st.get("vs_base"),
                      "digest": st.get("digest"),
                      "author_placeholders": st.get("author_placeholders"),
-                     "issues": _issue_summary_from_census(row_id, census),
+                     "issues": (_issue_summary_from_census(row_id, census)
+                                if _census_row_measured(_census_row(row_id, census))
+                                else None),
                      "captions": st.get("caption_note")})
     # The adaptive defect prefix (the ranking's LEADING comparator): walk the
     # canonical severity_tier_category order, accumulate the reported counts for

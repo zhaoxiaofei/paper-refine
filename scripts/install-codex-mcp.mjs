@@ -978,6 +978,14 @@ function main() {
   for (const server of servers) {
     if (opts.only.size > 0 && !opts.only.has(server.name)) continue;
     if (opts.exclude.has(server.name)) continue;
+    // A --merge re-imports a server that is already in the kept block under the
+    // SAME requested name. uniqueName would otherwise pick `<name>-2`, so the
+    // kept row would never be replaced (F024). Free the name so transformServer
+    // reuses it; emitBlock then drops the kept row it replaces.
+    const requested = slug(`${opts.prefix || ''}${server.name || 'server'}`);
+    if (opts.merge && keep.some((item) => item.serverName === requested)) {
+      usedNames.delete(requested);
+    }
     const result = transformServer(server, opts, usedNames, usedIds, plugin.name);
     if (result.skipped) {
       skipped.push({ name: server.name, reason: result.reason });

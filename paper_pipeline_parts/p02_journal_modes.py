@@ -608,12 +608,14 @@ def _rtf_plain_text(raw: str) -> str:
     while i < n:
         ch = raw[i]
         if ch == "{":
-            stack.append(skip)
+            # `\ucN` is a GROUP attribute: a group that sets it must not
+            # change how later groups decode their own `\uN` escapes (F082).
+            stack.append((skip, uc_skip))
             i += 1
             continue
         if ch == "}":
             if stack:
-                skip = stack.pop()
+                skip, uc_skip = stack.pop()
             i += 1
             continue
         if ch == "\\":
@@ -671,10 +673,44 @@ def _rtf_plain_text(raw: str) -> str:
                         out.append(chr(int(num) % 65536))
                     except ValueError:
                         pass
+                # Consume the ANSI fallback, not arbitrary following prose.
+                # Word writes `\u8217\'92` (one escaped byte per fallback
+                # slot); a bare `\u8217s` in a hand-written/converted file has
+                # no fallback, and the old loop still ate the real `s` (F048).
                 i = k
-                for _ in range(uc_skip):
-                    if i < n and raw[i] not in "\\{}":
+                remaining = uc_skip
+                while remaining > 0 and i < n:
+                    if raw[i] in "{}":
+                        break
+                    if raw[i] == "\\" and i + 1 < n and raw[i + 1] == "'":
+                        i += 4 if i + 3 < n else 2
+                        remaining -= 1
+                        continue
+                    if raw[i] == "\\":
+                        # One control word/symbol is one fallback character.
+                        j2 = i + 1
+                        if j2 < n and raw[j2] in "\\{}":
+                            i = j2 + 1
+                        else:
+                            k2 = j2
+                            while k2 < n and raw[k2].isalpha():
+                                k2 += 1
+                            mm = re.match(r"-?\d+", raw[k2:])
+                            if mm:
+                                k2 += len(mm.group(0))
+                            if k2 < n and raw[k2] == " ":
+                                k2 += 1
+                            i = k2
+                        remaining -= 1
+                        continue
+                    if raw[i] == "?":
+                        # The conventional placeholder fallback.
                         i += 1
+                        remaining -= 1
+                        continue
+                    # An ordinary character is real prose when the escape has
+                    # no fallback; do not eat it.
+                    break
                 continue
             i = k
             continue
@@ -700,8 +736,11 @@ def _html_plain_text(raw: str) -> str:
         def handle_starttag(self, tag, attrs):
             if tag in ("script", "style", "head"):
                 self.skip += 1
-            elif tag in ("p", "br", "div", "li", "tr", "h1", "h2", "h3",
-                         "h4", "h5", "h6", "blockquote"):
+            elif tag in ("p", "br", "div", "li", "tr", "td", "th", "h1", "h2",
+                         "h3", "h4", "h5", "h6", "blockquote"):
+                # A table cell is its own text unit: concatenating adjacent
+                # `<td>`s turned "foo" + "bar" into "foobar", so a reviewer
+                # quote taken from a table was no longer verbatim (F051).
                 self.parts.append("\n")
 
         def handle_endtag(self, tag):

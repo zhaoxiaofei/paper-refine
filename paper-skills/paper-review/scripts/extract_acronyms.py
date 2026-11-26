@@ -918,8 +918,30 @@ def main():
         print("ERROR: corpus dir not found: %s. Run convert_corpus.py first." % corpus)
         sys.exit(2)
 
-    if os.path.islink(art_dir) or (os.path.exists(art_dir) and not os.path.isdir(art_dir)):
-        print("ERROR: artifacts path is a symlink or not a directory: %s" % art_dir)
+    # Check EVERY component, not only the leaf: a symlink at an ancestor
+    # (`out/work` -> elsewhere) still makes os.makedirs write outside the work
+    # tree, and os.path.islink(art_dir) is false for it (F043).
+    _out_real = os.path.realpath(out)
+    _art_real = os.path.realpath(art_dir)
+    _symlink_component = ""
+    _cur = out
+    _rel_parts = os.path.relpath(art_dir, out).split(os.sep)
+    for _part in _rel_parts:
+        if _part in ("", "."):
+            continue
+        _cur = os.path.join(_cur, _part)
+        if os.path.islink(_cur):
+            _symlink_component = _cur
+            break
+    try:
+        _escapes = os.path.commonpath([_out_real, _art_real]) != _out_real
+    except ValueError:
+        _escapes = True
+    if (_symlink_component
+            or _escapes
+            or (os.path.exists(art_dir) and not os.path.isdir(art_dir))):
+        print("ERROR: artifacts path is a symlink or not a directory (or an ancestor "
+              "component escapes the output directory): %s" % art_dir)
         sys.exit(2)
     os.makedirs(art_dir, exist_ok=True)
 

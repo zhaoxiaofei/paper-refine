@@ -693,10 +693,39 @@ def strip_markdown_nonprose(text: str) -> str:
     # YAML front matter only at the very start.
     src = re.sub(r"\A---[ \t]*\n.*?\n---[ \t]*(?:\n|\Z)", _blank, src,
                  count=1, flags=re.S)
-    src = re.sub(r"(?ms)^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", _blank, src)
-    # CommonMark allows an UNCLOSED fence through EOF; the closed-fence pass
-    # above left it (and its code) in the count (F10, 2026-11-23).
-    src = re.sub(r"(?ms)^[ \t]*(?:```|~~~)[^\n]*\n.*\Z", _blank, src)
+    # A CommonMark fence is 3+ backticks or tildes and is closed only by the
+    # SAME character repeated at least as many times. Matching exactly three
+    # left a legal four-backtick block "open" and the unclosed-fence pass then
+    # blanked every trailing line to EOF (F33, 2026-11-26).
+    def _blank_fences(text: str) -> str:
+        lines = text.splitlines(keepends=True)
+        out = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            m = re.match(r"[ \t]{0,3}(`{3,}|~{3,})", line)
+            if not m:
+                out.append(line)
+                i += 1
+                continue
+            marker = m.group(1)
+            char, length = marker[0], len(marker)
+            out.append("\n" * line.count("\n"))
+            i += 1
+            closed = False
+            while i < len(lines):
+                close = re.match(r"[ \t]{0,3}" + re.escape(char) + "{" + str(length) +
+                                 r",}[ \t]*(?:\r?\n)?$", lines[i])
+                out.append("\n" * lines[i].count("\n"))
+                i += 1
+                if close:
+                    closed = True
+                    break
+            # An UNCLOSED fence runs to EOF; the loop above already blanked it.
+            _ = closed
+        return "".join(out)
+
+    src = _blank_fences(src)
     # An indented (4-space/tab) code block is code even without a fence, but
     # only at top level after a blank line; list continuations and hanging
     # reference entries are prose (R02).

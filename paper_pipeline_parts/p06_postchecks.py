@@ -65,6 +65,21 @@ def stray_signal_path(sb: Path, kind: str, name: str):
     return None
 
 
+# A repair's completion marker names the DELIVERABLE's contract stage
+# (`concerns`/`response`), not the repair run kind: both are the same attempt.
+_MARKER_STAGE_ALIASES = {
+    "concern_repair": {"concern_repair", "concerns"},
+    "response_repair": {"response_repair", "response"},
+}
+
+
+def _marker_stage_ok(kind, stage) -> bool:
+    if stage is None:
+        return True
+    allowed = _MARKER_STAGE_ALIASES.get(str(kind or ""), {str(kind or "")})
+    return str(stage) in allowed
+
+
 def _signal_names_this_run(data, rec: dict, name: str) -> bool:
     """Does this candidate signal name THIS run (and stage) and nothing else?
 
@@ -94,7 +109,7 @@ def _signal_names_this_run(data, rec: dict, name: str) -> bool:
                 return True
             return not rec.get("target_id") or tid == rec.get("target_id")
         return False
-    elif data.get("stage") != rec.get("kind"):
+    elif not _marker_stage_ok(rec.get("kind"), data.get("stage")):
         return False
     return data.get("run_id") in (None, rec.get("id"))
 
@@ -207,7 +222,7 @@ def _own_completion_signal(sb: Path, kind: str, name: str, rec: dict):
             # must reach the postcheck to be recorded and retried, while a
             # missing/invalid status is reported there.
             stage = data.get("stage")
-            if stage is not None and stage != rec.get("kind"):
+            if stage is not None and not _marker_stage_ok(rec.get("kind"), stage):
                 return None
             if data.get("run_id") not in (None, rec.get("id")):
                 return None
@@ -1158,6 +1173,12 @@ _DISCOVERY_DECISION_START_RE = re.compile(
 _DISCOVERY_NEGATED_RE = re.compile(
     r"(?i)\b(?:no|not)\s+(?:disposition|decision|status|reconcil\w*)\b"
     r"|\bnot\s+(?:PORTED|KEPT-BASE|NO-DONOR-FIX|IGNORED|LEFT-SHARED|DROPPED)\b")
+# After the id (and optional punctuation/auxiliaries) the DISPOSITION must
+# start the remainder of the cell. A decision word that appears later in a
+# sentence ("the donor DROPPED this row") is not this row's disposition (F044).
+_DISCOVERY_DECISION_AFTER_ID_RE = re.compile(
+    r"^[\s\-\u2013\u2014:|]*(?:(?:was|were|is|are|has|have|had|been|being|now|then)\s+)*"
+    + _DISCOVERY_DECISIONS_RE.pattern, re.I)
 
 
 def _discovery_decision_cell(line: str, pid: str) -> str:
@@ -1175,12 +1196,14 @@ def _discovery_decision_cell(line: str, pid: str) -> str:
             # The id may share the DECISION cell ("KEPT-BASE: preserves X-001").
             if _DISCOVERY_DECISION_START_RE.match(cell):
                 return cell
-            # The decision may follow the id in the SAME cell (`| X-001 PORTED |`);
-            # requiring the cell to START with the token reported a correct
-            # ledger row as never reconciled (F091).
-            if _DISCOVERY_DECISIONS_RE.search(cell) \
-                    and not _DISCOVERY_NEGATED_RE.search(cell):
-                return cell
+            # The decision may follow the id in the SAME cell (`| X-001 PORTED |`),
+            # but only when it STARTS the remainder: a borrowed sentence in the
+            # same cell (`| X-001 — the donor DROPPED this row |`) is not this
+            # row's disposition (F044).
+            _rest = re.sub(r"^\s*" + re.escape(pid) + r"(?![A-Za-z0-9])", "", cell,
+                           count=1)
+            if _DISCOVERY_DECISION_AFTER_ID_RE.match(_rest):
+                return _rest
             for cand in cells[i + 1:]:
                 if _DISCOVERY_NEGATED_RE.search(cand):
                     continue
@@ -1226,9 +1249,19 @@ def discovery_ledger_missing(ledger_text: str, ids) -> list:
             cell = _discovery_decision_cell(line, pid)
             if _DISCOVERY_NEGATED_RE.search(cell):
                 continue
-            if (_DISCOVERY_DECISION_START_RE.match(cell)
-                    or (_DISCOVERY_DECISIONS_RE.search(cell)
-                        and not _DISCOVERY_NEGATED_RE.search(cell))):
+            if "|" in line:
+                # The same start-of-disposition rule as prose: a table row
+                # disposes its id only when the decision own cell starts with
+                # it (`| X-001 PORTED |`), not when the sentence merely
+                # mentions another donor's action (F044).
+                _accepted = bool(_DISCOVERY_DECISION_START_RE.match(cell))
+            else:
+                # Prose has no cells: after the id, the disposition must start
+                # the sentence (an auxiliary "was/is/has been" may intervene).
+                # "X-001: the donor DROPPED this row" mentions a decision but
+                # does not dispose X-001 (F044).
+                _accepted = bool(_DISCOVERY_DECISION_AFTER_ID_RE.match(cell))
+            if _accepted:
                 disposed = True
                 break
         if not disposed:
@@ -2315,45 +2348,70 @@ _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 def _png_is_a_real_image(p: Path) -> bool:
-    """True only for a PNG carrying a positive-size IHDR and image data.
+    """True only for a structurally valid PNG with decodable image data.
 
     The 8-byte signature is not a page: a stage that never rendered the DOCX can
-    write the magic and satisfy the visual gate with it (F084). The chunk walk
-    is the standard-library equivalent of a decode (the pipeline ships no PIL):
-    a real render has an IHDR with non-zero dimensions and at least one IDAT
-    chunk with a payload.
+    write the magic, a header and a one-byte IDAT and satisfy the visual gate
+    (F049/F084). The chunk walk verifies every CRC, requires IEND, and
+    decompresses the concatenated IDAT stream with the standard library (the
+    pipeline ships no PIL).
     """
+    import struct
+    import zlib
     try:
-        with p.open("rb") as fh:
-            if fh.read(8) != _PNG_SIGNATURE:
-                return False
-            seen_ihdr = False
-            for _ in range(10000):
-                hdr = fh.read(8)
-                if len(hdr) < 8:
-                    return False
-                length = int.from_bytes(hdr[:4], "big")
-                kind = hdr[4:8]
-                if kind == b"IHDR":
-                    if length != 13:
-                        return False
-                    data = fh.read(13)
-                    if len(data) < 13:
-                        return False
-                    width = int.from_bytes(data[:4], "big")
-                    height = int.from_bytes(data[4:8], "big")
-                    if width <= 0 or height <= 0:
-                        return False
-                    seen_ihdr = True
-                    fh.read(4)                     # CRC
-                elif kind == b"IDAT":
-                    return seen_ihdr and length > 0
-                elif kind == b"IEND":
-                    return False
-                else:
-                    fh.seek(length + 4, os.SEEK_CUR)   # payload + CRC
+        data = p.read_bytes()
+        if data[:8] != _PNG_SIGNATURE:
             return False
-    except OSError:
+        pos = 8
+        seen_ihdr = False
+        seen_iend = False
+        idat = []
+        width = height = 0
+        bit_depth = color_type = interlace = 0
+        while pos + 12 <= len(data):
+            length = int.from_bytes(data[pos:pos + 4], "big")
+            kind = data[pos + 4:pos + 8]
+            if pos + 12 + length > len(data):
+                return False
+            payload = data[pos + 8:pos + 8 + length]
+            crc = int.from_bytes(data[pos + 8 + length:pos + 12 + length], "big")
+            if zlib.crc32(kind + payload) & 0xffffffff != crc:
+                return False
+            if kind == b"IHDR":
+                if length != 13 or seen_ihdr:
+                    return False
+                width, height = struct.unpack(">II", payload[:8])
+                bit_depth, color_type = payload[8], payload[9]
+                interlace = payload[12]
+                if width <= 0 or height <= 0:
+                    return False
+                seen_ihdr = True
+            elif kind == b"IDAT":
+                idat.append(payload)
+            elif kind == b"IEND":
+                seen_iend = True
+                break
+            pos += 12 + length
+        if not (seen_ihdr and seen_iend and idat):
+            return False
+        raw = zlib.decompress(b"".join(idat))
+        if not raw:
+            return False
+        # Validate the expected scanline payload shape when the header is one
+        # of the standard PNG colour layouts; an unknown layout still needs a
+        # non-empty decode above.
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+        if channels and bit_depth in (1, 2, 4, 8, 16) and not interlace:
+            row_bits = width * channels * bit_depth
+            row_bytes = (row_bits + 7) // 8
+            if len(raw) < height * (row_bytes + 1):
+                return False
+            # The first byte of every scanline is its filter type 0-4.
+            stride = row_bytes + 1
+            if any(raw[i * stride] > 4 for i in range(height)):
+                return False
+        return True
+    except (OSError, ValueError, zlib.error, struct.error):
         return False
 
 
@@ -3136,7 +3194,8 @@ _DISCOVERY_GAP_GENERIC_WORDS = frozenset({
     "why", "will", "with", "would", "you", "your"})
 _DISCOVERY_GAP_PLACEHOLDER_WORDS = frozenset({
     "none", "null", "n/a", "tbd", "todo", "test", "tests", "placeholder",
-    "xxx", "xxxx", "stuff", "thing", "things", "misc", "other", "others"})
+    "xxx", "xxxx", "stuff", "thing", "things", "misc", "other", "others",
+    "row", "rows", "item", "items", "above", "below", "same", "following"})
 
 
 def discovery_gap_summary(sb: Path) -> dict:
@@ -9565,3 +9624,279 @@ def number_provenance_report(sb: Path, sources: list) -> dict:
     return {"unsourced": len(unsourced), "proved": len(proved),
             "examples": unsourced[:8]}
 AUDIT_ID_RE = re.compile(r"^AU-\d+$")
+
+# =====================================================================
+# REVIEW-AUDIT VALIDATION
+# =====================================================================
+def audit_coverage_problems(audit) -> list:
+    """Problems with the auditor's own coverage table.
+
+    `audit_artifact_problems` validates dispositions and (retired) adds; it
+    never read `coverage`, although the audit prompt requires one row per
+    M1-M36 / J1-J5 check. An auditor could omit the table -- or write one
+    generic row -- and the audit still passed, so the completeness of the
+    attack on the sweeps was unverified.
+    """
+    problems = []
+    if not isinstance(audit, dict):
+        return problems                       # the disposition checker names this
+    coverage = audit.get("coverage")
+    if not isinstance(coverage, list) or not coverage:
+        return ["audit/audit.json has no 'coverage' table: the audit must state, per "
+                "M1-M36 / J1-J5 check, that it re-derived it and what it found"]
+    known = {c.upper(): c for c in AUDIT_COVERAGE_CHECKS}
+
+    def _normalise(check: str) -> str:
+        # `M01`/`J05` are the padded spellings the census documents also use;
+        # an id-spelling difference must not read as a missing check.
+        m = re.fullmatch(r"([MJ])0*(\d+)", check, re.I)
+        return f"{m.group(1).upper()}{int(m.group(2))}" if m else check.upper()
+
+    seen = set()
+    for i, row in enumerate(coverage):
+        if not isinstance(row, dict):
+            problems.append(f"coverage[{i}] is not an object")
+            continue
+        check = _normalise(str(row.get("check") or "").strip())
+        if check not in known:
+            problems.append(f"coverage[{i}] check {row.get('check')!r} is not an "
+                            f"M1-M36/J1-J5 id")
+            continue
+        if check in seen:
+            problems.append(f"coverage names {check} twice")
+        seen.add(check)
+        disp = str(row.get("disposition") or "").strip()
+        if not disp:
+            problems.append(f"coverage {check} has an EMPTY disposition: every check "
+                            f"must record what the audit re-derived")
+        elif not _audit_disposition_ok(disp):
+            problems.append(f"coverage {check} disposition {disp!r} is not a real "
+                            f"disposition: record a finding count, `clean -- basis: "
+                            f"<artifact>`, `unable -- <reason>`, or the re-derivation "
+                            f"the audit performed")
+    missing = [c for c in AUDIT_COVERAGE_CHECKS if c not in seen]
+    if missing:
+        problems.append(
+            f"{len(missing)} coverage row(s) are missing: the audit must re-derive every "
+            f"M1-M36 / J1-J5 check and record it (missing: {', '.join(missing[:8])}"
+            + (" ..." if len(missing) > 8 else "") + ")")
+    return problems
+
+
+def _audit_drop_locator_problem(fid: str, evid: str, base_dir) -> str:
+    """Why a short `file:line` drop evidence does not resolve, or "".
+
+    `base_dir=None` preserves the pure-function contract used by callers that
+    have no sandbox; the authoritative postcheck passes base/ and resolves it.
+    """
+    if base_dir is None:
+        return ""
+    _m = re.fullmatch(r"([\w./\-]+):(\d+)(?:-(\d+))?", str(evid or "").strip())
+    if _m is None:
+        return ""
+    rel = _m.group(1)
+    if rel.startswith("base/"):
+        rel = rel[5:]
+    # The locator must stay inside the base the audit examined: `../outside.md`
+    # and an absolute path name readable host files that are not the base, so a
+    # fabricated location could satisfy the gate (F089).
+    if Path(rel).is_absolute() or ".." in Path(rel).parts:
+        return f"{fid}: the locator {evid!r} escapes base/"
+    base_real = Path(base_dir).resolve()
+    try:
+        target = (base_real / rel).resolve()
+        target.relative_to(base_real)
+    except (OSError, RuntimeError, ValueError):
+        return f"{fid}: the locator {evid!r} resolves outside base/"
+    start, end = int(_m.group(2)), int(_m.group(3) or _m.group(2))
+    if not target.is_file():
+        return f"{fid}: the locator {evid!r} names no file in base/"
+    text = read_text_bounded(target)
+    line_count = len(text.splitlines()) if text is not None else 0
+    if text is None:
+        return f"{fid}: the locator {evid!r} names an unreadable/oversize file in base/"
+    if start < 1 or end < start or end > line_count:
+        return (f"{fid}: the locator {evid!r} is outside base/{rel} "
+                f"({line_count} line(s))")
+    return ""
+
+
+def audit_drop_locator_problems(audit, base_dir) -> list:
+    out = []
+    for row in (audit or {}).get("dispositions") or []:
+        if isinstance(row, dict) and str(row.get("verdict") or "").strip() == "drop":
+            problem = _audit_drop_locator_problem(
+                str(row.get("id") or ""), str(row.get("evidence") or ""), base_dir)
+            if problem:
+                out.append(problem + "; a drop's evidence must resolve against the base "
+                                  "the audit examined")
+    return out
+
+
+def audit_artifact_problems(audit, frozen_ids, expected_round=None, base_dir=None) -> list:
+    """Every problem that makes an `audit/audit.json` unusable (pure, testable).
+
+    The contract is deliberately about DISPOSITIONS, not opinions: every frozen
+    id appears exactly once as confirm/drop, a drop carries a reason AND
+    evidence (so a human can re-open it), and an added finding has the same
+    shape as a review finding.  A drop that says "cannot tell" is not allowed:
+    an undecidable finding must be confirmed, because dropping it would hide it
+    from the reviser.
+    """
+    problems = []
+    if not isinstance(audit, dict):
+        return ["audit/audit.json does not parse as a JSON object"]
+    frozen = [str(i).strip() for i in (frozen_ids or []) if str(i).strip()]
+    disp = audit.get("dispositions")
+    if not isinstance(disp, list):
+        problems.append("audit/audit.json has no 'dispositions' list "
+                        "(one row per frozen finding id: confirm or drop)")
+        disp = []
+    seen = {}
+    drop_evidence = {}
+    for i, row in enumerate(disp):
+        if not isinstance(row, dict):
+            problems.append(f"dispositions[{i}] is not an object")
+            continue
+        fid = str(row.get("id") or "").strip()
+        verdict = str(row.get("verdict") or "").strip().lower()
+        reason = str(row.get("reason") or "").strip()
+        evid = str(row.get("evidence") or "").strip()
+        if not fid:
+            problems.append(f"dispositions[{i}] has no id")
+            continue
+        if fid in seen:
+            problems.append(f"{fid} appears twice in dispositions")
+        seen[fid] = verdict
+        if verdict not in AUDIT_VERDICTS:
+            problems.append(f"{fid}: verdict {verdict!r} is not confirm|drop")
+            continue
+        if verdict == "drop":
+            if len(reason) < 20:
+                problems.append(f"{fid}: a drop needs a reason (>=20 characters) the human "
+                                f"can re-check")
+            # A no-work sentence does not refute the finding (F09). A named
+            # reason that merely mentions the word and cites a location is a
+            # real refutation basis (R06).
+            elif _nowork_token_is_reason(reason):
+                problems.append(f"{fid}: a drop reason must refute the finding, not record "
+                                f"that no work was done")
+            # The prompt allows `the verbatim text, or the file:line derivation`;
+            # a precise short locator (`base/main.md:12`) is the documented form
+            # and must not fail the prose-length bar (F027).
+            _locator = re.fullmatch(r"([\w./\-]+):(\d+)(?:-(\d+))?", evid)
+            _locator_error = _audit_drop_locator_problem(fid, evid, base_dir)
+            if _locator_error:
+                problems.append(_locator_error + "; a drop's evidence must resolve against "
+                                "the base the audit examined")
+            elif len(evid) < 40 and _locator is None:
+                problems.append(f"{fid}: a drop needs EVIDENCE (>=40 characters: the verbatim "
+                                f"text, or the file:line derivation, that refutes the finding)")
+            else:
+                drop_evidence[fid] = evid
+    # A drop's evidence must be about THAT finding. Length alone let the same
+    # sentence close the whole frozen list ("the quoted text does not appear at
+    # the cited location") without any per-row re-check; the review-side
+    # disposition checker has the same boilerplate rule (this audit side did
+    # not). Grouping identical evidence is the exact test the finding names.
+    by_evidence = {}
+    for fid, evid in drop_evidence.items():
+        key = re.sub(r"\s+", " ", evid.strip().lower())
+        by_evidence.setdefault(key, []).append(fid)
+    for text, ids in sorted(by_evidence.items()):
+        if len(ids) < 2:
+            continue
+        # The id LIST is not a per-row re-check: a boilerplate sentence that
+        # names every id still says the same thing about all of them (F077).
+        problems.append(
+            f"{len(ids)} drop(s) reuse the SAME evidence ({_quote(text, 160)}) for "
+            f"{', '.join(ids[:4])}{' ...' if len(ids) > 4 else ''}: each drop claims its own "
+            f"re-check, so quote that finding's text or the file:line that refutes it")
+    missing = [i for i in frozen if i not in seen]
+    if missing:
+        problems.append(f"{len(missing)} frozen finding id(s) are neither confirmed nor dropped "
+                        f"(silence is not a disposition): {', '.join(missing[:6])}"
+                        + (" ..." if len(missing) > 6 else ""))
+    # An EMPTY frozen list is a legitimate review result, and any disposition id
+    # is then fabricated: the old `frozen and ...` guard disabled this check
+    # exactly when it mattered most.
+    unknown = [i for i in seen if i not in frozen]
+    if unknown:
+        problems.append(f"dispositions name {len(unknown)} id(s) that are not in the frozen "
+                        f"review: {', '.join(unknown[:6])}")
+    adds = audit.get("adds")
+    if adds is None:
+        adds = []
+    # The counts block calls len(adds): guard the list FIRST (F059/R05).
+    if not isinstance(adds, list):
+        problems.append("audit/audit.json 'adds' is not a list")
+        adds = []
+    # F059: round/counts/notes are schema fields; their VALUES are checked when
+    # present and their PRESENCE is required only when the expected round is known.
+    if "round" in audit:
+        if not isinstance(audit.get("round"), int) or isinstance(audit.get("round"), bool):
+            problems.append("audit/audit.json 'round' must be an integer")
+        elif expected_round is not None and audit.get("round") != int(expected_round):
+            problems.append(f"audit/audit.json 'round' is {audit.get('round')!r}, not this "
+                            f"run's round {int(expected_round)}")
+    elif expected_round is not None:
+        problems.append("audit/audit.json has no 'round': the audit must name the round it "
+                        "disposes")
+    if "notes" in audit and not str(audit.get("notes") or "").strip():
+        problems.append("audit/audit.json 'notes' is empty; the prompt requires a note")
+    elif "notes" not in audit and expected_round is not None:
+        problems.append("audit/audit.json has no 'notes': the prompt requires a note")
+    _conf = sum(1 for v in seen.values() if v == "confirm")
+    _drop = sum(1 for v in seen.values() if v == "drop")
+    if "counts" in audit:
+        _counts = audit.get("counts")
+        if not isinstance(_counts, dict):
+            problems.append("audit/audit.json 'counts' must be an object")
+        else:
+            _want_counts = {"confirmed": _conf, "dropped": _drop, "added": len(adds)}
+            for _k, _want in _want_counts.items():
+                _got = _counts.get(_k)
+                if not isinstance(_got, int) or isinstance(_got, bool) or _got < 0:
+                    problems.append(f"audit/audit.json counts.{_k} must be a non-negative "
+                                    f"integer")
+                elif _got != _want:
+                    problems.append(f"audit/audit.json counts.{_k} is {_got}, but the "
+                                    f"dispositions/adds record {_want}")
+    elif expected_round is not None:
+        problems.append("audit/audit.json has no 'counts': the prompt requires counts")
+    if adds:
+        # AGENTS Rule 1: the AUDIT disposes the frozen findings and GENERATES
+        # NO NEW FINDINGS. An observation the auditor cannot dispose belongs in
+        # audit/UNRESOLVED.md, not in an AU-* row the revisers would act on.
+        problems.append(
+            f"the review auditor generated {len(adds)} new finding(s) (AU-*); the audit "
+            "contract is disposition-only -- record unresolved observations in "
+            "audit/UNRESOLVED.md instead")
+    seen_add = set()
+    for i, row in enumerate(adds):
+        if not isinstance(row, dict):
+            # The `dispositions` loop above already reports a non-object row
+            # instead of dereferencing it; this loop read `row.get(...)`
+            # unconditionally and crashed cmd_selfcheck with an AttributeError.
+            problems.append(f"adds[{i}] is not an object")
+            continue
+        aid = str(row.get("id") or "").strip()
+        if not AUDIT_ID_RE.match(aid):
+            problems.append(f"adds[{i}] id {aid!r} is not AU-<n>")
+            aid = aid or f"adds[{i}]"
+        if aid in seen_add:
+            problems.append(f"added finding {aid} appears twice")
+        seen_add.add(aid)
+        for field, minimum in (("location", 3), ("evidence", 8), ("problem", 20)):
+            if len(str(row.get(field) or "").strip()) < minimum:
+                problems.append(f"{aid}: '{field}' is missing or too short")
+        if str(row.get("severity") or "").strip().lower() not in AUDIT_SEVERITIES:
+            problems.append(f"{aid}: severity must be Critical|Major|Minor|Fatal")
+        cat = row.get("category")
+        if isinstance(cat, str) and cat.strip().isdigit():
+            cat = int(cat.strip())
+        if not isinstance(cat, int) or not 0 <= cat <= 5:
+            problems.append(f"{aid}: category must be an integer 0-5")
+        if not str(row.get("check") or "").strip():
+            problems.append(f"{aid}: the check id (M1-M36/J1-J5) is missing")
+    return problems

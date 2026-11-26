@@ -2741,14 +2741,16 @@ def _docx_exemplar_text(path: Path):
             continue
         lines.append(text)
         style = mod.elem_val(mod.ppr_of(frag), "pStyle") or ""
-        # Resolve an arbitrary style id through styles.xml (F174): a real
-        # Heading 1 may carry the id `H1` and declare the name `heading 1`.
-        style_name = style if style.startswith("Heading") \
+        # Use the shared predicate, exactly like every other pipeline reader:
+        # a legal case-insensitive/H1/bare-level id is a heading here too (F063).
+        if not _docx_heading_style(style, style_names):
+            continue
+        style_name = style if str(style).lower().startswith("heading") \
             else (style_names.get(style) or style)
         m = re.match(r"(?i)^heading\s*([1-4])$",
-                     style_name.replace("-", "").replace(" ", ""))
+                     str(style_name).replace("-", "").replace(" ", ""))
         if not m:
-            m = re.match(r"(?i)^heading([1-4])$", style_name)
+            m = re.match(r"(?i)^h?([1-4])$", str(style).strip())
         if m:
             sections.append((int(m.group(1)), text))
     return sections, "\n".join(lines)

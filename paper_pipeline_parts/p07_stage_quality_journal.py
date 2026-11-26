@@ -494,225 +494,6 @@ def add_stage_quality_checks(ctx: Ctx, rec: dict, before_sources: list, after_so
     todo_errs, todo_warns = manual_todo_gate(pkg, mode=author_to_complete_mode_of(ctx))
     errs.extend(todo_errs)
     warns.extend(todo_warns)
-def audit_coverage_problems(audit) -> list:
-    """Problems with the auditor's own coverage table.
-
-    `audit_artifact_problems` validates dispositions and (retired) adds; it
-    never read `coverage`, although the audit prompt requires one row per
-    M1-M36 / J1-J5 check. An auditor could omit the table -- or write one
-    generic row -- and the audit still passed, so the completeness of the
-    attack on the sweeps was unverified.
-    """
-    problems = []
-    if not isinstance(audit, dict):
-        return problems                       # the disposition checker names this
-    coverage = audit.get("coverage")
-    if not isinstance(coverage, list) or not coverage:
-        return ["audit/audit.json has no 'coverage' table: the audit must state, per "
-                "M1-M36 / J1-J5 check, that it re-derived it and what it found"]
-    known = {c.upper(): c for c in AUDIT_COVERAGE_CHECKS}
-
-    def _normalise(check: str) -> str:
-        # `M01`/`J05` are the padded spellings the census documents also use;
-        # an id-spelling difference must not read as a missing check.
-        m = re.fullmatch(r"([MJ])0*(\d+)", check, re.I)
-        return f"{m.group(1).upper()}{int(m.group(2))}" if m else check.upper()
-
-    seen = set()
-    for i, row in enumerate(coverage):
-        if not isinstance(row, dict):
-            problems.append(f"coverage[{i}] is not an object")
-            continue
-        check = _normalise(str(row.get("check") or "").strip())
-        if check not in known:
-            problems.append(f"coverage[{i}] check {row.get('check')!r} is not an "
-                            f"M1-M36/J1-J5 id")
-            continue
-        if check in seen:
-            problems.append(f"coverage names {check} twice")
-        seen.add(check)
-        disp = str(row.get("disposition") or "").strip()
-        if not disp:
-            problems.append(f"coverage {check} has an EMPTY disposition: every check "
-                            f"must record what the audit re-derived")
-        elif not _audit_disposition_ok(disp):
-            problems.append(f"coverage {check} disposition {disp!r} is not a real "
-                            f"disposition: record a finding count, `clean -- basis: "
-                            f"<artifact>`, `unable -- <reason>`, or the re-derivation "
-                            f"the audit performed")
-    missing = [c for c in AUDIT_COVERAGE_CHECKS if c not in seen]
-    if missing:
-        problems.append(
-            f"{len(missing)} coverage row(s) are missing: the audit must re-derive every "
-            f"M1-M36 / J1-J5 check and record it (missing: {', '.join(missing[:8])}"
-            + (" ..." if len(missing) > 8 else "") + ")")
-    return problems
-
-
-def audit_artifact_problems(audit, frozen_ids, expected_round=None) -> list:
-    """Every problem that makes an `audit/audit.json` unusable (pure, testable).
-
-    The contract is deliberately about DISPOSITIONS, not opinions: every frozen
-    id appears exactly once as confirm/drop, a drop carries a reason AND
-    evidence (so a human can re-open it), and an added finding has the same
-    shape as a review finding.  A drop that says "cannot tell" is not allowed:
-    an undecidable finding must be confirmed, because dropping it would hide it
-    from the reviser.
-    """
-    problems = []
-    if not isinstance(audit, dict):
-        return ["audit/audit.json does not parse as a JSON object"]
-    frozen = [str(i).strip() for i in (frozen_ids or []) if str(i).strip()]
-    disp = audit.get("dispositions")
-    if not isinstance(disp, list):
-        problems.append("audit/audit.json has no 'dispositions' list "
-                        "(one row per frozen finding id: confirm or drop)")
-        disp = []
-    seen = {}
-    drop_evidence = {}
-    for i, row in enumerate(disp):
-        if not isinstance(row, dict):
-            problems.append(f"dispositions[{i}] is not an object")
-            continue
-        fid = str(row.get("id") or "").strip()
-        verdict = str(row.get("verdict") or "").strip().lower()
-        reason = str(row.get("reason") or "").strip()
-        evid = str(row.get("evidence") or "").strip()
-        if not fid:
-            problems.append(f"dispositions[{i}] has no id")
-            continue
-        if fid in seen:
-            problems.append(f"{fid} appears twice in dispositions")
-        seen[fid] = verdict
-        if verdict not in AUDIT_VERDICTS:
-            problems.append(f"{fid}: verdict {verdict!r} is not confirm|drop")
-            continue
-        if verdict == "drop":
-            if len(reason) < 20:
-                problems.append(f"{fid}: a drop needs a reason (>=20 characters) the human "
-                                f"can re-check")
-            # A no-work sentence does not refute the finding (F09). A named
-            # reason that merely mentions the word and cites a location is a
-            # real refutation basis (R06).
-            elif _nowork_token_is_reason(reason):
-                problems.append(f"{fid}: a drop reason must refute the finding, not record "
-                                f"that no work was done")
-            # The prompt allows `the verbatim text, or the file:line derivation`;
-            # a precise short locator (`base/main.md:12`) is the documented form
-            # and must not fail the prose-length bar (F027).
-            _locator = re.fullmatch(r"[\w./\-]+:\d+(?:-\d+)?", evid)
-            if len(evid) < 40 and _locator is None:
-                problems.append(f"{fid}: a drop needs EVIDENCE (>=40 characters: the verbatim "
-                                f"text, or the file:line derivation, that refutes the finding)")
-            else:
-                drop_evidence[fid] = evid
-    # A drop's evidence must be about THAT finding. Length alone let the same
-    # sentence close the whole frozen list ("the quoted text does not appear at
-    # the cited location") without any per-row re-check; the review-side
-    # disposition checker has the same boilerplate rule (this audit side did
-    # not). Grouping identical evidence is the exact test the finding names.
-    by_evidence = {}
-    for fid, evid in drop_evidence.items():
-        key = re.sub(r"\s+", " ", evid.strip().lower())
-        by_evidence.setdefault(key, []).append(fid)
-    for text, ids in sorted(by_evidence.items()):
-        if len(ids) < 2:
-            continue
-        generic = [fid for fid in ids if fid.lower() not in text]
-        if generic:
-            problems.append(
-                f"{len(ids)} drop(s) reuse the SAME evidence ({_quote(text, 160)}) and it "
-                f"names neither the finding id nor a finding-specific location for "
-                f"{', '.join(generic[:4])}: each drop claims its own re-check, so quote that "
-                f"finding's text or the file:line that refutes it")
-    missing = [i for i in frozen if i not in seen]
-    if missing:
-        problems.append(f"{len(missing)} frozen finding id(s) are neither confirmed nor dropped "
-                        f"(silence is not a disposition): {', '.join(missing[:6])}"
-                        + (" ..." if len(missing) > 6 else ""))
-    # An EMPTY frozen list is a legitimate review result, and any disposition id
-    # is then fabricated: the old `frozen and ...` guard disabled this check
-    # exactly when it mattered most.
-    unknown = [i for i in seen if i not in frozen]
-    if unknown:
-        problems.append(f"dispositions name {len(unknown)} id(s) that are not in the frozen "
-                        f"review: {', '.join(unknown[:6])}")
-    adds = audit.get("adds")
-    if adds is None:
-        adds = []
-    # The counts block calls len(adds): guard the list FIRST (F059/R05).
-    if not isinstance(adds, list):
-        problems.append("audit/audit.json 'adds' is not a list")
-        adds = []
-    # F059: round/counts/notes are schema fields; their VALUES are checked when
-    # present and their PRESENCE is required only when the expected round is known.
-    if "round" in audit:
-        if not isinstance(audit.get("round"), int) or isinstance(audit.get("round"), bool):
-            problems.append("audit/audit.json 'round' must be an integer")
-        elif expected_round is not None and audit.get("round") != int(expected_round):
-            problems.append(f"audit/audit.json 'round' is {audit.get('round')!r}, not this "
-                            f"run's round {int(expected_round)}")
-    elif expected_round is not None:
-        problems.append("audit/audit.json has no 'round': the audit must name the round it "
-                        "disposes")
-    if "notes" in audit and not str(audit.get("notes") or "").strip():
-        problems.append("audit/audit.json 'notes' is empty; the prompt requires a note")
-    elif "notes" not in audit and expected_round is not None:
-        problems.append("audit/audit.json has no 'notes': the prompt requires a note")
-    _conf = sum(1 for v in seen.values() if v == "confirm")
-    _drop = sum(1 for v in seen.values() if v == "drop")
-    if "counts" in audit:
-        _counts = audit.get("counts")
-        if not isinstance(_counts, dict):
-            problems.append("audit/audit.json 'counts' must be an object")
-        else:
-            _want_counts = {"confirmed": _conf, "dropped": _drop, "added": len(adds)}
-            for _k, _want in _want_counts.items():
-                _got = _counts.get(_k)
-                if not isinstance(_got, int) or isinstance(_got, bool) or _got < 0:
-                    problems.append(f"audit/audit.json counts.{_k} must be a non-negative "
-                                    f"integer")
-                elif _got != _want:
-                    problems.append(f"audit/audit.json counts.{_k} is {_got}, but the "
-                                    f"dispositions/adds record {_want}")
-    elif expected_round is not None:
-        problems.append("audit/audit.json has no 'counts': the prompt requires counts")
-    if adds:
-        # AGENTS Rule 1: the AUDIT disposes the frozen findings and GENERATES
-        # NO NEW FINDINGS. An observation the auditor cannot dispose belongs in
-        # audit/UNRESOLVED.md, not in an AU-* row the revisers would act on.
-        problems.append(
-            f"the review auditor generated {len(adds)} new finding(s) (AU-*); the audit "
-            "contract is disposition-only -- record unresolved observations in "
-            "audit/UNRESOLVED.md instead")
-    seen_add = set()
-    for i, row in enumerate(adds):
-        if not isinstance(row, dict):
-            # The `dispositions` loop above already reports a non-object row
-            # instead of dereferencing it; this loop read `row.get(...)`
-            # unconditionally and crashed cmd_selfcheck with an AttributeError.
-            problems.append(f"adds[{i}] is not an object")
-            continue
-        aid = str(row.get("id") or "").strip()
-        if not AUDIT_ID_RE.match(aid):
-            problems.append(f"adds[{i}] id {aid!r} is not AU-<n>")
-            aid = aid or f"adds[{i}]"
-        if aid in seen_add:
-            problems.append(f"added finding {aid} appears twice")
-        seen_add.add(aid)
-        for field, minimum in (("location", 3), ("evidence", 8), ("problem", 20)):
-            if len(str(row.get(field) or "").strip()) < minimum:
-                problems.append(f"{aid}: '{field}' is missing or too short")
-        if str(row.get("severity") or "").strip().lower() not in AUDIT_SEVERITIES:
-            problems.append(f"{aid}: severity must be Critical|Major|Minor|Fatal")
-        cat = row.get("category")
-        if isinstance(cat, str) and cat.strip().isdigit():
-            cat = int(cat.strip())
-        if not isinstance(cat, int) or not 0 <= cat <= 5:
-            problems.append(f"{aid}: category must be an integer 0-5")
-        if not str(row.get("check") or "").strip():
-            problems.append(f"{aid}: the check id (M1-M36/J1-J5) is missing")
-    return problems
 
 
 def audit_effect_summary(split: dict) -> dict:
@@ -867,6 +648,7 @@ def postcheck_audit(ctx: Ctx, rec: dict):
         # the pre-flight.
         problems = audit_artifact_problems(audit, frozen_ids,
                                            expected_round=rec.get("round"))
+        problems += audit_drop_locator_problems(audit, sb / "base")
         coverage_problems = audit_coverage_problems(audit)
         problems += coverage_problems
         errs.extend(problems)
@@ -2071,9 +1853,13 @@ def dedup_class_id(check) -> str:
     own class. A row with NO check id has no class and never merges.
     """
     cid = _norm_check_id(check)
-    m = _NUMERIC_CHECK_RE.match(cid)
+    m = _FROZEN_NUMERIC_CHECK_RE.match(cid)
     if m:
-        return f"M{int(m.group(1)):02d}"
+        # M ids stay zero-padded (the dedup ledger's documented spelling);
+        # J ids normalize to the frozen vocabulary's unpadded form so J05 and
+        # J5 are ONE class (F093).
+        n = int(m.group(2))
+        return f"M{n:02d}" if m.group(1).upper() == "M" else f"J{n}"
     return cid
 
 
@@ -3013,7 +2799,14 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                     _cell = " ".join(str(_v or "").split())
                     if JUDGE_DISPOSITION_RE.search(_cell):
                         disp_cell = _cell; break
-            if re.match(r"(?i)\s*finding\b", disp_cell):
+            # A finding row may spell its disposition `finding`, `major
+            # finding`, ...; only a NEGATED mention ("no finding", "no new
+            # finding") is not one.
+            _is_finding_row = bool(re.search(r"(?i)\bfinding\b", disp_cell)) \
+                and not re.search(
+                    r"(?i)\b(?:no|not|without)\s+(?:new\s+|additional\s+|further\s+)?"
+                    r"findings?\b", disp_cell)
+            if _is_finding_row:
                 # A finding row carries location, category (0-5), severity and
                 # a verbatim evidence quote (F038). A bare digit is not a
                 # category: `p. 2`/`line 4` used to satisfy the check (F12).
@@ -3036,6 +2829,14 @@ def judge_discovery_problems(sb: Path, rec: dict) -> tuple:
                 out_w.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a row with no disposition "
                              f"cell (`clean -- checked: <locations>` or a finding row): "
                              f"{text[:90]!r}")
+            elif re.search(r"(?i)\bunknown\b", disp_cell) \
+                    and not re.search(r"(?i)\bunknown\b\s*(?:--|\u2014|\u2013|:|-)\s*\S.{2,}",
+                                      disp_cell):
+                # The contract is `unknown -- counterpart undecidable: <why>`.
+                # A bare `unknown` states no reason and is not a disposition (F067).
+                out_e.append(f"{JUDGE_DISCOVERY_DIR}/{side}.md has a bare `unknown` row "
+                             f"without a reason; write `unknown -- counterpart undecidable: "
+                             f"<why>`: {text[:90]!r}")
             elif (re.search(r"(?i)\b(?:clean|no anomal(?:y|ies))\b", text)
                   and not re.search(r"(?i)\bchecked\b", text)):
                 # The block's clean closure is `clean -- checked: <locations>`,
@@ -3890,13 +3691,23 @@ def _response_change_span_problems(sb: Path, target: Path, rows: list) -> list:
                         # non-text preimage (figure/PDF) cannot be span-checked
                         # at all. Only a quote-like `before` is occurrence-tested
                         # so an invented passage is still refused (F11).
-                        _role_form = bool(re.search(
-                            r"(?i)\b(?:section|subsection|chapter|appendix|figure|"
-                            r"table|file|document|paragraph|page|supplement|"
-                            r"supplementary|abstract|methods|results|discussion|"
-                            r"conclusion|introduction|caption|legend|note|footnote|"
-                            r"bibliography|references|acknowledg\w*|title\s+page|"
-                            r"cover\s+letter)\s*[.!]?$", _rbefore))
+                        # Only a SHORT role/content phrase is the documented
+                        # alternative ("Methods section", "cover letter"). An
+                        # unanchored tail match accepted any invented sentence
+                        # ending in a role word (F062).
+                        _role_words = _rbefore.split()
+                        _role_form = (len(_role_words) <= 6
+                                      and not re.search(r"[!?;:]",
+                                                        _rbefore.rstrip(".!?"))
+                                      and bool(re.search(
+                                          r"(?i)\b(?:section|subsection|chapter|"
+                                          r"appendix|figure|table|file|document|"
+                                          r"paragraph|page|supplement|supplementary|"
+                                          r"abstract|methods|results|discussion|"
+                                          r"conclusion|introduction|caption|legend|"
+                                          r"note|footnote|bibliography|references|"
+                                          r"acknowledg\w*|title\s+page|cover\s+letter)"
+                                          r"\s*[.!]?$", _rbefore)))
                         if (_rptext is not None and not _role_form
                                 and _rbefore not in norm(_rptext)):
                             problems.append(
@@ -4943,14 +4754,29 @@ def journal_ledger_problems(ctx: Ctx, sb: Path, errs: list, warns: list,
             + [_label_text(lab, True) for lab in llm_hits]
             + human_hits + llm_hits).lower()
         author_words = {w for w in re.findall(r"[a-z0-9][a-z0-9_-]{2,}", author.lower())
-                        if w not in {"the", "review", "pre-filtered", "prefiltered"}}
+                        if w not in {"the", "review", "pre-filtered", "prefiltered",
+                                     "reviewer", "reviewers", "referee", "editor",
+                                     "editors", "anonymous"}}
+        # A reviewer NUMBER/name token is the distinctive attribution: the
+        # shared role word `reviewer` made `Reviewer 3` pass against a
+        # `Reviewer 1:` source (F098). Numbers are checked as whole tokens.
+        author_numbers = set(re.findall(r"\b\d+\b", str(author or "")))
 
         def _author_supported(word: str) -> bool:
             """A word (or its 5-character stem) appears in the source evidence."""
             return word in author_evidence or (len(word) >= 5
                                                and word[:5] in author_evidence)
 
-        if author and author_words and author_evidence \
+        _numbers_ok = all(re.search(rf"(?<!\d){re.escape(num)}(?!\d)", author_evidence)
+                          for num in author_numbers)
+        if author and author_evidence and not _numbers_ok:
+            unverified_authors.append(cid)
+            warns.append(f"concern {cid}: the author {author!r} is not named anywhere in the "
+                         f"feedback file(s) its `source` cites "
+                         f"({', '.join(human_hits + llm_hits) or source}); record the "
+                         f"attribution as manual and verify the reviewer/role name against "
+                         f"the source")
+        elif author and author_words and author_evidence \
                 and not any(_author_supported(w) for w in author_words):
             unverified_authors.append(cid)
             warns.append(f"concern {cid}: the author {author!r} is not named anywhere in the "
@@ -5256,8 +5082,10 @@ def concerns_finding_list_problems(sb: Path, data: dict) -> tuple:
                 _concern_row = next((r for r in rows if str(r.get("id")) == concern), None)
                 _quote = " ".join(str((_concern_row or {}).get("quote") or "").split()).strip("\"'“”‘’")
                 _ev = " ".join(str(f.get("evidence") or "").split()).strip("\"'“”‘’")
-                if _quote and _ev and _ev.lower() not in _quote.lower() \
-                        and _quote.lower() not in _ev.lower():
+                # ONE direction only: the finding's evidence must be the
+                # concern quote or a contiguous excerpt of it. Accepting the
+                # reverse let an agent append invented reviewer words (F068).
+                if _quote and _ev and _ev.lower() not in _quote.lower():
                     errs.append(f"finding {f.get('id')!r}: evidence is not the concern's "
                                 f"verbatim reviewer quote (quote the concern text or a "
                                 f"contiguous excerpt of it)")
@@ -9158,10 +8986,29 @@ def drive_journal_finalize(ctx: Ctx, *, cmd, timeout: int, jobs: int, retries: i
         # dispose every concern and every claim, and ONE repair pass applies the
         # confirmed defects (see p24; the repair edits only response/).
         if response_audit_of(ctx) == "on":
+            _pre_repair_response = response_dir
             response_dir, _ok, _paused = run_response_deliverable_chain(
                 ctx, r, response_dir, ph)
             if not _ok:
                 return False, _paused
+            # p25's acceptance receipt names the PRE-repair bytes. When the p24
+            # repair changed the letter, audit the final bytes with the same
+            # independent write-quality gate before they can ship (F017).
+            try:
+                _changed = (hash_manifest(response_dir / "response")
+                            != hash_manifest(_pre_repair_response / "response"))
+            except (OSError, ValueError):
+                _changed = True
+            if _changed:
+                _final_rec = {"id": f"{rid_response_repair(r)}_final",
+                              "kind": "response", "round": int(r), "status": "running"}
+                try:
+                    audit_write_output(response_dir, _final_rec, cmd, timeout,
+                                       output_rel="response")
+                except (OSError, ValueError, TypeError) as exc:
+                    print(f"[journal] the repaired response did not pass the independent "
+                          f"write-quality audit: {str(exc)[:400]}")
+                    return False, False
     dst = publish_journal_submission(ctx, target, label, response_dir=response_dir)
     ctx.state.setdefault("journal", {})
     ctx.state["journal"].update({"mode": journal_mode_of(ctx),
@@ -9706,7 +9553,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                 _audit,
                 [str(f.get("id") or "").strip() for f in _frozen_review_findings(sb)
                  if str(f.get("id") or "").strip()],
-                expected_round=rec.get("round")))
+                expected_round=rec.get("round"), base_dir=sb / "base"))
             # The coverage table is part of the contract the postcheck enforces:
             # `postcheck_audit` appends `audit_coverage_problems` to the same
             # disposition problems, so the pre-flight must run it too. It did

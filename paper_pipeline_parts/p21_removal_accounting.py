@@ -62,9 +62,10 @@ _CONTENT_UNIT_CONTAINED = 1.0
 # similarity terms, so "was effective" was 100% contained by "was not
 # effective". A merge must preserve the polarity of the unit it covers.
 _CONTENT_NEGATION_RE = re.compile(
-    r"(?i)\b(?:not|no|never|none|neither|nor|cannot|can't|won't|isn't|aren't|"
-    r"wasn't|weren't|doesn't|don't|didn't|failed|fails|failing|without|unable|"
-    r"lacked|lacks|lacking|refused|refuses|prevented|prevents|absent)\b")
+    r"(?i)\b(?:not|no|never|none|neither|nor|cannot|can['\u2019]t|won['\u2019]t|"
+    r"isn['\u2019]t|aren['\u2019]t|wasn['\u2019]t|weren['\u2019]t|"
+    r"doesn['\u2019]t|don['\u2019]t|didn['\u2019]t|failed|fails|failing|without|"
+    r"unable|lacked|lacks|lacking|refused|refuses|prevented|prevents|absent)\b")
 
 
 def _content_unit_contained(unit: dict, candidates: list,
@@ -486,8 +487,9 @@ def _reason_denies_movement(reason: str) -> bool:
              r"integrated?|integrating|reported|reporting|restated?|restating|"
              r"included?|including|placed?|placing|put|putting|found|finding|"
              r"survives?|surviving)")
-    negations = (r"(?:not|never|no|failed|unable|didn't|did\s+not|could\s+not|"
-                 r"cannot|can't|without)")
+    negations = (r"(?:not|never|no|failed|unable|didn['\u2019]t|did\s+not|"
+                 r"wasn['\u2019]t|isn['\u2019]t|aren['\u2019]t|weren['\u2019]t|"
+                 r"could\s+not|cannot|can['\u2019]t|without)")
     # A denial can be POST-POSED after the movement word: "moving to Methods
     # was not possible" / "merging into Results could not be done". The old
     # clause test required the negation to precede the verb, so these fell

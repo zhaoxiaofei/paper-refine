@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 import tempfile
+import zlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -262,14 +263,23 @@ def test_f083_provenance_ledgers_are_decision_artifacts():
 
 
 # ---------------------------------------------------------------- F084
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (len(payload).to_bytes(4, "big") + kind + payload
+            + (zlib.crc32(kind + payload) & 0xffffffff).to_bytes(4, "big"))
+
+
 def _png_bytes(sig_only: bool = False) -> bytes:
     sig = b"\x89PNG\r\n\x1a\n"
     if sig_only:
         return sig
-    ihdr = (13).to_bytes(4, "big") + b"IHDR" + (800).to_bytes(4, "big") \
-        + (600).to_bytes(4, "big") + bytes([8, 2, 0, 0, 0]) + b"\x00\x00\x00\x00"
-    idat = (4).to_bytes(4, "big") + b"IDAT" + b"\x78\x9c\x01\x00" + b"\x00\x00\x00\x00"
-    iend = (0).to_bytes(4, "big") + b"IEND" + b"\x00\x00\x00\x00"
+    # A REAL 800x600 RGB image: a valid zlib IDAT stream, correct CRCs and
+    # IEND. The old 4-byte IDAT declared image data but was not a decodable
+    # PNG; F049 now verifies the stream (the old fixture encoded the defect).
+    ihdr = _png_chunk(b"IHDR", (800).to_bytes(4, "big") + (600).to_bytes(4, "big")
+                      + bytes([8, 2, 0, 0, 0]))
+    raw = (b"\x00" + b"\x00" * (800 * 3)) * 600
+    idat = _png_chunk(b"IDAT", zlib.compress(raw))
+    iend = _png_chunk(b"IEND", b"")
     return sig + ihdr + idat + iend
 
 
