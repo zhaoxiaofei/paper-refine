@@ -738,7 +738,16 @@ class Ctx:
                 continue
         return False
 
-    def load(self, need_cfg: bool = True) -> None:
+    def load(self, need_cfg: bool = True, read_only: bool = False) -> None:
+        """Read the root's config and state into this Ctx.
+
+        `read_only` skips the two directory creations below: `status` and
+        `agents` are documented to create no session and write nothing into the
+        root they inspect, but the shared loader used to `mkdir` `runs/` and
+        `reports/` on every load, so a read-only inspection mutated the artifact
+        and a 0555 root without those directories died with a bare
+        PermissionError (F01).
+        """
         if not self.root.is_dir():
             die(f"pipeline root not found: {self.root}  (run `setup` first)")
         _legacy = legacy_input_area_problems(self.root)
@@ -995,8 +1004,9 @@ class Ctx:
         if self.strict_venue and self.venue_problems:
             die("--strict-venue: fix the venue/journal configuration above (set-venue / "
                 "set-journal) or drop the flag to run with warnings only.")
-        self.runs_dir.mkdir(parents=True, exist_ok=True)
-        self.reports_dir.mkdir(parents=True, exist_ok=True)
+        if not read_only:
+            self.runs_dir.mkdir(parents=True, exist_ok=True)
+            self.reports_dir.mkdir(parents=True, exist_ok=True)
         if not self.state["runs"] and self.runs_dir.is_dir():
             orphans = sorted(p.name for p in self.runs_dir.iterdir()
                              if p.is_dir() and not p.name.startswith("_"))
@@ -3212,54 +3222,276 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
     return out.getvalue(), notes
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+_PNG_MAX_FILE_BYTES = 32 * 1024 * 1024
+_PNG_MAX_RAW_BYTES = 64 * 1024 * 1024
+
+
+def _png_is_a_real_image(p: Path) -> bool:
+    """True only for a structurally valid PNG with decodable image data.
+
+    The 8-byte signature is not a page: a stage that never rendered the DOCX can
+    write the magic, a header and a one-byte IDAT and satisfy the visual gate
+    (F049/F084). The chunk walk verifies every CRC, requires IEND, and
+    decompresses the concatenated IDAT stream with the standard library (the
+    pipeline ships no PIL).
+
+    The decode is BOUNDED (F04): `p.read_bytes()` and a whole-stream
+    `zlib.decompress` let a 65 KB agent-written PNG expand to a multi-gigabyte
+    allocation, and checking only a LOWER bound accepted a 1x1 header whose
+    payload was 64 MiB. The file has a render-size cap, the decoder stops at the
+    expected scanline length + 1, and the payload must equal that length
+    exactly (extra compressed data is rejected too).
+    """
+    import struct
+    import zlib
+    try:
+        size = p.stat().st_size
+        if size < 8 or size > _PNG_MAX_FILE_BYTES:
+            return False
+        data = p.read_bytes()
+        if data[:8] != _PNG_SIGNATURE:
+            return False
+        pos = 8
+        seen_ihdr = False
+        seen_iend = False
+        idat = []
+        width = height = 0
+        bit_depth = color_type = interlace = 0
+        while pos + 12 <= len(data):
+            length = int.from_bytes(data[pos:pos + 4], "big")
+            kind = data[pos + 4:pos + 8]
+            if pos + 12 + length > len(data):
+                return False
+            payload = data[pos + 8:pos + 8 + length]
+            crc = int.from_bytes(data[pos + 8 + length:pos + 12 + length], "big")
+            if zlib.crc32(kind + payload) & 0xffffffff != crc:
+                return False
+            if kind == b"IHDR":
+                # IHDR is the FIRST chunk by specification; accepting it after
+                # IDAT let a decoder-invalid file pass the visual gate (F032).
+                if pos != 8 or length != 13 or seen_ihdr:
+                    return False
+                width, height = struct.unpack(">II", payload[:8])
+                bit_depth, color_type = payload[8], payload[9]
+                interlace = payload[12]
+                if width <= 0 or height <= 0:
+                    return False
+                seen_ihdr = True
+            elif kind == b"IDAT":
+                if not seen_ihdr:
+                    return False
+                idat.append(payload)
+            elif kind == b"IEND":
+                seen_iend = True
+                break
+            pos += 12 + length
+        if not (seen_ihdr and seen_iend and idat):
+            return False
+        stream = b"".join(idat)
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}.get(color_type)
+        expected = None
+        if channels and bit_depth in (1, 2, 4, 8, 16) and not interlace:
+            row_bits = width * channels * bit_depth
+            row_bytes = (row_bits + 7) // 8
+            expected = height * (row_bytes + 1)
+        if expected is not None:
+            if expected <= 0 or expected > _PNG_MAX_RAW_BYTES:
+                return False
+            dec = zlib.decompressobj()
+            raw = dec.decompress(stream, expected + 1)
+            # A payload LONGER than the header's shape is the bomb; a shorter
+            # one is a truncated/absent image. Either way it is not a render.
+            if len(raw) != expected:
+                return False
+            if not dec.eof or dec.unconsumed_tail or dec.unused_data:
+                return False
+            # The first byte of every scanline is its filter type 0-4.
+            stride = row_bytes + 1
+            if any(raw[i * stride] > 4 for i in range(height)):
+                return False
+            return True
+        # An unknown/interlaced layout still needs a bounded, complete,
+        # non-empty decode.
+        dec = zlib.decompressobj()
+        raw = dec.decompress(stream, _PNG_MAX_RAW_BYTES + 1)
+        if not raw or len(raw) > _PNG_MAX_RAW_BYTES or not dec.eof:
+            return False
+        if dec.unconsumed_tail or dec.unused_data:
+            return False
+        return True
+    except (OSError, ValueError, zlib.error, struct.error):
+        return False
+
+
+def _jpeg_render_is_real(data: bytes) -> bool:
+    """True only when `data` is a structurally plausible JPEG page render.
+
+    Marker presence is not structure: the 8-byte stub
+    `ff d8 ff da 00 00 ff d9` carries both a scan marker and an EOI trailer and
+    used to pass. Walk the marker segments and require a SOF frame header with
+    sane precision/dimensions and at least one SOS scan before the EOI (F04).
+    """
+    if not data.startswith(b"\xff\xd8\xff"):
+        return False
+    n = len(data)
+    i = 2
+    seen_sof = False
+    while i < n:
+        if data[i] != 0xFF:
+            return False
+        while i < n and data[i] == 0xFF:
+            i += 1
+        if i >= n:
+            return False
+        marker = data[i]
+        i += 1
+        if marker == 0xD9:  # EOI before any scan: not a render
+            return False
+        if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+            continue
+        if i + 2 > n:
+            return False
+        seglen = int.from_bytes(data[i:i + 2], "big")
+        if seglen < 2 or i + seglen > n:
+            return False
+        if (0xC0 <= marker <= 0xCF) and marker not in (0xC4, 0xC8, 0xCC):
+            # SOFn: precision, height, width, component count.
+            if seglen < 8:
+                return False
+            precision = data[i + 2]
+            height = int.from_bytes(data[i + 3:i + 5], "big")
+            width = int.from_bytes(data[i + 5:i + 7], "big")
+            components = data[i + 7]
+            if (precision not in (8, 12, 16) or not (0 < width <= 65535)
+                    or not (0 < height <= 65535) or not (1 <= components <= 4)):
+                return False
+            seen_sof = True
+        i += seglen
+        if marker == 0xDA:  # SOS: the entropy-coded scan follows.
+            return seen_sof and data.rfind(b"\xff\xd9") > i
+    return False
+
+
+def _tiff_render_is_real(p, head: bytes) -> bool:
+    """True only when a classic TIFF's first IFD carries image DATA.
+
+    One arbitrary IFD entry that fits in the file is not an image: a 26-byte
+    header with a single empty entry passed. Require ImageWidth/ImageLength
+    with sane values, a StripOffsets/TileOffsets entry AND its matching
+    StripByteCounts/TileByteCounts, and require every declared strip/tile byte
+    range to lie inside the file, beyond the 8-byte header, and outside the
+    first IFD. A 62-byte file whose StripOffsets=8 pointed at its own IFD was
+    accepted by an offset-only range check (F04/R02).
+    """
+    if head[:4] not in (b"II*\x00", b"MM\x00*"):
+        return False
+    endian = "little" if head[:2] == b"II" else "big"
+
+    def u(raw: bytes) -> int:
+        return int.from_bytes(raw, endian)
+
+    try:
+        size = p.stat().st_size
+        off = u(head[4:8])
+        if off < 8 or off + 2 > size:
+            return False
+        with open(p, "rb") as fh:
+            fh.seek(off)
+            count_bytes = fh.read(2)
+            if len(count_bytes) != 2:
+                return False
+            count = u(count_bytes)
+            if count <= 0 or off + 2 + count * 12 + 4 > size:
+                return False
+            tags = {}
+            for k in range(count):
+                fh.seek(off + 2 + k * 12)
+                ent = fh.read(12)
+                if len(ent) != 12:
+                    return False
+                tags.setdefault(u(ent[0:2]), (u(ent[2:4]), u(ent[4:8]), ent[8:12]))
+    except OSError:
+        return False
+
+    def values(typ: int, cnt: int, raw: bytes):
+        # A single SHORT/LONG value is stored left-justified in the value
+        # field; a longer array is a file offset to `cnt` values.
+        if cnt < 1 or typ not in (3, 4):
+            return None
+        if cnt == 1:
+            return [u(raw[:2])] if typ == 3 else [u(raw[:4])]
+        arr = u(raw[:4])
+        width = 2 if typ == 3 else 4
+        need = cnt * width
+        if arr < 8 or arr + need > size:
+            return None
+        try:
+            with open(p, "rb") as fh:
+                fh.seek(arr)
+                blob = fh.read(need)
+        except OSError:
+            return None
+        if len(blob) != need:
+            return None
+        return [u(blob[k * width:(k + 1) * width]) for k in range(cnt)]
+
+    def one(tag: int):
+        vals = values(*tags[tag]) if tag in tags else None
+        return vals[0] if vals else None
+
+    width = one(256)
+    height = one(257)
+    if 273 in tags:
+        strip, counts = tags[273], tags.get(279)
+    else:
+        strip, counts = tags.get(324), tags.get(325)
+    if width is None or height is None or strip is None or counts is None:
+        return False
+    if not (0 < width <= 100000 and 0 < height <= 100000):
+        return False
+    typ, cnt, raw = strip
+    offs = values(typ, cnt, raw)
+    lens = values(*counts)
+    if offs is None or lens is None or len(offs) != len(lens):
+        return False
+    ifd_start = off
+    ifd_end = off + 2 + count * 12 + 4
+    for data_off, data_len in zip(offs, lens):
+        if data_len <= 0 or data_off < 8:
+            return False
+        if data_off + data_len > size:
+            return False
+        # The strip/tile bytes must be image data, not the header or the IFD
+        # that describes them.
+        if data_off < ifd_end and data_off + data_len > ifd_start:
+            return False
+    return True
+
+
 def raster_render_is_real(p, head: bytes, suf: str):
     """True/False for a JPEG/TIFF render, or None when `suf` is another format.
 
     Moved here from p06 so that part stays under its documented 10,000-line
     ceiling. `head` is the 8-byte magic the caller already read. Magic alone is
-    an 8-byte stub: a JPEG must carry a scan marker and an EOI trailer, and a
-    TIFF must have a readable first IFD whose entries fit inside the file
-    (F031).
+    an 8-byte stub; the JPEG/TIFF helpers above validate real frame/image
+    structure, not just marker presence (F031/F04).
     """
     if suf in (".jpg", ".jpeg"):
-        # Magic alone is an 8-byte stub: require a scan marker AND an EOI
-        # trailer, which a real render carries (F031).
         if not head.startswith(b"\xff\xd8\xff"):
             return False
         try:
-            size = p.stat().st_size
+            # Bound the read: a render is a page image, not a multi-GB
+            # agent-written blob.
             with open(p, "rb") as fh:
-                # Bound the read: a render is a page image, not a multi-GB
-                # agent-written blob. The tail is read separately for the EOI.
                 data = fh.read(64 * 1024 * 1024)
-                if size > len(data):
-                    fh.seek(max(0, size - 4096))
-                    tail = fh.read()
-                else:
-                    tail = data[-1024:]
         except OSError:
             return False
-        return b"\xff\xda" in data and b"\xff\xd9" in tail
+        return _jpeg_render_is_real(data)
     if suf in (".tif", ".tiff"):
-        # A TIFF header is 8 bytes; require a readable first IFD with at least
-        # one entry that fits inside the file (F031).
-        if head[:4] not in (b"II*\x00", b"MM\x00*"):
-            return False
-        endian = "little" if head[:2] == b"II" else "big"
-        try:
-            size = p.stat().st_size
-            off = int.from_bytes(head[4:8], endian)
-            if off < 8 or off + 2 > size:
-                return False
-            with open(p, "rb") as fh:
-                fh.seek(off)
-                count_bytes = fh.read(2)
-            if len(count_bytes) != 2:
-                return False
-            count = int.from_bytes(count_bytes, endian)
-            return count > 0 and off + 2 + count * 12 + 4 <= size
-        except OSError:
-            return False
+        return _tiff_render_is_real(p, head)
     return None
 
 

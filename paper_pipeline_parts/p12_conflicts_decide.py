@@ -1953,6 +1953,12 @@ def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
             # whole row with no gap (F13).
             val = float(str(r[vi]).strip().replace("\u2212", "-"))
         except ValueError:
+            # A malformed value makes the method's pooled-unit set incomplete:
+            # exclude the WHOLE method, or the partial mean over its readable
+            # rows is later compared while the gap claims it was NOT compared
+            # (F02). `unusable` is what the return filters on.
+            unusable.add(key)
+            groups.pop(key, None)
             if gaps is not None:
                 gaps.append(f"{path.name}: method {key!r} was NOT compared: its value "
                             f"{str(r[vi]).strip()!r} is not numeric")
@@ -3261,6 +3267,13 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
             break
         for r in body:
             if len(r) <= max(mi, ni, avi):
+                # A truncated row was dropped silently, so a pooled table whose
+                # only rows are short came back as an empty list -- which reads
+                # as "PKG-15 ran and found nothing" (F03). Name the unexamined
+                # row instead.
+                gaps.append(f"{p.relative_to(root).as_posix()}: a row has no "
+                            f"method/n_units/mean cell ({len(r)} column(s)); it was "
+                            f"NOT compared")
                 continue
             method = str(r[mi]).strip()
             if method not in units:
@@ -3279,6 +3292,12 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                 n_table = int(float(str(r[ni]).strip().replace("\u2212", "-")))
                 mean_table = float(str(r[avi]).strip().replace("\u2212", "-"))
             except ValueError:
+                # Same rule as the units table above: an unreadable n/mean on
+                # the POOLED side is a named coverage gap, never a clean scan
+                # (F03).
+                gaps.append(f"{p.relative_to(root).as_posix()}: method {method!r} was "
+                            f"NOT compared: its n_units {str(r[ni]).strip()!r} or mean "
+                            f"{str(r[avi]).strip()!r} is not numeric")
                 continue
             n_units, mean_units = units[method]
             if n_table >= n_units and abs(mean_table - mean_units) <= max(
@@ -8748,7 +8767,9 @@ def cmd_sync_code(args) -> None:
 def cmd_status(args) -> None:
     ctx = Ctx(Path(args.root).resolve(),
               strict_venue=bool(getattr(args, "strict_venue", False)))
-    ctx.load()
+    # `status` is read-only: it must not create runs/ or reports/ in the root
+    # it inspects (F01).
+    ctx.load(read_only=True)
     print(f"pipeline root: {ctx.root}")
     print(f"source:        {ctx.cfg.get('source')}")
     # WHICH code this root actually runs: the snapshot frozen at setup, and

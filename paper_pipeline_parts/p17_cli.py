@@ -2301,7 +2301,9 @@ def cmd_agents(args) -> None:
     # pipeline-identity note) out of the JSON body and hand it back as a field.
     captured = io.StringIO()
     with contextlib.redirect_stdout(captured):
-        ctx.load()
+        # `agents` is read-only: it must not create runs/ or reports/ in the
+        # root it inspects (F01).
+        ctx.load(read_only=True)
     notes = [ln for ln in captured.getvalue().splitlines() if ln.strip()]
     only = parse_only_spec(getattr(args, "only", None))
     if only is not None and only.is_everything():

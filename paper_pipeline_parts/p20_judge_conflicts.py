@@ -1391,11 +1391,19 @@ ISSUE_MATRIX_META_FIELDS = ("run", "round", "version")
 def issue_matrix_rows(ctx: Ctx, r: int, agg: dict) -> tuple:
     """(cell names, rows) for the NON-cumulative severity_tier_category matrix."""
     field = [str(v) for v in (agg.get("field") or [])]
-    names, matrix, _cum = issue_matrix_and_cumulative(agg.get("issue_census") or {}, field)
+    census = agg.get("issue_census") or {}
+    names, matrix, _cum = issue_matrix_and_cumulative(census, field)
     rows = []
     for vid in field:
         row = {"run": ctx.root.name, "round": int(r), "version": vid}
-        row.update({name: matrix[str(vid)][i] for i, name in enumerate(names)})
+        if not _census_row_measured(_census_row(vid, census)):
+            # A member with no MEASURED census row must not be published as a
+            # measured, defect-free row of zeros: the ranking treats it as
+            # missing evidence, and the durable CSV/report must say the same
+            # (F05).
+            row.update({name: "-" for name in names})
+        else:
+            row.update({name: matrix[str(vid)][i] for i, name in enumerate(names)})
         rows.append(row)
     return names, rows
 
@@ -1403,12 +1411,15 @@ def issue_matrix_rows(ctx: Ctx, r: int, agg: dict) -> tuple:
 def issue_cumulative_rows(ctx: Ctx, r: int, agg: dict) -> tuple:
     """(cell names, rows) for the PREFIX-SUM severity_tier_category matrix."""
     field = [str(v) for v in (agg.get("field") or [])]
-    names, _matrix, cumulative = issue_matrix_and_cumulative(
-        agg.get("issue_census") or {}, field)
+    census = agg.get("issue_census") or {}
+    names, _matrix, cumulative = issue_matrix_and_cumulative(census, field)
     rows = []
     for vid in field:
         row = {"run": ctx.root.name, "round": int(r), "version": vid}
-        row.update({name: cumulative[str(vid)][i] for i, name in enumerate(names)})
+        if not _census_row_measured(_census_row(vid, census)):
+            row.update({name: "-" for name in names})
+        else:
+            row.update({name: cumulative[str(vid)][i] for i, name in enumerate(names)})
         rows.append(row)
     return names, rows
 
@@ -1492,6 +1503,14 @@ def issue_census_table(agg: dict) -> list:
     rows = []
     for vid in agg.get("field") or []:
         c = census.get(vid) or {}
+        if not _census_row_measured(c):
+            # An absent (or present-but-empty) census is MISSING EVIDENCE. It
+            # used to render every tier/severity as "0" and own/peer as "0/0",
+            # stating an unmeasured member was measured and defect-free (F05).
+            rows.append([vid]
+                        + ["-"] * (len(BASIS_TIERS) + len(SEVERITY_TIE_ORDER))
+                        + ["-/-", "-", "-"])
+            continue
         tiers = c.get("tiers") or {}
         sevs = c.get("severities") or {}
         rows.append([vid]
