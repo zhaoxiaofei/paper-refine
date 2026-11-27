@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 05/26 of the pipeline -- executed by the
+# Part 05/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -3212,6 +3212,57 @@ def _sanitize_ooxml_bytes(data: bytes, file_map: dict = None, old_rel: str = "")
     return out.getvalue(), notes
 
 
+def raster_render_is_real(p, head: bytes, suf: str):
+    """True/False for a JPEG/TIFF render, or None when `suf` is another format.
+
+    Moved here from p06 so that part stays under its documented 10,000-line
+    ceiling. `head` is the 8-byte magic the caller already read. Magic alone is
+    an 8-byte stub: a JPEG must carry a scan marker and an EOI trailer, and a
+    TIFF must have a readable first IFD whose entries fit inside the file
+    (F031).
+    """
+    if suf in (".jpg", ".jpeg"):
+        # Magic alone is an 8-byte stub: require a scan marker AND an EOI
+        # trailer, which a real render carries (F031).
+        if not head.startswith(b"\xff\xd8\xff"):
+            return False
+        try:
+            size = p.stat().st_size
+            with open(p, "rb") as fh:
+                # Bound the read: a render is a page image, not a multi-GB
+                # agent-written blob. The tail is read separately for the EOI.
+                data = fh.read(64 * 1024 * 1024)
+                if size > len(data):
+                    fh.seek(max(0, size - 4096))
+                    tail = fh.read()
+                else:
+                    tail = data[-1024:]
+        except OSError:
+            return False
+        return b"\xff\xda" in data and b"\xff\xd9" in tail
+    if suf in (".tif", ".tiff"):
+        # A TIFF header is 8 bytes; require a readable first IFD with at least
+        # one entry that fits inside the file (F031).
+        if head[:4] not in (b"II*\x00", b"MM\x00*"):
+            return False
+        endian = "little" if head[:2] == b"II" else "big"
+        try:
+            size = p.stat().st_size
+            off = int.from_bytes(head[4:8], endian)
+            if off < 8 or off + 2 > size:
+                return False
+            with open(p, "rb") as fh:
+                fh.seek(off)
+                count_bytes = fh.read(2)
+            if len(count_bytes) != 2:
+                return False
+            count = int.from_bytes(count_bytes, endian)
+            return count > 0 and off + 2 + count * 12 + 4 <= size
+        except OSError:
+            return False
+    return None
+
+
 def _blank_pdf_value(value: bytes) -> bytes:
     """A same-length neutral PDF value (offsets must not move)."""
     if value.startswith(b"(") and value.endswith(b")"):
@@ -3232,7 +3283,14 @@ def _blank_xmp_fields(stream: bytes) -> bytes:
     # element loop cannot see those, so the document id/derived-from filename
     # survived a blinded PDF (F029).
     for attr in (b"xmpMM:DocumentID", b"xmpMM:InstanceID", b"xmpMM:OriginalDocumentID",
-                 b"pdf:Keywords"):
+                 b"pdf:Keywords",
+                 # The SAME author-identifying properties in attribute form:
+                 # blanking only the element form left xmp:CreatorTool,
+                 # pdf:Producer, dc:title and dc:description in the judge view
+                 # (F098).
+                 b"xmp:CreatorTool", b"xmp:CreateDate", b"xmp:ModifyDate",
+                 b"xmp:MetadataDate", b"pdf:Producer", b"dc:title",
+                 b"dc:description", b"dc:subject", b"xmpMM:DerivedFrom"):
         apat = re.compile(rb"(\b" + attr + rb"\s*=\s*)([\"'])(.*?)\2", re.S)
         stream = apat.sub(
             lambda m: m.group(1) + m.group(2) + b" " * len(m.group(3)) + m.group(2),
@@ -5262,16 +5320,26 @@ def cold_start_obligation_rows(root: Path, limit: int = 200, area_names=None) ->
                          "obligation": f"{r.get('reference')} (in {r.get('file')}:{r.get('line')})",
                          "resolves": "no (the submission does not carry it)",
                          "where": str(r.get("detail") or "")[:120]})
-    except Exception:                                             # noqa: BLE001
-        pass
+    except Exception as e:                                        # noqa: BLE001
+        # A crashed scanner must not silently drop a whole obligation family:
+        # record the coverage gap the reviewer has to work around (F064).
+        rows.append({"family": "coverage",
+                     "obligation": f"the written-pointer scan failed: "
+                                   f"{type(e).__name__}: {str(e)[:160]}",
+                     "resolves": "gap",
+                     "where": "the 'written pointer' family is INCOMPLETE"})
     try:
         for r in package_display_item_rows(root):
             rows.append({"family": "cited display item",
                          "obligation": f"{r.get('reference')} (cited in {r.get('file')})",
                          "resolves": "no (no matching file)",
                          "where": str(r.get("detail") or "")[:120]})
-    except Exception:                                             # noqa: BLE001
-        pass
+    except Exception as e:                                        # noqa: BLE001
+        rows.append({"family": "coverage",
+                     "obligation": f"the display-item scan failed: "
+                                   f"{type(e).__name__}: {str(e)[:160]}",
+                     "resolves": "gap",
+                     "where": "the 'cited display item' family is INCOMPLETE"})
     coverage = {"family": "coverage",
                 "obligation": f"the corpus carries {len(carried)} file(s); "
                               f"{len(submitted)} declared as submitted",
@@ -6294,9 +6362,16 @@ def materialize_revise(ctx: Ctx, r: int, vid: str) -> dict:
         # chain is off, the generated concerns are consumed unaudited (the
         # skip is recorded by the scheduler).
         _crepair = ctx.run(rid_concern_repair(r))
-        merge_rid = (rid_concern_repair(r)
-                     if _crepair is not None and _crepair.get("status") == "done"
-                     else rid_concerns(r))
+        # A done repair is the ledger. A non-done repair BLOCKS when the
+        # concern audit/repair policy is on; only a policy-off round falls back
+        # to the generated (unaudited) ledger (F018). `_require_done` below then
+        # names the failed/pending repair instead of consuming the wrong one.
+        if (_crepair is not None and _crepair.get("status") == "done"):
+            merge_rid = rid_concern_repair(r)
+        elif _crepair is not None and concern_audit_of(ctx) == "on":
+            merge_rid = rid_concern_repair(r)
+        else:
+            merge_rid = rid_concerns(r)
         review_only = False
     else:
         # ONE policy for "which run defines the round's frozen review" (p19),

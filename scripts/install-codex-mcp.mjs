@@ -985,6 +985,13 @@ function main() {
     const requested = slug(`${opts.prefix || ''}${server.name || 'server'}`);
     if (opts.merge && keep.some((item) => item.serverName === requested)) {
       usedNames.delete(requested);
+      // The kept row is about to be REPLACED, so its id is free too. Leaving
+      // it in usedIds made uniqueId pick `<id>-2` on one run and flip back to
+      // `<id>` the next, a non-idempotent patch on every --merge (F012).
+      for (const item of keep) {
+        if (item.serverName !== requested) continue;
+        for (const id of collectExistingIds(item.lines.join('\n'))) usedIds.delete(id);
+      }
     }
     const result = transformServer(server, opts, usedNames, usedIds, plugin.name);
     if (result.skipped) {

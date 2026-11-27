@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-# Part 02/26 of the pipeline -- executed by the
+# Part 02/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
 from __future__ import annotations
+
+import io
 
 
 _ranking = _load_pipeline_module("paper_pipeline_parts/ranking.py")
@@ -18,6 +20,7 @@ tiebreak_cell_specs = _ranking.tiebreak_cell_specs
 tiebreak_cell_names = _ranking.tiebreak_cell_names
 tiebreak_group_severities = _ranking.tiebreak_group_severities
 _census_row = _ranking._census_row
+_census_row_measured = _ranking._census_row_measured
 issue_matrix_and_cumulative = _ranking.issue_matrix_and_cumulative
 tiebreak_prefix_cells = _ranking.tiebreak_prefix_cells
 _issue_summary_from_census = _ranking._issue_summary_from_census
@@ -5180,14 +5183,15 @@ def _manual_todo_csv_rows(rows: list) -> list:
 def _manual_csv_matches(path: Path, rows: list) -> bool:
     expected = [list(MANUAL_TODO_COLUMNS)] + [
         [r[c] for c in MANUAL_TODO_COLUMNS] for r in _manual_todo_csv_rows(rows)]
+    # The path is agent-writable: a check-then-open let a swapped FIFO block
+    # the postcheck or feed a character device to csv.reader (F078). The shared
+    # bounded reader is O_NOFOLLOW + fstat(S_ISREG) + byte-capped.
+    text = read_text_bounded(path, limit=MANUAL_TODO_MAX_BYTES)
+    if text is None:
+        return False
     try:
-        if path.is_symlink():
-            return False
-        if path.stat().st_size > MANUAL_TODO_MAX_BYTES:
-            return False
-        with open(path, "r", encoding="utf-8-sig", newline="") as f:
-            got = list(csv.reader(f))
-    except (OSError, csv.Error):
+        got = list(csv.reader(io.StringIO(text)))
+    except csv.Error:
         return False
     return got == expected
 
@@ -6713,10 +6717,12 @@ RAW_DATA_READONLY_RULE = """
       - M30 reads `raw_data/` as the producer side of a written claim's comparison;
       - every stage reads `human_review_feedback/` for what the review requires (the concern
         reconciliation and the response letter are built from it);
-      - every stage reads `llm_review_feedback/` the same way, when the corpus carries it: its
-        remaining findings were already filtered for false positives, so treat each one as a
-        real concern with the same standing (the concern ledger and the response letter answer
-        it too, and its provenance is kept in the ledger's `author`/`source` columns);
+      - every stage reads `llm_review_feedback/` the same way, when the corpus carries it AND
+        the active journal mode admits the LLM stream (major/minor are HUMAN-ONLY and do not
+        stage that stream; reading this block must not turn a model review into a concern
+        there): its remaining findings were already filtered for false positives, so treat each
+        one as a real concern with the same standing (the concern ledger and the response letter
+        answer it too, and its provenance is kept in the ledger's `author`/`source` columns);
       - `human_review_feedback/original_submission/` (when present) may be read ONLY to resolve
         what a raised concern refers to and to decide whether the package under view already
         answers a concern the reviewers raised against the earlier version. Never edit it, never

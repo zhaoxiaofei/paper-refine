@@ -361,9 +361,13 @@ def test_reference_and_availability_shapes():
 # =====================================================================
 def test_census_prefix_total_no_fabricated_zero():
     print("\n== C09 a member with no ranking prefix shows no number ==")
-    census = {"r1_a2": {"tiers": {"correctness": {"severities": {
-        "fatal": {"own": 1, "peer": 0}, "critical": {"own": 0, "peer": 0},
-        "major": {"own": 0, "peer": 0}, "minor": {"own": 0, "peer": 0}}}}}}
+    # A MEASURED census row carries every basis tier (a row missing one is a
+    # placeholder the ranking treats as unmeasured, F030/F045).
+    _sev = {"fatal": {"own": 0, "peer": 0}, "critical": {"own": 0, "peer": 0},
+            "major": {"own": 0, "peer": 0}, "minor": {"own": 0, "peer": 0}}
+    _tiers = {t: {"severities": dict(_sev)} for t in pp.BASIS_TIERS}
+    _tiers["correctness"]["severities"]["fatal"] = {"own": 1, "peer": 0}
+    census = {"r1_a2": {"tiers": _tiers}}
     agg = {"issue_census": census}
     check("a census member with no cells_used reports None, not 0",
           pp.census_prefix_total(agg, {}, "r1_a2") is None,

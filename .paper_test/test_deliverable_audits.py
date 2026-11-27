@@ -136,8 +136,21 @@ def test_concern_audit():
           bool(nb._concern_location_problems(loc)))
 
 
-def repair_doc(rows):
-    return {"rows": rows, "counts": {}}
+def repair_doc(rows, audit=None):
+    rows = [dict(r) for r in rows]
+    if audit:
+        av = {r.get("id"): str(r.get("verdict") or "")
+              for r in (audit.get("rows") or []) if isinstance(r, dict)}
+        for r in rows:
+            r.setdefault("audit_verdict", av.get(r.get("id"), ""))
+    counts = {"input": len(rows),
+              "kept": sum(1 for r in rows
+                          if r.get("action") not in ("corrected", "merged", "dropped")),
+              "corrected": sum(1 for r in rows if r.get("action") == "corrected"),
+              "merged": sum(1 for r in rows if r.get("action") == "merged"),
+              "dropped": sum(1 for r in rows if r.get("action") == "dropped"),
+              "rejected": sum(1 for r in rows if r.get("verdict") == "rejected")}
+    return {"rows": rows, "counts": counts}
 
 
 def test_concern_repair():
@@ -151,9 +164,9 @@ def test_concern_repair():
         {"id": "R1-2", "verdict": "confirmed", "defects": [],
          "reason": "stub reason with enough words", "evidence": "x"}]}
 
-    def write(rows):
+    def write(rows, audit_doc=None):
         (sb / "concern_repair" / "REPAIR_LEDGER.json").write_text(
-            json.dumps(repair_doc(rows)), encoding="utf-8")
+            json.dumps(repair_doc(rows, audit_doc or audit)), encoding="utf-8")
 
     write([
         {"id": "R1-1", "verdict": "confirmed", "action": "dropped",
@@ -227,15 +240,19 @@ def test_response_audit_repair():
     audit = {"rows": [{"id": "R1-1", "verdict": "confirmed", "defects": [],
                        "reason": "stub reason with enough words", "evidence": "x"}]}
     (sb / "response_repair" / "REPAIR_LEDGER.json").write_text(json.dumps({
-        "rows": [{"id": "R1-1", "verdict": "confirmed", "action": "no-change",
-                  "reason": "stub reason with enough words", "evidence": "x"}]}),
+        "rows": [{"id": "R1-1", "audit_verdict": "confirmed", "verdict": "confirmed",
+                  "action": "no-change",
+                  "reason": "stub reason with enough words", "evidence": "x"}],
+        "counts": {"input": 1, "kept": 1, "corrected": 0, "rejected": 0}}),
         encoding="utf-8")
     check("a confirmed response repair row passes",
           nb.response_repair_ledger_problems(sb, audit, {"R1-1"}) == [],
           str(nb.response_repair_ledger_problems(sb, audit, {"R1-1"})))
     (sb / "response_repair" / "REPAIR_LEDGER.json").write_text(json.dumps({
-        "rows": [{"id": "R1-1", "verdict": "confirmed", "action": "dropped",
-                  "reason": "stub reason with enough words", "evidence": "x"}]}),
+        "rows": [{"id": "R1-1", "audit_verdict": "confirmed", "verdict": "confirmed",
+                  "action": "dropped",
+                  "reason": "stub reason with enough words", "evidence": "x"}],
+        "counts": {"input": 1, "kept": 0, "corrected": 0, "rejected": 0}}),
         encoding="utf-8")
     check("the response repair may not drop a concern",
           any("action" in e for e in

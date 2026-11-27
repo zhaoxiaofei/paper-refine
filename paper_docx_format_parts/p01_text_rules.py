@@ -864,6 +864,14 @@ _SINGLE_LETTER_NON_NAME_PRECEDERS = frozenset(" ".join((
     "method equation eq room batch site sample region zone scenario case",
     "example rule item option version variant trial study experiment protocol",
     "chapter line column row patient subject participant",
+    # Scientific labels that name a condition/variant, not a person: "Image A.",
+    # "Donor A." and "Hospital A." must end a sentence like "Group A." does.
+    # The vocabulary is necessarily open-ended; these are the common ones, and
+    # an unlisted label remains the known limitation of this heuristic (F015).
+    "image donor hospital clinic clone strain vendor lane plate slide lab",
+    "laboratory animal mouse rat cell tissue protein gene virus species",
+    "isolate culture replicate run kit lot day week month year hour minute",
+    "reaction cycle round visit dose concentration mixture solution buffer",
 )).split())
 
 
@@ -1090,9 +1098,15 @@ DOI_IN_TEXT_RE = re.compile(
 # introduces; a plain 4-digit QUANTITY (`1,000 samples and 2500 cells`) has no
 # such cue and still participates in the convention check.
 IDENTIFIER_CONTEXT_RE = re.compile(
-    r"(?i)\b(?:chromosome|chromosomal|chr|position|pos|codon|residue|exon|"
-    r"intron|nucleotide|base\s+pair|bp|nt|site|allele|snp|rs|amino\s+acid|"
-    r"variant|mutation)\b[\s=:#\-]*\d[\d,]*")
+    # Optional plurals: `positions 1234`, `residues 5678` and `codons 91011`
+    # are the same identifier context as the singular forms (F017).
+    r"(?i)\b(?:chromosomes?|chromosomal|chr|positions?|pos|codons?|residues?|"
+    r"exons?|introns?|nucleotides?|base\s+pairs?|bps?|nt|sites?|alleles?|snps?|"
+    r"rs|amino\s+acids?|variants?|mutations?)\b"
+    # A coordinate LIST is one identifier context: mask every number joined by
+    # a comma/and/or/to/dash, not only the first (`positions 1234 and 5678`).
+    r"[\s=:#\-]*\d+(?:,\d{3})*"
+    r"(?:\s*(?:,|and|or|to|[\u2013\u2014-])\s*\d+(?:,\d{3})*)*")
 
 
 def number_format_rows(paras: list) -> list:

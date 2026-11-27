@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 07/26 of the pipeline -- executed by the
+# Part 07/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -9275,7 +9275,12 @@ SELFCHECK_STAGES = ("rewrite", "guided_review", "cold_start_review", "audit", "r
                     # pre-flight at all, so a missing marker, an empty letter or an
                     # inconsistent concern ledger was only discovered by the
                     # postcheck after the attempt.
-                    "feedback", "concerns", "response")
+                    "feedback", "concerns", "response",
+                    # The journal audit/repair/draft sessions are agent runs too,
+                    # and F042's self-check contract covers them: the five p24
+                    # prompts carry the pre-flight and must be recognized here.
+                    "concern_audit", "concern_repair", "response_draft",
+                    "response_audit", "response_repair")
 # --- the stage's own bookkeeping deliverables --------------------------------
 # `required` FAILS an attempt when it is missing (the postcheck errors on it);
 # `expected` is recorded as a warning. Two layers read this table: the rescue
@@ -9520,6 +9525,12 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
                          or (_split != "off" and not _review_part_b))
     # 1. the completion signal: it must be at the ROOT and it must name THIS run
     marker = marker_json(sb, kind)
+    # The two repair runs write the marker of the stage they repair (their own
+    # prompts' contract, and their postchecks check that stage): a pre-flight
+    # that demanded "concern_repair"/"response_repair" would reject a compliant
+    # attempt.
+    _marker_stage = {"concern_repair": "concerns",
+                     "response_repair": "response"}.get(kind, kind)
     if kind == "judge" and not isinstance(marker, dict):
         # `postcheck_judge` treats scores.json as the judge's completion signal
         # and only WARNS about a missing marker; the pre-flight must not fail a
@@ -9527,7 +9538,7 @@ def sandbox_selfcheck(sb: Path, kind: str, run_id: str = "", r: int = 0,
         warns.append(f"{MARKER_FILE} missing (scores.json alone is accepted as the "
                      f"judge signal)")
     else:
-        _marker_checks(rec, marker, kind, errs, warns, sb=sb)
+        _marker_checks(rec, marker, _marker_stage, errs, warns, sb=sb)
     # 2. the stage's own deliverables: the REQUIRED ones fail an attempt in the
     #    postcheck, the EXPECTED ones are warnings there too.
     table = STAGE_DELIVERABLES.get(kind) or {}

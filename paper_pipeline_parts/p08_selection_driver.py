@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 08/26 of the pipeline -- executed by the
+# Part 08/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -129,9 +129,15 @@ def aggregate_round(ctx: Ctx, r: int, field_ids: list, dedup: str = None,
         # candidate for its slot (F055).
         _sj = rec.get("scores")
         if not isinstance(_sj, dict) or not (_sj.get("comparisons") or []):
-            diags.setdefault("unusable_newer_sheets", []).append(
-                f"{rec.get('id')}: no usable score sheet; an earlier sheet for "
-                f"{slot[0]} judge j{slot[1]} stays in force")
+            # Only claim an earlier sheet "stays in force" when one exists:
+            # the first/only sheet of a slot was reported as covered (F047).
+            if slot in newest:
+                _msg = (f"{rec.get('id')}: no usable score sheet; an earlier sheet for "
+                        f"{slot[0]} judge j{slot[1]} stays in force")
+            else:
+                _msg = (f"{rec.get('id')}: no usable score sheet, and no earlier usable "
+                        f"sheet exists for {slot[0]} judge j{slot[1]}")
+            diags.setdefault("unusable_newer_sheets", []).append(_msg)
             continue
         if slot in newest:
             old = newest[slot]
@@ -568,7 +574,9 @@ def census_prefix_total(agg: dict, sel: dict, vid: str):
     over -- an absent `cells_used` cannot be read as "zero defects".
     """
     census = (agg or {}).get("issue_census") or {}
-    if str(vid) not in census:
+    # A PRESENT but empty row is not a measured census: it used to yield a
+    # fabricated 0 instead of the docstring's '-' (F045).
+    if not _census_row_measured(_census_row(str(vid), census)):
         return None
     _, _, cumulative = issue_matrix_and_cumulative(census, [str(vid)])
     row = cumulative.get(str(vid)) or []
@@ -837,7 +845,7 @@ def round_member_table_rows(ctx: Ctx, r: int, field: list, agg: dict, sel: dict,
         elif s.get("anti_regression_ok") is False:
             note = "ineligible (regressed vs original)"
         rank_row = ranking_by_id.get(e["id"]) or {}
-        in_census = str(e["id"]) in census
+        in_census = _census_row_measured(_census_row(str(e["id"]), census))
         rank_issues = rank_row.get("issues") or {}
         rank_nonzero = any(
             (int((rank_issues.get(sev) or {}).get("own") or 0)

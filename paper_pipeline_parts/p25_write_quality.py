@@ -1,4 +1,4 @@
-# Part 25/26 of the pipeline -- executed by the loader in its own globals.
+# Part 25/27 of the pipeline -- executed by the loader in its own globals.
 # Mandatory independent quality gates for non-revision LLM authors.
 #
 # Revision arms use the existing, separately enforced revision-audit chain.

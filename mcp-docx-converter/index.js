@@ -6,6 +6,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
 import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
+         strayRemovalAllowed,
          stageContainedInput } from './containment.mjs';
 import { pdfKey } from './in-flight.mjs';
 
@@ -187,6 +188,11 @@ serveStdio(() => {
                                   finalPdf ? [spawnPath, finalPdf] : [spawnPath],
                                   { timeout: 240_000, maxBuffer: 4 * 1024 * 1024,
                                     windowsPidFile });
+      // Did the destination already exist BEFORE the child ran? A file that
+      // appears where nothing existed is the child's own stray write and may be
+      // cleaned up; a pre-existing outside file reached through a swapped
+      // directory is never deleted (F010 keeps the F046 cleanup honest).
+      const strayAbsentBeforeRun = !(finalPdf && existsSync(finalPdf));
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
@@ -206,12 +212,17 @@ serveStdio(() => {
           // path itself, and only remove a regular file whose directory is
           // inside the roots (F022).
           try {
-            if (lstatSync(finalPdf).isSymbolicLink()) {
+            if (strayRemovalAllowed(finalPdf, ALLOWED_ROOTS)
+                && lstatSync(finalPdf).isSymbolicLink()) {
               unlinkSync(finalPdf);
-            } else if (lstatSync(finalPdf).isFile()) {
+            } else if (strayRemovalAllowed(finalPdf, ALLOWED_ROOTS)
+                       || (strayAbsentBeforeRun && lstatSync(finalPdf).isFile())) {
               // The child wrote this stray file during THIS call; removing a
               // regular stray path is cleanup. A symlink is unlinked above so
-              // its outside TARGET is never deleted (F022).
+              // its outside TARGET is never deleted (F022). The parent must
+              // still resolve inside the roots: when a directory component was
+              // swapped for an outside symlink, the final component is a
+              // regular OUTSIDE file and rmSync would destroy it (F010).
               rmSync(finalPdf, { force: true });
             }
           } catch { /* already gone */ }

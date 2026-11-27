@@ -2643,12 +2643,12 @@ those printed sizes floored to KiB and the cut is computed from the same sizes:
 | review | 126 KB | 55 KB | 56% |
 | cold_start_review | 63 KB | 27 KB | 56% |
 | audit | 91 KB | 48 KB | 47% |
-| revise | 122 KB | 68 KB | 44% |
+| revise | 122 KB | 68 KB | 45% |
 | integrate | 113 KB | 60 KB | 47% |
-| rewrite | 104 KB | 61 KB | 42% |
+| rewrite | 105 KB | 61 KB | 42% |
 | judge | 105 KB | 74 KB | 29% |
 | revision_audit | 38 KB | 16 KB | 57% |
-| revision_repair | 36 KB | 11 KB | 70% |
+| revision_repair | 37 KB | 11 KB | 70% |
 
 The profile is recorded at `setup` and frozen into the root (rule 11): a `medium` root's
 `pipeline_config.json` carries `execution_profile: medium`, and the parts directory that rendered
@@ -3856,7 +3856,7 @@ conda run -p "$PWD/tmp/paper-refine-test" python .paper_test/run_all.py --engine
 ```
 
 Every suite is offline and prints one line per check; exit status is non-zero on
-any failure. They are independent, so run them in parallel — 308 suites (a few
+any failure. They are independent, so run them in parallel — 310 suites (a few
 minutes at the default 32 parallel sessions; tens of minutes sequentially):
 
 ```bash

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 26/26 of the pipeline -- executed by the loader, in order, in the
+# Part 26/27 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 #
 # Shared severity tiers, recovery records and the ``--fail-tier`` policy for
@@ -99,8 +99,9 @@ RECOVERY_CATEGORIES = {
     ),
 }
 
-#: Set by die() (p18_helpers) so main() can record a refusal with its message.
-LAST_REFUSAL = None
+# `LAST_REFUSAL` is defined ONCE, in p18_helpers (where die() sets it); the
+# loader executes the ordered parts into one globals dict, so a second binding
+# here shadowed that one and tripped the duplicate-symbol gate (F093).
 _RECOVERY_SESSION = None
 
 
@@ -205,10 +206,15 @@ class PaperRecovery:
         # non-empty directory is a valid refusal case). It starts on the
         # fallback report and moves to the root report only in bind_root(),
         # after setup has created a real root.
-        if self.command == "setup":
+        # `persist=False` means "do not write into the root" for the WHOLE
+        # session, not only for bind_root(): the report was still aimed at
+        # `<root>/RECOVERY.md`, so start()/finalize() mutated the root anyway
+        # (F102). Only the fallback copy exists in that mode.
+        if self.command == "setup" or not persist:
             self.report = _shared.MarkdownReport(
                 self.fallback_dir / RECOVERY_REPORT_FILENAME,
-                title="Recovery report (setup)",
+                title="Recovery report (setup)" if self.command == "setup"
+                      else "Recovery report (non-persistent)",
             )
         else:
             self.report = _shared.MarkdownReport(

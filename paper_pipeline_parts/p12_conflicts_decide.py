@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 12/26 of the pipeline -- executed by the
+# Part 12/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1939,27 +1939,48 @@ def _pooled_units_by_method(path: Path, gaps: list = None) -> dict:
         return {}
     mi, vi = header.index("method"), header.index(col)
     ni = header.index("n_units") if "n_units" in header else None
-    groups, counted = {}, {}
+    groups, counted, unusable = {}, {}, set()
     for r in body:
         if len(r) <= max(mi, vi):
+            if gaps is not None:
+                gaps.append(f"{path.name}: a row has no method/value cell "
+                            f"({len(r)} column(s)); it was NOT compared")
             continue
+        key = str(r[mi]).strip()
         try:
             # An exported table may spell a negative mean with the typographic
             # minus; float() raises on it, and the bare `continue` dropped the
             # whole row with no gap (F13).
             val = float(str(r[vi]).strip().replace("\u2212", "-"))
         except ValueError:
+            if gaps is not None:
+                gaps.append(f"{path.name}: method {key!r} was NOT compared: its value "
+                            f"{str(r[vi]).strip()!r} is not numeric")
             continue
-        key = str(r[mi]).strip()
         groups.setdefault(key, []).append(val)
-        if ni is not None and len(r) > ni:
+        if ni is not None:
+            if len(r) <= ni:
+                unusable.add(key)
+                if gaps is not None:
+                    gaps.append(f"{path.name}: method {key!r} was NOT compared: its "
+                                f"n_units cell is missing")
+                continue
             try:
-                counted[key] = int(float(str(r[ni]).strip().replace("\u2212", "-")))
+                n = int(float(str(r[ni]).strip().replace("\u2212", "-")))
             except ValueError:
-                # A non-numeric cell is not a count: fall back to the row count
-                # for that method instead of inventing a number.
-                counted.pop(key, None)
-    return {m: (counted.get(m, len(v)), sum(v) / len(v)) for m, v in groups.items()}
+                n = None
+            if n is None or n <= 0:
+                # A malformed/zero count is NOT the row count: substituting it
+                # let a pooled table computed on a wrong subset pass (F030).
+                unusable.add(key)
+                if gaps is not None:
+                    gaps.append(f"{path.name}: method {key!r} was NOT compared: its "
+                                f"n_units cell {str(r[ni]).strip()!r} is not a "
+                                f"positive integer")
+                continue
+            counted[key] = n
+    return {m: (counted.get(m, len(v)), sum(v) / len(v))
+            for m, v in groups.items() if m not in unusable}
 
 
 # PKG-16 (2026-10-17, second pass): the REQUIRED FORM's software list vs the
@@ -3191,10 +3212,11 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                 units_file = q
                 break
         if not units:
-            if candidates:
-                # The sibling units table(s) exist but none carried a shape this
-                # check can read (no method/value column, or unreadable): the
-                # comparison never ran, so name it (F093/F094).
+            # The sibling units table(s) exist but none yielded a usable method
+            # (no method/value column, unreadable, or every row malformed): the
+            # comparison never ran, so name it -- unless `_pooled_units_by_method`
+            # already recorded the specific unusable row (F030/F034).
+            if candidates and not any(q.name in g for q in candidates for g in gaps):
                 gaps.append(f"{p.relative_to(root).as_posix()}: no sibling *units*.tsv "
                             f"carried the per-method or per-unit shape (checked "
                             f"{', '.join(q.name for q in candidates[:3])})")
@@ -3242,6 +3264,13 @@ def scan_pooled_table_mismatches(root: Path, limit: int = 24) -> list:
                 continue
             method = str(r[mi]).strip()
             if method not in units:
+                # The units table named this method but its row was unusable
+                # (malformed/zero n_units or value); `_pooled_units_by_method`
+                # already recorded the gap, so never report the table clean
+                # silently (F034).
+                if not any(method in _g and "NOT compared" in _g for _g in gaps):
+                    gaps.append(f"{p.relative_to(root).as_posix()}: method {method!r} was "
+                                f"NOT compared because its sibling units row is unusable")
                 continue
             try:
                 # Typographic minus (U+2212) is a legal minus in an exported
@@ -3287,6 +3316,12 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
     gaps = []
     for area in EVIDENCE_DIRNAMES:
         d = root / area
+        # `is_dir()` follows a symlink: a planted top-level evidence-area link
+        # made the scan read DOCX/PDF/RTF bytes from OUTSIDE the package (F029).
+        # Refuse the link and record the coverage gap.
+        if d.is_symlink():
+            gaps.append(f"{area}/ is a symlink; its evidence was NOT checked")
+            continue
         if not d.is_dir():
             continue
         for p in sorted(_iter_tree_files(d)):
@@ -3314,7 +3349,8 @@ def scan_prior_submission_disclosure(root: Path, submitted_docs=None, limit: int
                     gaps.append(f"{rel}: the PDF has no extractable text (image-only), so "
                                 f"its editorial decisions were NOT checked")
                     continue
-            elif suffix in (".txt", ".md", ".html", ".json", ".rtf", ".doc", ".odt"):
+            elif suffix in (".txt", ".md", ".markdown", ".rst", ".tex", ".html",
+                            ".htm", ".json", ".rtf", ".doc", ".odt"):
                 if suffix == ".json":
                     # A JSON evidence file is scanned as its own text, not
                     # converted through the feedback renderer.
@@ -6972,7 +7008,18 @@ def collect_open_review_items(ctx: Ctx, final: dict) -> dict:
     coverage = {str(r.get("id")): r for r in _open_item_rows(report)}
     findings = {str(f.get("id")): f
                 for f in _open_item_rows(report.get("findings") if isinstance(report, dict) else [])}
-    audit = read_json(sb / "audit" / "audit.json", revive=False, lenient=True) or {}
+    audit = read_json(sb / "audit" / "audit.json", revive=False, lenient=True)
+    if audit is None:
+        audit = {}
+    elif not isinstance(audit, dict):
+        # `or {}` replaced only FALSY values: a non-empty list/scalar was then
+        # dereferenced with `.get` and `decide` crashed with AttributeError
+        # instead of reporting the corrupt evidence (F094).
+        info["error"] = (f"the champion's audit/audit.json is not a JSON object "
+                         f"(it is a {type(audit).__name__}); the audit dispositions are "
+                         f"UNKNOWN")
+        info["audit_unreadable"] = True
+        return info
     verdicts = {str(r.get("id")): str(r.get("verdict") or "").lower()
                 for r in (audit.get("dispositions") or []) if isinstance(r, dict)}
     for fid, row in sorted(coverage.items()):

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 06/26 of the pipeline -- executed by the
+# Part 06/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -2378,7 +2378,9 @@ def _png_is_a_real_image(p: Path) -> bool:
             if zlib.crc32(kind + payload) & 0xffffffff != crc:
                 return False
             if kind == b"IHDR":
-                if length != 13 or seen_ihdr:
+                # IHDR is the FIRST chunk by specification; accepting it after
+                # IDAT let a decoder-invalid file pass the visual gate (F032).
+                if pos != 8 or length != 13 or seen_ihdr:
                     return False
                 width, height = struct.unpack(">II", payload[:8])
                 bit_depth, color_type = payload[8], payload[9]
@@ -2387,6 +2389,8 @@ def _png_is_a_real_image(p: Path) -> bool:
                     return False
                 seen_ihdr = True
             elif kind == b"IDAT":
+                if not seen_ihdr:
+                    return False
                 idat.append(payload)
             elif kind == b"IEND":
                 seen_iend = True
@@ -2439,11 +2443,7 @@ def _render_evidence_is_real(p: Path) -> bool:
                 and _render_output_body_problem(p) == "")
     if suf == ".png":
         return _png_is_a_real_image(p)
-    if suf in (".jpg", ".jpeg"):
-        return head.startswith(b"\xff\xd8\xff")
-    if suf in (".tif", ".tiff"):
-        return head[:4] in (b"II*\x00", b"MM\x00*")
-    return False
+    return raster_render_is_real(p, head, suf)
 
 
 def render_evidence_files(render_roots) -> list:
@@ -3189,7 +3189,17 @@ def discovery_gap_summary(sb: Path) -> dict:
         The D1 contract enumerates class candidates; a 25-row table whose only
         content is `x`/a dash/a number satisfied the row-count gate (F104).
         """
-        for cell in row.values():
+        # Only the ROW'S CLASS CELL names a class: scanning every cell let a
+        # placeholder class (`x`) pass on an ordinary word in the evidence or
+        # notes column (F033).
+        keys = list(row)
+        # D1's table names the column "class" or "gap row" (the fixture/variants
+        # use both); anything else falls back to the first cell.
+        class_key = next((k for k in keys
+                          if any(w in str(k).lower()
+                                 for w in ("class", "gap", "issue", "type"))),
+                         keys[0] if keys else None)
+        for cell in ([row.get(class_key)] if class_key is not None else []):
             t = " ".join(str(cell or "").split())
             if not t or re.fullmatch(r"[0-9.\-–—]+", t):
                 continue
@@ -9869,6 +9879,11 @@ def audit_artifact_problems(audit, frozen_ids, expected_round=None, base_dir=Non
     by_evidence = {}
     for fid, evid in drop_evidence.items():
         key = re.sub(r"\s+", " ", evid.strip().lower())
+        # A boilerplate sentence whose ONLY per-row difference is the finding
+        # ids it names is still the same evidence; strip id tokens before
+        # grouping so reordering them cannot defeat the duplicate test (F055).
+        key = re.sub(r"\b[a-z]{1,3}[-_]?\d{1,4}\b", " ", key)
+        key = re.sub(r"\s+", " ", key).strip()
         by_evidence.setdefault(key, []).append(fid)
     for text, ids in sorted(by_evidence.items()):
         if len(ids) < 2:

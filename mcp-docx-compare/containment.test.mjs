@@ -7,7 +7,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync,
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { allowedRoots, containsPath, containedSpawnPath,
-         stageContainedInput } from './containment.mjs';
+         stageContainedInput, strayRemovalAllowed } from './containment.mjs';
 
 const fails = [];
 function check(name, fn) {
@@ -130,6 +130,26 @@ try {
   });
   check('a PATH-delimiter separated list keeps every root', () => {
     assert.equal(allowedRoots([root, outside].join(path.delimiter)).length, 2);
+  });
+  check('cleanup may remove a regular stray file whose parent is inside the roots', () => {
+    const stray = path.join(root, 'stray.pdf');
+    writeFileSync(stray, 'x');
+    assert.equal(strayRemovalAllowed(stray, allowedRoots(root)), true);
+  });
+  check('cleanup may unlink a final-component symlink (its target is untouched)', () => {
+    const linkOut = path.join(root, 'link.pdf');
+    symlinkSync(outsideDoc, linkOut);
+    assert.equal(strayRemovalAllowed(linkOut, allowedRoots(root)), true);
+  });
+  check('cleanup must NOT remove a regular OUTSIDE file reached through a symlinked parent', () => {
+    const swappedDir = path.join(root, 'swapped');
+    symlinkSync(outside, swappedDir);
+    const victim = path.join(swappedDir, 'victim.pdf');
+    writeFileSync(victim, 'outside-owned');
+    // lstat is a regular FILE (not a final symlink); only the parent resolves
+    // outside, which is exactly the F010 destructive escape.
+    assert.equal(containsPath(victim, allowedRoots(root)), false);
+    assert.equal(strayRemovalAllowed(victim, allowedRoots(root)), false);
   });
   check('a "/" root allows any absolute path (the allow-everything spelling)', () => {
     const roots = allowedRoots(path.sep);

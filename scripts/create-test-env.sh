@@ -35,6 +35,13 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WS="$(cd "${HERE}/.." && pwd)"
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
+# ENV_NAME is joined into the fallback prefix and into the export filenames: a
+# `../` (or an absolute value) escapes the checkout. export-test-env.sh already
+# validates it; the two scripts that consume the name must too.
+if [[ -z "${ENV_NAME}" || "${ENV_NAME}" == "." || "${ENV_NAME}" == ".." || "${ENV_NAME}" == */* ]]; then
+  echo "error: PAPER_REFINE_TEST_ENV must be one filename component: ${ENV_NAME}" >&2
+  exit 2
+fi
 PYTHON_VERSION="${PAPER_REFINE_TEST_PYTHON:-3.12}"
 ENV_PREFIX="${PAPER_REFINE_TEST_PREFIX:-}"
 CONDA="${CONDA_EXE:-$(command -v conda || true)}"
@@ -171,9 +178,15 @@ if [[ "${RECREATE}" -eq 1 ]]; then
       _prefix_safe=1
     elif [[ -d "${ENV_PREFIX}" && -f "${ENV_PREFIX}/pyvenv.cfg" ]]; then
       _prefix_safe=1
-    elif [[ -d "${ENV_PREFIX}" ]] \
-          && [[ -z "$(find "${ENV_PREFIX}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)" ]]; then
-      _prefix_safe=1
+    elif [[ -d "${ENV_PREFIX}" ]]; then
+      # Accept emptiness only when find itself succeeds: a missing find, a BSD
+      # find without -mindepth/-maxdepth, or a permission error used to yield
+      # empty output and re-enable rm -rf on a non-empty directory (F011).
+      if _find_out="$(find "${ENV_PREFIX}" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null)"; then
+        if [[ -z "${_find_out}" ]]; then
+          _prefix_safe=1
+        fi
+      fi
     elif [[ -n "${FORCE_DELETE_PREFIX}" ]]; then
       _force="${FORCE_DELETE_PREFIX%/}"
       _target="${ENV_PREFIX%/}"

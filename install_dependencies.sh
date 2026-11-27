@@ -55,6 +55,12 @@ set -euo pipefail
 
 REPO_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ENV_NAME="${PAPER_REFINE_TEST_ENV:-paper-refine-test}"
+# ENV_NAME is joined to "$REPO_ROOT/tmp/$ENV_NAME": a `../` or an absolute
+# value would escape the checkout (the same guard export-test-env.sh carries).
+if [[ -z "${ENV_NAME}" || "${ENV_NAME}" == "." || "${ENV_NAME}" == ".." || "${ENV_NAME}" == */* ]]; then
+    echo "error: PAPER_REFINE_TEST_ENV must be one filename component: ${ENV_NAME}" >&2
+    exit 2
+fi
 DEPS_DIR="${PAPER_REFINE_DEPS:-$REPO_ROOT/external}"
 DRY_RUN=0
 OFFLINE=0
@@ -668,4 +674,9 @@ if [ "${#FAILED[@]}" -gt 0 ]; then
     for item in "${FAILED[@]}"; do printf '  - %s\n' "$item" >&2; done
     exit 1
 fi
-note "install complete"
+if [ "$DRY_RUN" = 1 ]; then
+    # A dry run must not report the same completion as a real install (F008).
+    note "dry run complete; nothing installed"
+else
+    note "install complete"
+fi

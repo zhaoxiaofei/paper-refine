@@ -1,4 +1,4 @@
-# Part 19/26 of the pipeline -- executed by the loader, in order, in the
+# Part 19/27 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals.
 # This part carries NO module docstring on purpose: the loader executes every
 # part in the paper_pipeline module's own globals, and a module-level string

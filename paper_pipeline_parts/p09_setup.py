@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 09/26 of the pipeline -- executed by the
+# Part 09/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -725,6 +725,15 @@ def cmd_setup(args) -> None:
         # in a NotADirectoryError traceback instead of the clean refusal every
         # other bad root gets (and the marker write can fail on a read-only
         # mount). Nothing has been created at this point.
+        # Emit the documented ROOT_UNUSABLE diagnostic at this, its one creation
+        # site, so the operator's recovery path is observable (F101).
+        record_recovery(
+            "ROOT_UNUSABLE", "setup root",
+            f"cannot create the root directory {root}: {type(e).__name__}: {e}",
+            recovery_action="do not create or modify the root; keep the recovery report in "
+            "the documented fallback and report its location",
+            outcome="degraded", affected_outputs=[str(root)], human_review=True,
+            failure=f"{type(e).__name__}: {e}")
         die(f"cannot create the root directory {root}: {type(e).__name__}: {e}")
     ctx = Ctx(root)
     ctx.runs_dir.mkdir(parents=True, exist_ok=True)
@@ -2953,7 +2962,7 @@ def cmd_add_venue(args) -> None:
         try:
             audit_write_output(sb, quality_rec,
                                resolve_agent_cmd(agent, getattr(args, "agent_cmd", None)),
-                               _timeout_seconds(args, 3600))
+                               _timeout_seconds(args, 3600), output_rel=_art_root)
         except (OSError, ValueError, TypeError) as exc:
             die("add-venue publication blocked: " + str(exc))
     # Bounded repair may have changed the profile: revalidate final bytes
@@ -4795,7 +4804,15 @@ def _cmd_run_locked(ctx: Ctx, args) -> None:
                   f"decision.json.")
             break
 
-    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) and only is None:
+    # The response/response_audit/response_repair stages of a transfer/resubmit
+    # run are FINALIZATION stages: they exist on the run record but not in a
+    # round plan, so `--only response_audit` matched nothing and silently ran
+    # nothing (F024). Drive the finalization when the selection names one of
+    # them; a plain `run` still drives it once every round is done.
+    _only_final = (only is None
+                   or any(only_names_explicit_stage(only, _s) for _s in
+                          ("response", "response_audit", "response_repair")))
+    if journal_mode_of(ctx) in (JOURNAL_MODE_TRANSFER, JOURNAL_MODE_RESUBMIT) and _only_final:
         R = journal_finalization_round(ctx)
         if all(ctx.round_rec(r).get("status") == "done" for r in range(1, R + 1)):
             ok, _ = drive_journal_finalize(ctx, cmd=cmd, timeout=timeout, jobs=args.jobs,

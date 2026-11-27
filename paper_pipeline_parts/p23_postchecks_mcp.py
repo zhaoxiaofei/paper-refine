@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 23/26 of the pipeline -- the MCP stdio client and the visual
+# Part 23/27 of the pipeline -- the MCP stdio client and the visual
 # render chain, split out of p06_postchecks (which had grown to 10,172 lines
 # after the F083/F084 seed/render gates, over the project's 10,000-line cap).
 # Executed by the loader, in order, in the loader's own module globals; the
@@ -207,6 +207,12 @@ def mcp_stdio_tool_call(spec: dict, tool: str, arguments: dict,
         if flood_warnings:
             out["warnings"] = flood_warnings
         return out
+    except (BrokenPipeError, ConnectionResetError) as e:
+        # A server that died before/while initialize was written makes send()
+        # raise BrokenPipeError. The broad OSError branch returned a bare
+        # "Broken pipe" and BYPASSED failure(), losing the server's own stderr
+        # and exit code -- the diagnostic this handshake exists to keep (F104).
+        return failure(f"the MCP server closed its stdin ({type(e).__name__})")
     except (OSError, ValueError, RecursionError) as e:                  # noqa: BLE001
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
     finally:

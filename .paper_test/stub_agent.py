@@ -675,10 +675,15 @@ def do_concern_repair(sb: Path, name: str, round_no: int) -> int:
         write_json(fj_path, fj)
     out = sb / "concern_repair"
     out.mkdir(parents=True, exist_ok=True)
+    counts = {"input": len(rows),
+              "kept": sum(1 for r in rows
+                          if r.get("action") not in ("corrected", "merged", "dropped")),
+              "corrected": sum(1 for r in rows if r.get("action") == "corrected"),
+              "merged": sum(1 for r in rows if r.get("action") == "merged"),
+              "dropped": sum(1 for r in rows if r.get("action") == "dropped"),
+              "rejected": sum(1 for r in rows if r.get("verdict") == "rejected")}
     write_json(out / "REPAIR_LEDGER.json",
-               {"round": round_no, "rows": rows,
-                "counts": {"input": len(rows), "kept": 0, "corrected": 0,
-                           "merged": 0, "dropped": 0, "rejected": 0},
+               {"round": round_no, "rows": rows, "counts": counts,
                 "notes": "stub: no repair needed"})
     (out / "REPAIR_LOG.md").write_text("# concern repair (stub)\n", encoding="utf-8")
     write_json(sb / "_pipeline_done.json", {
@@ -726,9 +731,12 @@ def do_response_repair(sb: Path, name: str, round_no: int) -> int:
                      "evidence": "stub: re-opened the response block and the package"})
     out = sb / "response_repair"
     out.mkdir(parents=True, exist_ok=True)
+    counts = {"input": len(rows),
+              "kept": sum(1 for r in rows if r.get("action") != "corrected"),
+              "corrected": sum(1 for r in rows if r.get("action") == "corrected"),
+              "rejected": sum(1 for r in rows if r.get("verdict") == "rejected")}
     write_json(out / "REPAIR_LEDGER.json",
-               {"round": round_no, "rows": rows,
-                "counts": {"input": len(rows), "kept": 0, "corrected": 0, "rejected": 0},
+               {"round": round_no, "rows": rows, "counts": counts,
                 "residual": ""})
     (out / "REPAIR_LOG.md").write_text("# response repair (stub)\n", encoding="utf-8")
     write_json(sb / "_pipeline_done.json", {

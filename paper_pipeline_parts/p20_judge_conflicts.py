@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 20/26 of the pipeline -- judge-conflict audit, split from p12 to keep every part under 10,000 lines -- executed by the
+# Part 20/27 of the pipeline -- judge-conflict audit, split from p12 to keep every part under 10,000 lines -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.

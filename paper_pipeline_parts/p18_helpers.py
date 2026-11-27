@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 18/26 of the pipeline -- executed by the loader AFTER the command
+# Part 18/27 of the pipeline -- executed by the loader AFTER the command
 # functions, in the loader's own module globals. These are pure helpers
 # (no module-level side effects): the lower-numbered parts call them at
 # runtime, so they may live after the CLI definitions. Split out of
@@ -3627,7 +3627,7 @@ def _json_from_text(text: str, lenient: bool):
             if (s, e) != (i, end) and e <= i))
         _example_note = bool(re.search(
             r"(?i)(?:\b(?:example|schema|sample|for\s+instance)\b|"
-            r"\be\.g\.(?=\s|$))", _tail_note)) and _lead_prose <= 120
+            r"\be\.g\.(?=[\s,:;)]|$))", _tail_note)) and _lead_prose <= 120
         if not fenced and prose > 2 * json_len and not _example_note:
             rejected.append((i, end))
             continue
@@ -3660,7 +3660,7 @@ def _json_from_text(text: str, lenient: bool):
         # The marker must introduce THIS value: a sentence boundary between
         # the marker and the value means it introduced an earlier sentence.
         _marker = re.search(r"(?i)(?:\b(?:example|schema|sample|for\s+instance)\b|"
-                            r"\be\.g\.(?=\s|$))[^.!?\n]{0,40}$", _prefix[-120:])
+                            r"\be\.g\.(?=[\s,:;)]|$))[^.!?\n]{0,40}$", _prefix[-120:])
         if _marker:
             _marker_start = len(_prefix) - len(_prefix[-120:]) + _marker.start()
             earlier = [c for c in accepted if c[1] <= best_start]

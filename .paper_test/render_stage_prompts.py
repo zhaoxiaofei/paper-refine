@@ -74,8 +74,42 @@ def _prepare_sandbox(checkout: Path, sandbox):
     return sb
 
 
+def _seed_journal_concerns(sb: Path) -> None:
+    """The concern ledger the journal prompt builders read (an empty one reads as
+    "(the ledger lists no concerns)", which renders fine, but a real id keeps the
+    rendered task list non-degenerate)."""
+    d = sb / "concerns"
+    d.mkdir(parents=True, exist_ok=True)
+    if not (d / "JF_concerns.json").is_file():
+        (d / "JF_concerns.json").write_text(
+            '{"concerns": [{"id": "R1-1", "source": "editor.txt", '
+            '"author": "Reviewer 1", "action": "text", "disposition": "to-fix", '
+            '"quote": "fix the claim", "summary": "fix the claim", '
+            '"manuscript_location": "base/manuscript.md:1", "evidence_needed": ""}]}',
+            encoding="utf-8")
+
+
+class _JournalCtx:
+    """The minimal Ctx the journal prompt builders read (run/sandbox/cfg).
+
+    The five journal audit/repair prompts render from a concern ledger rather
+    than from the round's review; this stand-in hands them the render sandbox
+    and a done ledger run, so AGENTS rule 12 can exercise them.
+    """
+    cfg = {"revision_mode": "major"}
+
+    def __init__(self, sb: Path):
+        self._sb = sb
+
+    def run(self, rid):
+        return {"id": rid, "status": "done"}
+
+    def sandbox_of(self, rec):
+        return self._sb
+
+
 def _stage_calls(P, sb, prof, execution_profile: str) -> dict:
-    """The eleven stage builders, bound to one sandbox and one profile."""
+    """The sixteen stage builders, bound to one sandbox and one profile."""
     return {
         # `execution_profile` is passed to EVERY builder: the `high` render (the
         # byte-identity proof) then equals the pre-profile pipeline, and the
@@ -103,6 +137,25 @@ def _stage_calls(P, sb, prof, execution_profile: str) -> dict:
                                                           execution_profile=execution_profile),
         "revision_repair": lambda: P.revision_repair_prompt(sb, "r1_repair", 1, 3,
                                                             execution_profile=execution_profile),
+        # The five journal audit/repair/draft prompts are stage sessions too:
+        # AGENTS rule 12's equivalence check must cover them (F042).
+        "concern_audit": lambda: (_seed_journal_concerns(sb),
+                                  P.concern_audit_prompt(_JournalCtx(sb), sb, 1,
+                                                         execution_profile=execution_profile))[1],
+        "concern_repair": lambda: (_seed_journal_concerns(sb),
+                                   P.concern_repair_prompt(_JournalCtx(sb), sb, 1,
+                                                           execution_profile=execution_profile))[1],
+        "response_draft": lambda: (_seed_journal_concerns(sb),
+                                   P.response_draft_prompt(_JournalCtx(sb), sb, 1,
+                                                           execution_profile=execution_profile))[1],
+        "response_audit": lambda: (_seed_journal_concerns(sb),
+                                   P.response_audit_prompt(_JournalCtx(sb), sb, 1,
+                                                           "the final package",
+                                                           execution_profile=execution_profile))[1],
+        "response_repair": lambda: (_seed_journal_concerns(sb),
+                                    P.response_repair_prompt(_JournalCtx(sb), sb, 1,
+                                                             "the final package",
+                                                             execution_profile=execution_profile))[1],
     }
 
 

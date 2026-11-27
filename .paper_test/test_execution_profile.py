@@ -57,17 +57,24 @@ FAILS = []
 # prompt's embedded pre-flight verdict block names each seeded table the
 # postcheck requires, so its text moved with the contract.
 GOLDEN = {
-    "review": "57842f3dd9a3ca4b",
-    "review_split_a": "b44e54210f768755",
-    "review_scoped": "9b59d022e23ccf35",
-    "cold_start_review": "8b78df5716c4577b",
-    "audit": "80539d28d8a23856",
-    "revise": "787089f0f95fa147",
-    "integrate": "e85acf4340e0e733",
-    "rewrite": "acc21fead46b17b1",
-    "judge": "c41dc1ffa8a5add7",
-    "revision_audit": "a9e03c279ce3c5c2",
-    "revision_repair": "3e42269d6dedb69e",
+    "review": "451dc30679b3fdfb",
+    "review_split_a": "a6c778022a50e502",
+    "review_scoped": "63a39dc607fdad4a",
+    "cold_start_review": "78d750584ce325f0",
+    "audit": "2fb99d3d6de3ee1b",
+    "revise": "608b6b61d8485c94",
+    "integrate": "225ec9d162a5acfc",
+    "rewrite": "9045b9e36f201c24",
+    "judge": "78a9b2dfd99d740e",
+    "revision_audit": "52e8d0e14b7118c9",
+    "revision_repair": "06c85fa4f3d48d92",
+    # The five journal audit/repair/draft prompts joined the render set when
+    # rule 12's equivalence check was extended to them (F042).
+    "concern_audit": "644aeee5d1190418",
+    "concern_repair": "1c89e80bc471b92f",
+    "response_draft": "99e4eab3f12a983f",
+    "response_audit": "a54d5728d364a2ae",
+    "response_repair": "ea007d198595c1e7",
 }
 
 
@@ -137,11 +144,45 @@ def test_high_profile_is_the_frozen_shell() -> None:
         got = hashlib.sha256(texts[name].encode()).hexdigest()[:16]
         if got != want:
             bad.append(f"{name} {got} != {want}")
-    check("high: the 11 stage prompts match the frozen shell golden",
+    check("high: the 16 stage prompts match the frozen shell golden",
           not bad, "; ".join(bad[:4]))
     check("high: no prompt carries the medium contract or a paged-rule pointer",
           not any("EXECUTION PROFILE: medium" in t or "[PROFILE RULES" in t
                   for t in texts.values()))
+
+
+JOURNAL_PROMPTS = ("concern_audit", "concern_repair", "response_draft",
+                   "response_audit", "response_repair")
+
+
+def test_journal_prompts_carry_the_preflight() -> None:
+    """F042's self-check half: the five journal prompts carry the pre-flight and
+    `sandbox_selfcheck` recognizes their stage kinds (the two repair runs write
+    the marker of the stage they repair)."""
+    texts = render_prompts()
+    missing = [name for name in JOURNAL_PROMPTS
+               if "SELF-CHECK BEFORE THE MARKER" not in texts[name]
+               or f"--stage {name}" not in texts[name]]
+    check("high: the five journal prompts carry the self-check pre-flight",
+          not missing, f"missing: {missing}")
+    P = pipeline_module()
+    tmp = Path(tempfile.mkdtemp())
+    bad = []
+    for name in JOURNAL_PROMPTS:
+        sb = tmp / name
+        sb.mkdir()
+        marker_stage = {"concern_repair": "concerns",
+                        "response_repair": "response"}.get(name, name)
+        (sb / P.MARKER_FILE).write_text(json.dumps(
+            {"stage": marker_stage, "run_id": f"r1_{name}", "round": 1,
+             "status": "complete"}), encoding="utf-8")
+        _ok, errs, _warns = P.sandbox_selfcheck(sb, name, f"r1_{name}", 1)
+        problems = [e for e in errs
+                    if "unknown stage" in e or "marker stage mismatch" in e]
+        if problems:
+            bad.append(f"{name}: {problems[0]}")
+    check("the pre-flight recognizes the five journal stage kinds", not bad,
+          "; ".join(bad))
 
 
 def test_medium_profile_pages_the_elaborations() -> None:
@@ -311,10 +352,13 @@ def test_medium_matches_high_rules() -> None:
         sys.path.insert(0, str(HERE))
     import render_stage_prompts
     sb = _render_sandbox("profile_equiv_")
-    high = render_prompts()                       # the eleven `high` prompts
+    high = render_prompts()                       # the sixteen `high` prompts
     medium = render_stage_prompts.render_with_rules(WS, "medium", sandbox=sb)
     contract = P.MEDIUM_PROFILE_CONTRACT
     contract_lines = set(_rule_lines(contract))
+    # A prompt with nothing to page carries the documented INLINE variant, whose
+    # renumbered item is profile text too (not a rule the stage added).
+    contract_lines |= set(_rule_lines(getattr(P, "MEDIUM_PROFILE_CONTRACT_INLINE", "")))
     header_lines = set(_rule_lines(P.PROFILE_RULES_HEADER))
     problems, sequence_problems = [], []
     for name, entry in medium.items():
@@ -342,8 +386,12 @@ def test_medium_matches_high_rules() -> None:
         if titles != heads:
             problems.append(f"{name}: section order {titles[:3]} != {heads[:3]}")
         expanded = _expand_medium(med, rules, P)
-        if expanded.startswith(contract):
-            expanded = expanded[len(contract):]
+        # A prompt with NOTHING to page carries the documented inline-only
+        # variant of the medium contract; both are the profile's own text.
+        for _contract in (contract, getattr(P, "MEDIUM_PROFILE_CONTRACT_INLINE", contract)):
+            if expanded.startswith(_contract):
+                expanded = expanded[len(_contract):]
+                break
         if _rule_sequence(expanded) != _rule_sequence(h):
             sequence_problems.append(name)
     check("rule 12: every high rule line is carried by medium or its paged file",
@@ -573,6 +621,7 @@ def test_external_content_rule_everywhere() -> None:
 
 if __name__ == "__main__":
     test_high_profile_is_the_frozen_shell()
+    test_journal_prompts_carry_the_preflight()
     test_medium_profile_pages_the_elaborations()
     test_medium_matches_high_rules()
     test_external_content_rule_everywhere()

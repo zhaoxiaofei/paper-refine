@@ -108,6 +108,25 @@ export function containsPath(target, roots) {
   return isInside(realOrResolved(target), roots);
 }
 
+/** True when post-run cleanup may delete a stray file at `target`.
+ *
+ * A final-component SYMLINK may always be unlinked: removing the link never
+ * touches its target. A REGULAR file is deletable only when its parent still
+ * resolves inside `roots`: when a directory component was swapped for an
+ * outside symlink, `lstatSync(target).isFile()` is true for the OUTSIDE file
+ * and an unconditional `rmSync` destroys a file the tool refused to write
+ * (F010). `roots` unset keeps the historical cleanup behaviour.
+ */
+export function strayRemovalAllowed(target, roots) {
+  try {
+    if (lstatSync(target).isSymbolicLink()) return true;
+    if (!lstatSync(target).isFile()) return false;
+    return containsPath(path.dirname(target), roots);
+  } catch {
+    return false;
+  }
+}
+
 
 /** Re-resolve an EXACT path immediately before it is handed to the child.
  *

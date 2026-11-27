@@ -43,6 +43,11 @@ def check(name, cond, detail=""):
         FAILS.append(name)
 
 
+def skip(name: str, detail: str = "") -> None:
+    """A check that could not run: [skip], never a passing [ok] (F082)."""
+    print(f"[skip] {name}" + (f"  -- {detail}" if detail else ""))
+
+
 def scratch(prefix: str) -> Path:
     tmp = Path(tempfile.mkdtemp(prefix=prefix))
     TMPDIRS.append(tmp)
@@ -323,8 +328,7 @@ def test_docs_counts_and_cross_references():
             ref_name, listed = doc_path.name, named
             break
     if not listed:
-        check("the CLI reference's subcommand list: SKIPPED (no doc names a subcommand)",
-              True, "")
+        skip("the CLI reference's subcommand list (no doc names a subcommand)")
     else:
         missing = [c for c in commands if c not in listed]
         check(f"the CLI reference ({ref_name}) names every subcommand the parser offers",

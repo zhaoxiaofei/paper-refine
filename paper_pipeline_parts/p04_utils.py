@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 04/26 of the pipeline -- executed by the
+# Part 04/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -1047,8 +1047,13 @@ def hash_cache_stats() -> dict:
 def _root_lock_holder(root):
     """(pid, what) of the live process holding this root's lock, or None."""
     try:
-        info = read_json(Path(root) / LOCK_FILE, revive=False) or {}
+        info = read_json(Path(root) / LOCK_FILE, revive=False)
     except (OSError, TypeError, ValueError):
+        return None
+    if not isinstance(info, dict):
+        # A non-empty JSON list/scalar survives `or {}` and `.get` then crashed
+        # every command that consults the lock (F097). Treat it as a malformed
+        # lock: stale, not a live holder.
         return None
     pid = info.get("pid")
     if isinstance(pid, int) and pid_alive(pid):

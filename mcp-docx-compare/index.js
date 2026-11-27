@@ -15,6 +15,7 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as z from 'zod/v4';
 import { allowedRoots, containedSpawnPath, containsPath, realOrResolved,
+         strayRemovalAllowed,
          sameFile, stageContainedInput } from './containment.mjs';
 import { derivedOutput, inFlightKey } from './derived-output.mjs';
 
@@ -146,11 +147,12 @@ serveStdio(() => {
           };
         }
       }
-      // An output that IS an input would be deleted by the script's
-      // stale-output cleanup before Word reads it; refuse it here too, so the
-      // caller gets a clear reason instead of a mysterious COM failure. The
-      // comparison is made on the REAL paths: a symlinked alias of the input
-      // names the same file the cleanup would delete.
+      // An output that IS an input would replace that input when the script's
+      // unique temp is renamed into place; refuse it here too, so the caller
+      // gets a clear reason instead of a mysterious COM failure. (The script
+      // does not delete the destination up front: it renders to a unique temp
+      // and renames on success.) The comparison is made on the REAL paths: a
+      // symlinked alias of the input names the same file the rename replaces.
       // Identity, not spelling: on a case-sensitive filesystem `report.docx`
       // and `Report.docx` are two files, and folding case refused the latter
       // as "an input file" (F053). sameFile() compares device+inode when both
@@ -248,6 +250,9 @@ serveStdio(() => {
       // revised files that share a basename derive the same redline path, and
       // two concurrent calls for the same input pair must still serialize.
       const key = inFlightKey(realOriginal, realRevised, spawnOutput);
+      // See the converter: only a destination that did not exist before the
+      // child ran may be removed as its stray write (F046/F010).
+      const strayAbsentBeforeRun = !(spawnOutput && existsSync(spawnOutput));
       const previous = inFlight.get(key) ?? Promise.resolve();
       const next = previous.catch(() => {}).then(run);
       inFlight.set(key, next);
@@ -267,12 +272,17 @@ serveStdio(() => {
           // path itself (a symlink removal never touches its target), and only
           // remove a regular file when its directory is inside the roots (F022).
           try {
-            if (lstatSync(spawnOutput).isSymbolicLink()) {
+            if (strayRemovalAllowed(spawnOutput, ALLOWED_ROOTS)
+                && lstatSync(spawnOutput).isSymbolicLink()) {
               unlinkSync(spawnOutput);
-            } else if (lstatSync(spawnOutput).isFile()) {
+            } else if (strayRemovalAllowed(spawnOutput, ALLOWED_ROOTS)
+                       || (strayAbsentBeforeRun && lstatSync(spawnOutput).isFile())) {
               // The child wrote this stray file during THIS call; removing a
               // regular stray path is cleanup. A symlink is unlinked above so
-              // its outside TARGET is never deleted (F022).
+              // its outside TARGET is never deleted (F022). The parent must
+              // still resolve inside the roots: when a directory component was
+              // swapped for an outside symlink, the final component is a
+              // regular OUTSIDE file and rmSync would destroy it (F010).
               rmSync(spawnOutput, { force: true });
             }
           } catch { /* already gone */ }

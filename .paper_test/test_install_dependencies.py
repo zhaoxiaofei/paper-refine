@@ -71,7 +71,8 @@ def main() -> int:
     dry = subprocess.run([str(script), "--dry-run", "--no-conda", "--no-node",
                           "--no-external"], capture_output=True, text=True, timeout=60)
     check("a minimal --dry-run succeeds and changes nothing",
-          dry.returncode == 0 and "install complete" in (dry.stdout + dry.stderr),
+          dry.returncode == 0 and "dry run complete" in (dry.stdout + dry.stderr)
+          and "install complete" not in (dry.stdout + dry.stderr),
           (dry.stdout + dry.stderr)[-300:])
     after = deps_env.read_bytes() if deps_env.is_file() else None
     check("the dry-run does not create or modify deps.env", after == before)
@@ -93,7 +94,8 @@ def main() -> int:
         check("a fresh-clone --dry-run plans the submodule update and succeeds",
               fresh.returncode == 0
               and "submodule update --init --recursive" in fresh_out
-              and "install complete" in fresh_out,
+              and "dry run complete" in fresh_out
+              and "install complete" not in fresh_out,
               fresh_out[-300:])
 
     prompt_sources = [WS / "paper_pipeline_parts" / "p02_journal_modes.py",

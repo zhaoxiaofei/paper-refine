@@ -37,6 +37,11 @@ def check(name: str, cond, detail: str = "") -> None:
         FAILS.append(name)
 
 
+def skip(name: str, detail: str = "") -> None:
+    """A check that could not run: [skip], never a passing [ok] (F082)."""
+    print(f"[skip] {name}" + (f"  -- {detail}" if detail else ""))
+
+
 def mk(root: Path, files: dict) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     for name, text in files.items():
@@ -188,7 +193,7 @@ def main() -> int:
                                             insertions_allowed=True,
                                             deletions_allowed=False)))
     else:
-        check("F28 python-docx unavailable (skipped)", True)
+        skip("F28 hidden DOCX text is counted as a deletion (python-docx unavailable)")
 
     # R01 -- hiding the paragraph MARK does not hide the paragraph's run text.
     if Document is not None:
@@ -214,7 +219,7 @@ def main() -> int:
                                             insertions_allowed=True,
                                             deletions_allowed=False)))
     else:
-        check("R01 python-docx unavailable (skipped)", True)
+        skip("R01 the paragraph MARK does not hide run text (python-docx unavailable)")
 
     # F29 -- an abbreviation is not a sentence boundary.
     b, cnd = pair("f29",

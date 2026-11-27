@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 17/26 of the pipeline -- executed by the
+# Part 17/27 of the pipeline -- executed by the
 # loader, in order, in the loader's own module globals. Imports and names
 # defined by earlier parts are therefore in scope exactly as they were in
 # the single-file source.
@@ -576,13 +576,20 @@ def build_parser() -> argparse.ArgumentParser:
                    default=argparse.SUPPRESS, metavar="TIER",
                    help=_shared.fail_tier_help()
                    + " Accepted before or after the command name.")
+    # The parser-wide default lives HERE (a `set_defaults` value the subparser's
+    # SUPPRESS cannot overwrite), so a bare parse carries CRITICAL while either
+    # explicit placement still wins.
+    p.set_defaults(fail_tier=_shared.DEFAULT_FAIL_TIER)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--root", default=DEFAULTS["root"],
                         help=f"pipeline root directory (default: {DEFAULTS['root']})")
+    # SUPPRESS, not the default: a subparser default is written into the SAME
+    # namespace and overwrote an explicit value given BEFORE the command name
+    # (F090). main() applies the default after parsing, so both placements work.
     common.add_argument("--fail-tier", type=recovery_fail_tier_arg,
-                        default=_shared.DEFAULT_FAIL_TIER, metavar="TIER",
+                        default=argparse.SUPPRESS, metavar="TIER",
                         help=_shared.fail_tier_help())
     common.add_argument("--strict-venue", action="store_true",
                         help="refuse to run when the root's venue/journal configuration is "
@@ -1718,6 +1725,10 @@ def main() -> None:
     # and keeps its datetime prefix (year-month-day hour-minute-second) so a long
     # run's log is readable.
     args = parser.parse_args()
+    # Neither placement supplied one: apply the documented always-continue
+    # default. (A subparser default would have overwritten the root value.)
+    if not hasattr(args, "fail_tier"):
+        args.fail_tier = _shared.DEFAULT_FAIL_TIER
     install_timestamped_streams()
     # Agent sessions are started in their own process session (so a timeout can
     # kill their descendants). That also means a terminal Ctrl-C does not reach

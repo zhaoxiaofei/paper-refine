@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# Part 24/26 of the pipeline -- executed by the loader, in order, in the
+# Part 24/27 of the pipeline -- executed by the loader, in order, in the
 # loader's own module globals. Imports and names defined by earlier parts are
 # therefore in scope exactly as they were in the single-file source.
 from __future__ import annotations
@@ -111,9 +111,16 @@ def _concern_source_rid(ctx: Ctx, r: int) -> str:
     """
     if journal_is_scoped(ctx):
         _rep = ctx.run(rid_concern_repair(r))
-        return (rid_concern_repair(r)
-                if _rep is not None and _rep.get("status") == "done"
-                else rid_concerns(r))
+        if _rep is not None and _rep.get("status") == "done":
+            return rid_concern_repair(r)
+        if _rep is not None and concern_audit_of(ctx) == "on":
+            # An EXISTING failed/pending repair is mandatory when the policy is
+            # on: it must BLOCK the downstream stage instead of silently
+            # falling back to the unaudited generated ledger (F018). A MISSING
+            # run keeps the legacy fallback (a pre-concern-audit root/fixture
+            # never planned one).
+            return rid_concern_repair(r)
+        return rid_concerns(r)
     return rid_feedback(r)
 
 
@@ -357,9 +364,9 @@ def _defect_problems(defects, allowed, rel: str, cid: str,
 # CONCERN AUDIT
 # ---------------------------------------------------------------------
 
-def concern_audit_prompt(ctx: Ctx, sb: Path, r: int) -> str:
+def concern_audit_prompt(ctx: Ctx, sb: Path, r: int, execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     ids = _concern_ids(sb)
-    return CONTRADICTION_RULE + f"""CONCERN AUDIT — independent check of the generated concern ledger
+    return page_stage_prompt(sb, f"""CONCERN AUDIT — independent check of the generated concern ledger
 (round {int(r)}; read-only. You did NOT write this ledger.)
 
 Your sandbox:
@@ -449,8 +456,9 @@ write a repaired ledger, a finding list or a response letter here.
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concern_audit", run_id "{sb.name}",
 round {int(r)}, status "complete", confirmed N, defective N, dropped N) as the
-very LAST step.
-"""
+very LAST step, AFTER the pre-flight below.
+{selfcheck_block("concern_audit", sb.name, int(r), sb)}
+""", [], "concern_audit", execution_profile)
 
 
 def materialize_concern_audit(ctx: Ctx, r: int) -> dict:
@@ -476,7 +484,9 @@ def materialize_concern_audit(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt,
                           ensure_external_content_rule(
-                              concern_audit_prompt(ctx, sb, r) + note + shared_blocks()))
+                              concern_audit_prompt(ctx, sb, r,
+                                                    execution_profile=execution_profile_of(ctx))
+                              + note + shared_blocks()))
     rec = ctx.register(rid, "concern_audit", r, f"runs/{rid}",
                        upstream_run_id=rid_concerns(r))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -657,9 +667,9 @@ def postcheck_concern_audit(ctx: Ctx, rec: dict):
 # CONCERN REPAIR
 # ---------------------------------------------------------------------
 
-def concern_repair_prompt(ctx: Ctx, sb: Path, r: int) -> str:
+def concern_repair_prompt(ctx: Ctx, sb: Path, r: int, execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     ids = _concern_ids(sb)
-    return CONTRADICTION_RULE + f"""CONCERN REPAIR — apply the independent concern audit (one pass,
+    return page_stage_prompt(sb, f"""CONCERN REPAIR — apply the independent concern audit (one pass,
 round {int(r)}; you do NOT revise the manuscript)
 
 Your sandbox:
@@ -726,8 +736,9 @@ WRITE:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "concerns", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step (stage "concerns" is the
-deliverable's contract; this run is its repair).
-"""
+deliverable's contract; this run is its repair), AFTER the pre-flight below.
+{selfcheck_block("concern_repair", sb.name, int(r), sb)}
+""", [], "concern_repair", execution_profile)
 
 
 def materialize_concern_repair(ctx: Ctx, r: int) -> dict:
@@ -757,7 +768,9 @@ def materialize_concern_repair(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt,
                           ensure_external_content_rule(
-                              concern_repair_prompt(ctx, sb, r) + note + shared_blocks()))
+                              concern_repair_prompt(ctx, sb, r,
+                                                     execution_profile=execution_profile_of(ctx))
+                              + note + shared_blocks()))
     rec = ctx.register(rid, "concern_repair", r, f"runs/{rid}",
                        upstream_run_id=rid_concern_audit(r))
     # The repaired ledger records the same feedback-file list as the generated
@@ -780,6 +793,52 @@ def materialize_concern_repair(ctx: Ctx, r: int) -> dict:
     return rec
 
 
+def _repair_counts_problems(doc, rows, rel: str, keys) -> list:
+    """The repair ledger's `counts` summary must describe its own rows.
+
+    The counts object is the human/decision summary a later session reads; it
+    used to be accepted absent, empty, negative or of the wrong type (F054).
+    `input` is the row count and every action/verdict count is derived from the
+    rows; `kept` is the remainder (rows left in place, a rejected row included).
+    """
+    errs = []
+    counts = doc.get("counts")
+    if not isinstance(counts, dict):
+        return [f"{rel}: `counts` must be an object with {', '.join(keys)}"]
+    for _k in keys:
+        if _k not in counts:
+            errs.append(f"{rel}: `counts.{_k}` is missing")
+            continue
+        _v = counts.get(_k)
+        if type(_v) is not int or _v < 0:
+            errs.append(f"{rel}: `counts.{_k}` must be a non-negative integer, got {_v!r}")
+    if errs:
+        return errs
+    want = {"input": len(rows)}
+    for _k in keys:
+        if _k in ("input", "kept"):
+            continue
+        if _k == "rejected":
+            want[_k] = sum(1 for r in rows if str(r.get("verdict") or "") == "rejected")
+        else:
+            want[_k] = sum(1 for r in rows if str(r.get("action") or "") == _k)
+    for _k in keys:
+        if _k == "kept":
+            continue
+        if counts.get(_k) != want.get(_k, 0):
+            errs.append(f"{rel}: `counts.{_k}` is {counts.get(_k)!r} but the rows say "
+                        f"{want.get(_k, 0)}")
+    if "kept" in keys:
+        # "kept" is the one ambiguous summary term (a rejected row may or may not
+        # be counted as kept); hold it to the remaining-row bound instead of one
+        # interpretation, so a legitimate ledger is not rejected (F054).
+        _remaining = len(rows) - sum(want.get(k, 0) for k in ("corrected", "merged", "dropped"))
+        if counts.get("kept") > _remaining:
+            errs.append(f"{rel}: `counts.kept` is {counts.get('kept')!r} but only "
+                        f"{_remaining} row(s) remain after corrected/merged/dropped")
+    return errs
+
+
 def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows) -> list:
     errs = []
     path = sb / CONCERN_REPAIR_LEDGER_REL
@@ -793,6 +852,9 @@ def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows
     audit_rows = _rows_by_id((audit or {}).get("rows") if isinstance(audit, dict) else [])
     orig = _rows_by_id(original_rows)
     new = _rows_by_id(repaired_rows)
+    errs.extend(_repair_counts_problems(
+        doc, rows, CONCERN_REPAIR_LEDGER_REL,
+        ("input", "kept", "corrected", "merged", "dropped", "rejected")))
     got = [str(r.get("id") or "") for r in rows]
     want = list(audit_rows)
     dups = sorted({x for x in got if x and got.count(x) > 1})
@@ -829,6 +891,11 @@ def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows
             errs.append(f"repair row {cid!r}: a no-change/kept row must be byte-identical to "
                         f"the generated concern")
         av = str((audit_rows.get(cid) or {}).get("verdict") or "")
+        _recorded_av = str(row.get("audit_verdict") or "").strip()
+        if cid in audit_rows and _recorded_av != av:
+            # The repair's record of what the audit said must be true (F048).
+            errs.append(f"repair row {cid!r}: audit_verdict {_recorded_av!r} does not "
+                        f"match the audit's verdict {av!r}")
         if av == "dropped":
             if verdict == "confirmed":
                 if cid in new:
@@ -866,19 +933,34 @@ def concern_repair_ledger_problems(sb: Path, audit, original_rows, repaired_rows
             # change some byte: an unrelated summary edit left the defect in
             # place and still passed (F001).
             if av == "defective" and verdict == "confirmed" and action == "corrected":
-                _flat = "\n".join(str(v) for v in (new.get(cid) or {}).values()
-                                  if isinstance(v, str))
+                # Bind the correction to the FIELD that carries the audited wrong
+                # value. Flattening the whole row refused a legitimate correction
+                # whenever the same substring also occurred in an unrelated field
+                # (e.g. the source filename "editor2.txt" for wrong "2"), even
+                # though the corrected field no longer carried it (F028).
+                _orig_row = orig.get(cid) or {}
+                _new_row = new.get(cid) or {}
                 for _d in _defs:
                     _wrong = str(_d.get("wrong") or "").strip()
                     _correct = str(_d.get("correct") or "").strip()
                     if not (_wrong and _correct) or _wrong == _correct:
                         continue
-                    if _correct not in _flat or _wrong in _flat:
+                    _applied = False
+                    for _key in set(_orig_row) | set(_new_row):
+                        _before = _orig_row.get(_key)
+                        _after = _new_row.get(_key)
+                        if not isinstance(_before, str) or not isinstance(_after, str):
+                            continue
+                        if _wrong in _before and _correct in _after \
+                                and _wrong not in _after:
+                            _applied = True
+                            break
+                    if not _applied:
                         errs.append(
                             f"repair row {cid!r}: the audited replacement {_correct!r} "
-                            f"is not applied (the wrong value {_wrong!r} is still "
-                            f"present or the replacement is absent); bind the correction "
-                            f"to the audit's wrong/correct values")
+                            f"is not applied in any field that carried the wrong value "
+                            f"{_wrong!r}; bind the correction to the audit's "
+                            f"wrong/correct values")
                         break
             _dups = [d for d in _defs if str(d.get("type")) == "duplicate"]
             if _dups and verdict == "confirmed" and action != "merged":
@@ -930,6 +1012,28 @@ def postcheck_concern_repair(ctx: Ctx, rec: dict):
         errs.append("the concern-repair postcheck cannot find the generated ledger or the "
                     "audit it consumed")
     else:
+        # The repair's provenance must be checked against the ledger/finding
+        # list it says it started from: a later rebuild of the concerns run
+        # could otherwise be silently paired with this repair (F087).
+        _source = rec.get("concern_repair_source") or {}
+        if not isinstance(_source, dict) or not _source:
+            warns.append("this concern repair records no `concern_repair_source`; its "
+                         "source digests cannot be verified")
+        else:
+            try:
+                _cur_source = {
+                    "concerns": hash_manifest(ctx.sandbox_of(con_rec) / "concerns"),
+                    "guided_review": hash_manifest(ctx.sandbox_of(con_rec)
+                                                   / GUIDED_REVIEW_DIR),
+                }
+            except (OSError, ValueError) as _e:
+                _cur_source = None
+                errs.append(f"cannot re-hash the concern repair's source runs: {_e}")
+            if _cur_source is not None and _cur_source != _source:
+                errs.append(
+                    "the concern repair's recorded source digests do not match the "
+                    "current concerns/guided_review bytes: the repair was built from a "
+                    "different ledger generation and cannot be accepted")
         original = journal_concern_rows(ctx.sandbox_of(con_rec))
         audit = read_json(ctx.sandbox_of(aud_rec) / CONCERN_AUDIT_JSON_REL,
                           revive=False, lenient=True)
@@ -982,11 +1086,11 @@ def attach_response_plan(ctx, r: int, sb: Path, rec: dict) -> None:
 # RESPONSE DRAFT (written BEFORE the manuscript revision)
 # ---------------------------------------------------------------------
 
-def response_draft_prompt(ctx: Ctx, sb: Path, r: int) -> str:
+def response_draft_prompt(ctx: Ctx, sb: Path, r: int, execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     ledger = journal_concern_ledger(_journal_concern_source(ctx, r))
     ids = [str(c.get("id") or "") for c in (ledger.get("concerns") or [])
            if isinstance(c, dict)]
-    return CONTRADICTION_RULE + f"""POINT-BY-POINT RESPONSE — DRAFT PLAN (written BEFORE the manuscript is revised)
+    return page_stage_prompt(sb, f"""POINT-BY-POINT RESPONSE — DRAFT PLAN (written BEFORE the manuscript is revised)
 
 Your sandbox:
   base/                    the manuscript the concerns are about (read-only)
@@ -1038,8 +1142,9 @@ RULES:
 
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response_draft", run_id "{sb.name}",
-round {int(r)}, status "complete") as the very LAST step.
-"""
+round {int(r)}, status "complete") as the very LAST step, AFTER the pre-flight below.
+{selfcheck_block("response_draft", sb.name, int(r), sb)}
+""", [], "response_draft", execution_profile)
 
 
 def materialize_response_draft(ctx: Ctx, r: int) -> dict:
@@ -1062,7 +1167,9 @@ def materialize_response_draft(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt,
                           ensure_external_content_rule(
-                              response_draft_prompt(ctx, sb, r) + note + shared_blocks()))
+                              response_draft_prompt(ctx, sb, r,
+                                                     execution_profile=execution_profile_of(ctx))
+                              + note + shared_blocks()))
     rec = ctx.register(rid, "response_draft", r, f"runs/{rid}",
                        upstream_run_id=_concern_source_rid(ctx, r))
     rec["inputs_manifest"] = {"base": hash_manifest(sb / "base"),
@@ -1222,11 +1329,11 @@ def postcheck_response_draft(ctx: Ctx, rec: dict):
 # RESPONSE AUDIT
 # ---------------------------------------------------------------------
 
-def response_audit_prompt(ctx: Ctx, sb: Path, r: int, target_label: str) -> str:
+def response_audit_prompt(ctx: Ctx, sb: Path, r: int, target_label: str, execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     ledger = journal_concern_ledger(_journal_concern_source(ctx, r))
     ids = [str(c.get("id") or "") for c in (ledger.get("concerns") or [])
            if isinstance(c, dict)]
-    return CONTRADICTION_RULE + f"""RESPONSE AUDIT — independent check of the response-to-reviewers
+    return page_stage_prompt(sb, f"""RESPONSE AUDIT — independent check of the response-to-reviewers
 deliverable (round {int(r)}; read-only. You did NOT write the letter.)
 
 Your sandbox:
@@ -1307,8 +1414,10 @@ write a letter, a map or a manuscript change.
 
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response_audit", run_id "{sb.name}",
-round {int(r)}, status "complete", confirmed N, defective N) as the very LAST step.
-"""
+round {int(r)}, status "complete", confirmed N, defective N) as the very LAST step,
+AFTER the pre-flight below.
+{selfcheck_block("response_audit", sb.name, int(r), sb)}
+""", [], "response_audit", execution_profile)
 
 
 def materialize_response_audit(ctx: Ctx, r: int) -> dict:
@@ -1329,10 +1438,14 @@ def materialize_response_audit(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt,
                           ensure_external_content_rule(
-                              response_audit_prompt(ctx, sb, r, "the final package")
+                              response_audit_prompt(ctx, sb, r, "the final package",
+                                                   execution_profile=execution_profile_of(ctx))
                               + note + shared_blocks()))
     rec = ctx.register(rid, "response_audit", r, f"runs/{rid}",
                        upstream_run_id=rid_response(r))
+    # Bind the done record to the response BYTES it audited: a re-authored
+    # letter must be re-audited, not served from this sandbox (F085).
+    rec["response_corpus_digest"] = hash_manifest(sb / "response")
     rec["inputs_manifest"] = {}
     for name in ("target", "previous_package", "feedback", "response"):
         if (sb / name).is_dir():
@@ -1452,11 +1565,11 @@ def postcheck_response_audit(ctx: Ctx, rec: dict):
 # RESPONSE REPAIR
 # ---------------------------------------------------------------------
 
-def response_repair_prompt(ctx: Ctx, sb: Path, r: int, target_label: str) -> str:
+def response_repair_prompt(ctx: Ctx, sb: Path, r: int, target_label: str, execution_profile: str = EXECUTION_PROFILE_DEFAULT) -> str:
     ledger = journal_concern_ledger(_journal_concern_source(ctx, r))
     ids = [str(c.get("id") or "") for c in (ledger.get("concerns") or [])
            if isinstance(c, dict)]
-    return CONTRADICTION_RULE + f"""RESPONSE REPAIR — apply the independent response audit (one pass,
+    return page_stage_prompt(sb, f"""RESPONSE REPAIR — apply the independent response audit (one pass,
 round {int(r)}; you do NOT edit the manuscript)
 
 Your sandbox:
@@ -1522,8 +1635,9 @@ WRITE:
 {marker_root_rule()}
 Write `_pipeline_done.json` (JSON: stage "response", run_id "{sb.name}",
 round {int(r)}, status "complete") as the very LAST step (stage "response" is the
-deliverable's contract; this run is its repair).
-"""
+deliverable's contract; this run is its repair), AFTER the pre-flight below.
+{selfcheck_block("response_repair", sb.name, int(r), sb)}
+""", [], "response_repair", execution_profile)
 
 
 def materialize_response_repair(ctx: Ctx, r: int) -> dict:
@@ -1549,10 +1663,13 @@ def materialize_response_repair(ctx: Ctx, r: int) -> dict:
         _copy_session_tools(sb)
         write_text_atomic(prompt,
                           ensure_external_content_rule(
-                              response_repair_prompt(ctx, sb, r, "the final package")
+                              response_repair_prompt(ctx, sb, r, "the final package",
+                                                    execution_profile=execution_profile_of(ctx))
                               + note + shared_blocks()))
     rec = ctx.register(rid, "response_repair", r, f"runs/{rid}",
                        upstream_run_id=rid_response_audit(r))
+    # Bind the repaired bytes to the response corpus this pass consumed (F085).
+    rec["response_corpus_digest"] = hash_manifest(sb / "response")
     rec["inputs_manifest"] = {}
     for name in ("target", "previous_package", "feedback", "response_plan",
                  "response_audit", "response_prerepair"):
@@ -1575,6 +1692,9 @@ def response_repair_ledger_problems(sb: Path, audit, ledger_ids) -> list:
         return [f"{RESPONSE_REPAIR_LEDGER_REL} does not parse as a JSON object"]
     rows = [r for r in (doc.get("rows") or []) if isinstance(r, dict)]
     audit_rows = _rows_by_id((audit or {}).get("rows") if isinstance(audit, dict) else [])
+    errs.extend(_repair_counts_problems(
+        doc, rows, RESPONSE_REPAIR_LEDGER_REL,
+        ("input", "kept", "corrected", "rejected")))
     got = [str(r.get("id") or "") for r in rows]
     want = list(audit_rows)
     dups = sorted({x for x in got if x and got.count(x) > 1})
@@ -1606,6 +1726,11 @@ def response_repair_ledger_problems(sb: Path, audit, ledger_ids) -> list:
         if cid not in ledger_ids:
             errs.append(f"response repair row {cid!r}: not a repaired concern id")
         av = str((audit_rows.get(cid) or {}).get("verdict") or "")
+        _recorded_av = str(row.get("audit_verdict") or "").strip()
+        if cid in audit_rows and _recorded_av != av:
+            # The repair's record of what the audit said must be true (F048).
+            errs.append(f"response repair row {cid!r}: audit_verdict {_recorded_av!r} "
+                        f"does not match the audit's verdict {av!r}")
         if verdict == "rejected" and action == "corrected":
             errs.append(f"response repair row {cid!r}: a rejected audit row cannot also be "
                         f"corrected")
@@ -1811,15 +1936,33 @@ def run_response_deliverable_chain(ctx, r: int, response_dir: Path, ph: dict):
     that ships is the repaired one. `ph` is the run_phase keyword payload the
     caller already built.
     """
+    try:
+        _response_digest = hash_manifest(response_dir / "response")
+    except (OSError, ValueError):
+        _response_digest = None
     for _rid, _mat, _label in (
             (rid_response_audit(r),
              (lambda c: materialize_response_audit(c, r)), "journal response audit"),
             (rid_response_repair(r),
              (lambda c: materialize_response_repair(c, r)), "journal response repair")):
         _rec = ctx.run(_rid)
-        if _rec is not None and _rec.get("status") == "done":
+        if (_rec is not None and _rec.get("status") == "done"
+                and _response_digest is not None
+                and _rec.get("response_corpus_digest") == _response_digest):
             continue
-        _mat(ctx)
+        if _rec is not None:
+            # A done record that audited DIFFERENT response bytes (or a partial
+            # record) must be rebuilt from the current response, never reused:
+            # the previous chain shipped the stale repaired letter (F085).
+            rebuild_sandbox(ctx, _rec)
+            # rebuild_sandbox materializes a FRESH sandbox but deliberately does
+            # not touch the record's status. A `done` record would therefore be
+            # skipped by run_phase below, so the rebuilt sandbox would never be
+            # audited/repaired and the chain would still report success (F085).
+            # The retry/stale paths reset status the same way after a rebuild.
+            _rec["status"] = "pending"
+        else:
+            _mat(ctx)
         ok, paused = run_phase(ctx, [_rid], label=_label, **ph)
         if not ok:
             return response_dir, False, paused
@@ -1833,6 +1976,26 @@ def run_response_deliverable_chain(ctx, r: int, response_dir: Path, ph: dict):
 # REGISTRATION
 # ---------------------------------------------------------------------
 
+# The five journal audit/repair/draft runs are ordinary stages too: the
+# pre-flight (`sandbox_selfcheck`) and the misplaced-deliverable rescue read
+# this table, so their required/expected deliverables must be listed here.
+STAGE_DELIVERABLES.update({
+    "concern_audit": {
+        "required": (CONCERN_AUDIT_JSON_REL, CONCERN_AUDIT_UNRESOLVED_REL),
+        "expected": (CONCERN_AUDIT_MD_REL, CONCERN_AUDIT_COVERAGE_REL)},
+    "concern_repair": {
+        "required": (CONCERN_REPAIR_LEDGER_REL,),
+        "expected": (CONCERN_REPAIR_LOG_REL,)},
+    "response_draft": {
+        "required": (JOURNAL_RESPONSE_MD_REL, JOURNAL_RESPONSE_MAP_REL),
+        "expected": ()},
+    "response_audit": {
+        "required": (RESPONSE_AUDIT_JSON_REL, RESPONSE_AUDIT_UNRESOLVED_REL),
+        "expected": (RESPONSE_AUDIT_MD_REL, RESPONSE_AUDIT_COVERAGE_REL)},
+    "response_repair": {
+        "required": (RESPONSE_REPAIR_LEDGER_REL,),
+        "expected": (RESPONSE_REPAIR_LOG_REL,)},
+})
 POSTCHECK_HANDLERS.update({
     "response_draft": postcheck_response_draft,
     "concern_audit": postcheck_concern_audit,
